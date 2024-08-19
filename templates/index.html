@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Playlist Tracks</title>
+</head>
+<body>
+    <h1>Playlists and Tracks</h1>
+    {% for playlist, tracks in data.items() %}
+        <h2>{{ playlist }}</h2>
+        <table border="1">
+            <thead>
+                <tr>
+                    <th>Track ID</th>
+                    <th>Track Name</th>
+                    <th>Artists</th>
+                    <th>Album</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for track in tracks %}
+                <tr>
+                    <td>{{ track['id'] }}</td>
+                    <td>{{ track['name'] }}</td>
+                    <td>{{ track['artists'] }}</td>
+                    <td>{{ track['album'] }}</td>
+                    <td>
+                        {% if track['downloaded'] == 1 %}
+                            Downloaded
+                        {% else %}
+                            Not Downloaded
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% endfor %}
+</body>
+</html>

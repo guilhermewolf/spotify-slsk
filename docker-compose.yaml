@@ -7,4 +7,6 @@ services:
       - .env  # Load environment variables from .env file
     volumes:
       - ./data:/app/data
+    ports:
+      - "5110:5110"
     #restart: unless-stopped
