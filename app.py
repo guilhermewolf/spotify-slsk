@@ -3,6 +3,7 @@ from spotipy.oauth2 import SpotifyClientCredentials
 import os
 import logging
 import re
+import subprocess
 from db import create_connection, create_table, insert_track, fetch_all_tracks
 from log_config import setup_logging
 from timing_utils import sleep_interval
@@ -12,6 +13,30 @@ def get_playlist_id(playlist_url):
 
 def sanitize_table_name(name):
     return re.sub(r'\W+', '_', name)
+
+def download_playlist(playlist_url, playlist_name, client_id, client_secret, sldl_user, sldl_pass):
+    download_path = f"/app/data/downloads/{playlist_name}"
+    
+    os.makedirs(download_path, exist_ok=True)
+
+    command = [
+        "sldl", playlist_url,
+        "--username", sldl_user,
+        "--password", sldl_pass,
+        "--spotify-id", client_id,
+        "--spotify-secret", client_secret,
+        "--format", "mp3",
+        "--min-bitrate", "320",
+        "--path", download_path,
+        "--skip-existing",
+    ]
+    
+    try:
+        subprocess.run(command, check=True)
+        logging.info(f"Started download for playlist: {playlist_url} into folder: {download_path}")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Failed to start download for playlist: {playlist_url} with error: {e}")
+
 
 def fetch_and_compare_tracks(conn, playlist_id, table_name, sp):
     results = sp.playlist_tracks(playlist_id)
@@ -29,6 +54,8 @@ def fetch_and_compare_tracks(conn, playlist_id, table_name, sp):
                           track['album']['name'])
             insert_track(conn, table_name, track_data)
             logging.info(f"New Song found in {table_name}: {track['name']} by {', '.join([artist['name'] for artist in track['artists']])} from the album {track['album']['name']}")
+            playlist_url = sp.playlist(playlist_id)['external_urls']['spotify']
+            download_playlist(playlist_url, table_name, os.getenv('SPOTIPY_CLIENT_ID'), os.getenv('SPOTIPY_CLIENT_SECRET'), os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'))
 
 def main():
     setup_logging()

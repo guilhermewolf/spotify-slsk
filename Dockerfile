@@ -8,14 +8,28 @@ ENV PYTHONUNBUFFERED=1
 # Set up the working directory
 WORKDIR /app
 
-# Create the data directory and ensure it's writable
-RUN mkdir -p /app/data && chmod -R 777 /app/data
+# Install dependencies required for extracting zip files and building .NET applications
+RUN apt-get update && apt-get install -y \
+    unzip \
+    wget \
+    curl \
+    git \
+    sudo \
+    libicu-dev \
+    zip
 
-# Copy the requirements file and install dependencies
+# Download slsk-batchdl
+RUN wget https://github.com/fiso64/slsk-batchdl/releases/download/v2.2.7/slsk-batchdl_linux-x64.zip \
+    && unzip slsk-batchdl_linux-x64.zip \
+    && rm slsk-batchdl_linux-x64.zip
+# Move the compiled binary to /usr/local/bin
+RUN find /app/ -type f -name 'sldl' -exec cp {} /usr/local/bin/sldl \; \
+    && chmod +x /usr/local/bin/sldl
+
+# Set up the working directory for the main application
+WORKDIR /app
 COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy the entire app directory into the container
 COPY . /app/
 
 # Expose the port the app runs on (if applicable)
