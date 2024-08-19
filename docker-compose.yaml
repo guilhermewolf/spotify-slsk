@@ -1,0 +1,10 @@
+version: '3.8'
+
+services:
+  spotify-slsk:
+    build: .
+    env_file:
+      - .env  # Load environment variables from .env file
+    volumes:
+      - ./data:/app/data
+    #restart: unless-stopped
