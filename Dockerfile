@@ -18,23 +18,12 @@ RUN apt-get update && apt-get install -y \
     libicu-dev \
     zip
 
-# Install .NET SDK
-RUN wget https://dot.net/v1/dotnet-install.sh -O dotnet-install.sh \
-    && chmod +x dotnet-install.sh \
-    && ./dotnet-install.sh --channel 6.0 --install-dir /usr/share/dotnet \
-    && ln -s /usr/share/dotnet/dotnet /usr/bin/dotnet
-
-# Clone the slsk-batchdl repository
-RUN git clone https://github.com/fiso64/slsk-batchdl.git /app/slsk-batchdl
-
-# Build the slsk-batchdl binary for macOS
-WORKDIR /app/slsk-batchdl
-RUN chmod +x publish.sh \
-    && sed -i 's/arm64/x64/g' publish.sh \
-    && sh publish.sh
-
+# Download slsk-batchdl
+RUN wget https://github.com/fiso64/slsk-batchdl/releases/download/v2.2.7/slsk-batchdl_linux-x64.zip \
+    && unzip slsk-batchdl_linux-x64.zip \
+    && rm slsk-batchdl_linux-x64.zip
 # Move the compiled binary to /usr/local/bin
-RUN find /app/slsk-batchdl -type f -name 'sldl' -exec cp {} /usr/local/bin/sldl \; \
+RUN find /app/ -type f -name 'sldl' -exec cp {} /usr/local/bin/sldl \; \
     && chmod +x /usr/local/bin/sldl
 
 # Set up the working directory for the main application

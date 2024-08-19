@@ -14,15 +14,19 @@ def get_playlist_id(playlist_url):
 def sanitize_table_name(name):
     return re.sub(r'\W+', '_', name)
 
-def download_playlist(playlist_url, playlist_name, client_id, client_secret):
+def download_playlist(playlist_url, playlist_name, client_id, client_secret, sldl_user, sldl_pass):
     download_path = f"/app/data/downloads/{playlist_name}"
     
     os.makedirs(download_path, exist_ok=True)
 
     command = [
         "sldl", playlist_url,
+        "--username", sldl_user,
+        "--password", sldl_pass,
         "--spotify-id", client_id,
         "--spotify-secret", client_secret,
+        "--format", "mp3",
+        "--min-bitrate", "320",
         "--path", download_path,
         "--skip-existing",
     ]
@@ -51,7 +55,7 @@ def fetch_and_compare_tracks(conn, playlist_id, table_name, sp):
             insert_track(conn, table_name, track_data)
             logging.info(f"New Song found in {table_name}: {track['name']} by {', '.join([artist['name'] for artist in track['artists']])} from the album {track['album']['name']}")
             playlist_url = sp.playlist(playlist_id)['external_urls']['spotify']
-            download_playlist(playlist_url, table_name, os.getenv('SPOTIPY_CLIENT_ID'), os.getenv('SPOTIPY_CLIENT_SECRET'))
+            download_playlist(playlist_url, table_name, os.getenv('SPOTIPY_CLIENT_ID'), os.getenv('SPOTIPY_CLIENT_SECRET'), os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'))
 
 def main():
     setup_logging()
