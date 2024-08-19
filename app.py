@@ -7,6 +7,7 @@ import subprocess
 from db import create_connection, create_table, insert_track, fetch_all_tracks
 from log_config import setup_logging
 from timing_utils import sleep_interval
+from metadata import process_downloaded_tracks
 
 def get_playlist_id(playlist_url):
     return playlist_url.split("playlist/")[1].split("?")[0]
@@ -56,6 +57,8 @@ def fetch_and_compare_tracks(conn, playlist_id, table_name, sp):
             logging.info(f"New Song found in {table_name}: {track['name']} by {', '.join([artist['name'] for artist in track['artists']])} from the album {track['album']['name']}")
             playlist_url = sp.playlist(playlist_id)['external_urls']['spotify']
             download_playlist(playlist_url, table_name, os.getenv('SPOTIPY_CLIENT_ID'), os.getenv('SPOTIPY_CLIENT_SECRET'), os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'))
+            process_downloaded_tracks(table_name)
+
 
 def main():
     setup_logging()
