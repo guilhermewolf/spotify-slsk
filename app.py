@@ -55,13 +55,13 @@ def fetch_and_compare_tracks(conn, playlist_id, table_name, sp):
             insert_track(conn, table_name, track_data)
             logging.info(f"New Song found in {table_name}: {track['name']} by {', '.join([artist['name'] for artist in track['artists']])} from the album {track['album']['name']}")
             playlist_url = sp.playlist(playlist_id)['external_urls']['spotify']
-            download_playlist(playlist_url, table_name, os.getenv('SPOTIPY_CLIENT_ID'), os.getenv('SPOTIPY_CLIENT_SECRET'), os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'))
+            download_playlist(playlist_url, table_name, os.getenv('SPOTIFY_CLIENT_ID'), os.getenv('SPOTIFY_CLIENT_SECRET'), os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'))
 
 def main():
     setup_logging()
 
-    SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
-    SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
+    SPOTIPY_CLIENT_ID = os.getenv('SPOTIFY_CLIENT_ID')
+    SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIFY_CLIENT_SECRET')
     playlist_urls = os.getenv('SPOTIFY_PLAYLIST_URLS').split(',')
 
     auth_manager = SpotifyClientCredentials()

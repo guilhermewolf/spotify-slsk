@@ -1,0 +1,16 @@
+---
+# Areas
+area/docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "docs/**/*"
+          - "README.md"
+area/github:
+  - changed-files:
+      - any-glob-to-any-file: ".github/**/*"
+area/python:
+  - changed-files:
+      - any-glob-to-any-file: "*.py,requirement.txt"
+area/docker:
+  - changed-files:
+      - any-glob-to-any-file: "Dockerfile"

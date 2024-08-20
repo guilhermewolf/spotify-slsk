@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  spotify-slsk:
+    build: .
+    env:
+      - SPOTIFY_CLIENT_ID=your-spotify-client-id
+      - SPOTIFY_CLIENT_SECRET=your-spotify-client-secret
+      - SPOTIFY_PLAYLIST_URLS="" #Comma separated list of Spotify playlist URLs
+      - SLDL_USER=your-slsk-username
+      - SLDL_PASS=your-slsk-password
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
