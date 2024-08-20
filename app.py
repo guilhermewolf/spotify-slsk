@@ -15,7 +15,7 @@ def sanitize_table_name(name):
     return re.sub(r'\W+', '_', name)
 
 def download_playlist(playlist_url, playlist_name, client_id, client_secret, sldl_user, sldl_pass):
-    download_path = f"/app/data/downloads/{playlist_name}"
+    download_path = f"/app/data/downloads/"
     
     os.makedirs(download_path, exist_ok=True)
 
