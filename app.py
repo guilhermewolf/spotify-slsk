@@ -27,7 +27,8 @@ def sanitize_table_name(name):
 def download_track(track_name, artist_name, client_id, client_secret, sldl_user, sldl_pass, download_path):
     os.makedirs(download_path, exist_ok=True)
 
-    search_query = f"{artist_name} - {track_name}"
+    search_query = f'title="{track_name}",artist="{artist_name}"'
+    
     command = [
         "sldl", search_query,
         "--username", sldl_user,
@@ -38,12 +39,12 @@ def download_track(track_name, artist_name, client_id, client_secret, sldl_user,
         "--skip-existing",
     ]
 
-    logging.info(f"Executing command: {' '.join(command)}")
     try:
         subprocess.run(command, check=True)
-        logging.info(f"Attempted download for track: {search_query} into folder: {download_path}")
+        logging.info(f"Attempted download for track: {artist_name} - {track_name} into folder: {download_path}")
     except subprocess.CalledProcessError as e:
-        logging.error(f"Failed to download track: {search_query} with error: {e}")
+        logging.error(f"Failed to download track: {artist_name} - {track_name} with error: {e}")
+
 
 def fetch_and_compare_tracks(conn, playlist_id, table_name, sp):
     logging.info(f"Fetching tracks for playlist ID: {playlist_id} into table: {table_name}")
