@@ -130,7 +130,7 @@ def update_download_status(conn, track_id, table_name, success=False, file_path=
         conn.rollback()
         logging.error(f"Error updating track status for {track_id} in {table_name}: {e}")
 
-def clean_up_untracked_files(conn, download_path):
+def clean_up_untracked_files(conn, download_path, table_name):
     tracked_files = set()
 
     for root, dirs, files in os.walk(download_path):
@@ -141,7 +141,7 @@ def clean_up_untracked_files(conn, download_path):
     
     # Fetch paths from database
     cursor = conn.cursor()
-    cursor.execute("SELECT path FROM {table_name} WHERE downloaded = 1")
+    cursor.execute(f"SELECT path FROM {table_name} WHERE downloaded = 1")
     db_files = {row[0] for row in cursor.fetchall()}
 
     # Delete files not in database
@@ -158,7 +158,7 @@ def startup_check(conn, playlist_name):
     process_downloaded_tracks(playlist_name, conn)
 
     # Clean up untracked files
-    clean_up_untracked_files(conn, download_path)
+    clean_up_untracked_files(conn, download_path, playlist_name)
 
     logging.info("Startup check complete.")
 
