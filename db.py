@@ -18,9 +18,9 @@ def create_table(conn, table_name):
                                         artists TEXT NOT NULL,
                                         album TEXT NOT NULL,
                                         downloaded INTEGER DEFAULT 0,
+                                        path TEXT,
                                         attempts INTEGER DEFAULT 0,
-                                        last_attempt DATETIME,
-                                        suspended_until DATETIME
+                                        suspended_until TEXT
                                     );"""
         cursor = conn.cursor()
         cursor.execute(sql_create_tracks_table)
@@ -31,6 +31,7 @@ def create_table(conn, table_name):
         logging.info(f"Index on {table_name}(id) created or already exists.")
     except sqlite3.Error as e:
         logging.error(f"Error creating table {table_name}: {e}")
+
 def insert_track(conn, table_name, track):
     sql = f''' INSERT OR IGNORE INTO {table_name}(id, name, artists, album)
               VALUES(?,?,?,?) '''

@@ -86,7 +86,7 @@ def find_closest_match(conn, playlist_name, title, artist):
     return best_match if best_score > 0.7 else None
 
 def process_downloaded_tracks(playlist_name, conn):
-    download_path = f"/app/data/downloads/"
+    download_path = f"/app/data/downloads/{playlist_name}"
     logging.info(f"Checking for downloaded tracks in {download_path}")
 
     for root, dirs, files in os.walk(download_path):
@@ -102,30 +102,65 @@ def process_downloaded_tracks(playlist_name, conn):
                     match = find_closest_match(conn, playlist_name, title, artist)
 
                     if match:
-                        update_download_status(conn, match[0], playlist_name, success=True)
+                        update_download_status(conn, match[0], playlist_name, success=True, file_path=file_path)
                     else:
                         logging.warning(f"Could not find track {title} by {artist} in the database.")
                 else:
                     logging.warning(f"Metadata incomplete or missing for file: {file_path}")
 
-def update_download_status(conn, track_id, table_name, success=False):
+
+def update_download_status(conn, track_id, table_name, success=False, file_path=None):
     cursor = conn.cursor()
     if success:
-        sql = f"UPDATE {table_name} SET downloaded = 1, attempts = 0, suspended_until = NULL WHERE id = ?"
+        sql = f"UPDATE {table_name} SET downloaded = 1, attempts = 0, suspended_until = NULL, path = ? WHERE id = ?"
+        params = (file_path, track_id)
     else:
         sql = f"UPDATE {table_name} SET attempts = attempts + 1, last_attempt = CURRENT_TIMESTAMP WHERE id = ?"
+        params = (track_id,)
         cursor.execute(f"SELECT attempts FROM {table_name} WHERE id = ?", (track_id,))
         attempts = cursor.fetchone()[0]
         if attempts >= 3:
             sql = f"UPDATE {table_name} SET suspended_until = datetime('now', '+2 days') WHERE id = ?"
 
     try:
-        cursor.execute(sql, (track_id,))
+        cursor.execute(sql, params)
         conn.commit()
         logging.info(f"Updated track {track_id} status in {table_name}.")
     except sqlite3.Error as e:
         conn.rollback()
         logging.error(f"Error updating track status for {track_id} in {table_name}: {e}")
+
+def clean_up_untracked_files(conn, download_path):
+    tracked_files = set()
+
+    for root, dirs, files in os.walk(download_path):
+        for file in files:
+            if file.endswith(".mp3"):
+                file_path = os.path.join(root, file)
+                tracked_files.add(file_path)
+    
+    # Fetch paths from database
+    cursor = conn.cursor()
+    cursor.execute("SELECT path FROM {table_name} WHERE downloaded = 1")
+    db_files = {row[0] for row in cursor.fetchall()}
+
+    # Delete files not in database
+    untracked_files = tracked_files - db_files
+    for file_path in untracked_files:
+        os.remove(file_path)
+        logging.info(f"Deleted untracked file: {file_path}")
+
+def startup_check(conn, playlist_name):
+    logging.info("Performing startup check...")
+    download_path = f"/app/data/downloads/{playlist_name}"
+    
+    # Process existing files on the filesystem
+    process_downloaded_tracks(playlist_name, conn)
+
+    # Clean up untracked files
+    clean_up_untracked_files(conn, download_path)
+
+    logging.info("Startup check complete.")
 
 def retry_suspended_downloads(conn, table_name):
     cursor = conn.cursor()
@@ -170,20 +205,23 @@ def main():
             playlist_name = sanitize_table_name(sp.playlist(playlist_id)['name'])
             create_table(conn, playlist_name)
 
+            # Perform startup check
+            startup_check(conn, playlist_name)
+
             new_tracks = fetch_and_compare_tracks(conn, playlist_id, playlist_name, sp)
 
             download_path = f"/app/data/downloads/{playlist_name}"
 
             for track in new_tracks:
                 track_name, artist_name = track[1], track[2]
-                download_track(track_name, artist_name, SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'), download_path)
+                download_track(track_name, artist_name, os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'), download_path)
 
             process_downloaded_tracks(playlist_name, conn)
 
             # Retry suspended downloads
             suspended_tracks = retry_suspended_downloads(conn, playlist_name)
             for track in suspended_tracks:
-                download_track(track[1], track[2], SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'), download_path)
+                download_track(track[1], track[2], os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'), download_path)
                 process_downloaded_tracks(playlist_name, conn)
 
         while True:
@@ -199,14 +237,14 @@ def main():
 
                 for track in new_tracks:
                     track_name, artist_name = track[1], track[2]
-                    download_track(track_name, artist_name, SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'), download_path)
+                    download_track(track_name, artist_name, os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'), download_path)
 
                 process_downloaded_tracks(playlist_name, conn)
 
                 # Retry suspended downloads
                 suspended_tracks = retry_suspended_downloads(conn, playlist_name)
                 for track in suspended_tracks:
-                    download_track(track[1], track[2], SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'), download_path)
+                    download_track(track[1], track[2], os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'), download_path)
                     process_downloaded_tracks(playlist_name, conn)
                     
             sleep_interval(5)
