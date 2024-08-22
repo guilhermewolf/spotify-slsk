@@ -9,6 +9,7 @@ from log_config import setup_logging
 from timing_utils import sleep_interval
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, TDRC
+import difflib
 
 def get_playlist_id(playlist_url):
     try:
@@ -65,6 +66,25 @@ def fetch_and_compare_tracks(conn, playlist_id, table_name, sp):
 
     return new_tracks
 
+def find_closest_match(conn, playlist_name, title, artist):
+    potential_matches = conn.execute(f"SELECT id, name, artists FROM {playlist_name}").fetchall()
+    
+    best_match = None
+    best_score = 0.0
+    
+    for match in potential_matches:
+        db_title, db_artist = match[1], match[2]
+        title_similarity = difflib.SequenceMatcher(None, title.lower(), db_title.lower()).ratio()
+        artist_similarity = difflib.SequenceMatcher(None, artist.lower(), db_artist.lower()).ratio()
+        
+        overall_similarity = (title_similarity + artist_similarity) / 2
+        
+        if overall_similarity > best_score:
+            best_score = overall_similarity
+            best_match = match
+    
+    return best_match if best_score > 0.7 else None
+
 def process_downloaded_tracks(playlist_name, conn):
     download_path = f"/app/data/downloads/"
     logging.info(f"Checking for downloaded tracks in {download_path}")
@@ -79,11 +99,10 @@ def process_downloaded_tracks(playlist_name, conn):
                 if title and artist:
                     logging.info(f"Extracted Metadata - Track: {title}, Artist: {artist}, Album: {album}")
 
-                    track_id = conn.execute(f"SELECT id FROM {playlist_name} WHERE name = ? AND artists = ?",
-                                            (title, artist)).fetchone()
+                    match = find_closest_match(conn, playlist_name, title, artist)
 
-                    if track_id:
-                        update_download_status(conn, track_id[0], playlist_name, success=True)
+                    if match:
+                        update_download_status(conn, match[0], playlist_name, success=True)
                     else:
                         logging.warning(f"Could not find track {title} by {artist} in the database.")
                 else:
@@ -124,6 +143,7 @@ def extract_metadata_from_file(file_path):
     except Exception as e:
         logging.error(f"Error reading metadata from {file_path}: {e}")
         return None, None, None
+
 def setup_spotify_client():
     auth_manager = SpotifyClientCredentials()
     sp = spotipy.Spotify(auth_manager=auth_manager)
