@@ -7,6 +7,7 @@ import subprocess
 import difflib
 import random
 import requests
+import time
 from db import create_connection, create_table, insert_track, fetch_all_tracks, update_download_status
 from log_config import setup_logging
 from timing_utils import sleep_interval
@@ -106,8 +107,6 @@ def process_downloaded_tracks(playlist_name, conn):
     download_path = f"/app/data/downloads/{playlist_name}"
     logging.info(f"Checking for downloaded tracks in {download_path}")
 
-    all_downloaded = True
-
     for root, dirs, files in os.walk(download_path):
         for file in files:
             if file.endswith(".mp3"):
@@ -125,12 +124,8 @@ def process_downloaded_tracks(playlist_name, conn):
                         update_download_status(conn, match[0], playlist_name, success=True, file_path=file_path)
                     else:
                         logging.warning(f"Could not find track {title} by {artist} in the database.")
-                        all_downloaded = False
                 else:
                     logging.warning(f"Metadata incomplete or missing for file: {file_path}")
-                    all_downloaded = False
-    if all_downloaded:
-        notify_playlist_complete(playlist_name)
 
 def update_download_status(conn, track_id, table_name, success=False, file_path=None):
     cursor = conn.cursor()
@@ -223,26 +218,27 @@ def setup_spotify_client():
     logging.info("Spotify client setup complete")
     return sp
 
-def notify_playlist_complete(playlist_name):
-    ntfy_url = os.getenv('NTFY_URL')
-    ntfy_topic = os.getenv('NTFY_TOPIC')
-
-    if not ntfy_url or not ntfy_topic:
-        logging.error("NTFY_URL or NTFY_TOPIC not set. Cannot send notifications.")
-        return
-
+def send_ntfy_notification(url, topic, message):
     try:
-        full_url = f"{ntfy_url}/{ntfy_topic}"
-        message = f"🎉 Playlist '{playlist_name}' is fully downloaded! 🎶 All tracks are now available. ✅"
-        response = requests.post(full_url, data=message.encode('utf-8'))
-
+        response = requests.post(f"{url}/{topic}", data=message)
         if response.status_code == 200:
-            logging.info(f"Notification sent successfully for playlist '{playlist_name}'.")
+            logging.info(f"Notification sent successfully: {message}")
         else:
-            logging.error(f"Failed to send notification. Status code: {response.status_code}")
-
+            logging.error(f"Failed to send notification: {response.status_code} {response.text}")
     except Exception as e:
-        logging.error(f"Error sending notification: {e}")
+        logging.error(f"Error while sending notification: {e}")
+
+def all_tracks_downloaded(conn, table_name):
+    cursor = conn.cursor()
+    cursor.execute(f"SELECT COUNT(*) FROM {table_name} WHERE downloaded = 0")
+    remaining_tracks = cursor.fetchone()[0]
+    
+    if remaining_tracks == 0:
+        logging.info(f"All tracks in playlist {table_name} have been downloaded.")
+        return True
+    else:
+        logging.info(f"{remaining_tracks} tracks in playlist {table_name} are still not downloaded.")
+        return False
 
 def main():
     setup_logging()
@@ -252,7 +248,11 @@ def main():
     SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
     SLDL_USER = os.getenv('SLDL_USER')
     SLDL_PASS = os.getenv('SLDL_PASS')
+    NTFY_URL = os.getenv('NTFY_URL')
+    NTFY_TOPIC = os.getenv('NTFY_TOPIC')
     playlist_urls = os.getenv('SPOTIFY_PLAYLIST_URLS').split(',')
+
+    send_ntfy_notification(NTFY_URL, NTFY_TOPIC, "Starting Spotify Playlist Downloader 🚀")
 
     sp = setup_spotify_client()
 
@@ -290,6 +290,10 @@ def main():
                 logging.info(f"Retrying download for suspended track: {track[1]} by {track[2]}")
                 download_track(track[1], track[2], SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SLDL_USER, SLDL_PASS, download_path)
                 process_downloaded_tracks(playlist_name, conn)
+            
+            # Check if all tracks are downloaded
+            if all_tracks_downloaded(conn, playlist_name):
+                send_ntfy_notification(NTFY_URL, NTFY_TOPIC, f"All tracks in {playlist_name} have been downloaded! 🎉")
 
         while True:
             logging.info("Starting new cycle of playlist checks")
@@ -318,6 +322,10 @@ def main():
                     logging.info(f"Retrying download for suspended track: {track[1]} by {track[2]}")
                     download_track(track[1], track[2], SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SLDL_USER, SLDL_PASS, download_path)
                     process_downloaded_tracks(playlist_name, conn)
+                
+                # Check if all tracks are downloaded
+                if all_tracks_downloaded(conn, playlist_name):
+                    send_ntfy_notification(NTFY_URL, NTFY_TOPIC, f"All tracks in {playlist_name} have been downloaded! 🎉")
                     
             sleep_interval(5)
     else:
