@@ -144,7 +144,7 @@ def update_download_status(conn, track_id, table_name, success=False, file_path=
         conn.rollback()
         logging.error(f"Error updating track status for {track_id} in {table_name}: {e}")
 
-def clean_up_untracked_files(conn, download_path):
+def clean_up_untracked_files(conn, download_path, table_name):
     logging.info(f"Cleaning up untracked files in {download_path}")
     tracked_files = set()
 
@@ -156,7 +156,7 @@ def clean_up_untracked_files(conn, download_path):
     
     # Fetch paths from database
     cursor = conn.cursor()
-    cursor.execute("SELECT path FROM {table_name} WHERE downloaded = 1")
+    cursor.execute(f"SELECT path FROM {table_name} WHERE downloaded = 1")
     db_files = {row[0] for row in cursor.fetchall()}
 
     # Delete files not in database
@@ -175,7 +175,7 @@ def startup_check(conn, playlist_name):
 
     # Clean up untracked files
     logging.info(f"Starting to clean up untracked files for playlist: {playlist_name}")
-    clean_up_untracked_files(conn, download_path)
+    clean_up_untracked_files(conn, download_path, playlist_name)
 
     logging.info(f"Startup check complete for playlist: {playlist_name}")
 
@@ -240,7 +240,7 @@ def main():
             for track in new_tracks:
                 track_name, artist_name = track[1], track[2]
                 logging.info(f"Attempting download for new track: {track_name} by {artist_name}")
-                download_track(track_name, artist_name, os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'), download_path)
+                download_track(track_name, artist_name, SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'), download_path)
 
             process_downloaded_tracks(playlist_name, conn)
 
@@ -248,7 +248,7 @@ def main():
             suspended_tracks = retry_suspended_downloads(conn, playlist_name)
             for track in suspended_tracks:
                 logging.info(f"Retrying download for suspended track: {track[1]} by {track[2]}")
-                download_track(track[1], track[2], os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'), download_path)
+                download_track(track[1], track[2], SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'), download_path)
                 process_downloaded_tracks(playlist_name, conn)
 
         while True:
@@ -268,7 +268,7 @@ def main():
                 for track in new_tracks:
                     track_name, artist_name = track[1], track[2]
                     logging.info(f"Attempting download for new track: {track_name} by {artist_name}")
-                    download_track(track_name, artist_name, os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'), download_path)
+                    download_track(track_name, artist_name, SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'), download_path)
 
                 process_downloaded_tracks(playlist_name, conn)
 
@@ -276,7 +276,7 @@ def main():
                 suspended_tracks = retry_suspended_downloads(conn, playlist_name)
                 for track in suspended_tracks:
                     logging.info(f"Retrying download for suspended track: {track[1]} by {track[2]}")
-                    download_track(track[1], track[2], os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'), download_path)
+                    download_track(track[1], track[2], SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'), download_path)
                     process_downloaded_tracks(playlist_name, conn)
                     
             sleep_interval(5)
