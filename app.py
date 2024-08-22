@@ -214,14 +214,14 @@ def main():
 
             for track in new_tracks:
                 track_name, artist_name = track[1], track[2]
-                download_track(track_name, artist_name, os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'), download_path)
+                download_track(track_name, artist_name, SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'), download_path)
 
             process_downloaded_tracks(playlist_name, conn)
 
             # Retry suspended downloads
             suspended_tracks = retry_suspended_downloads(conn, playlist_name)
             for track in suspended_tracks:
-                download_track(track[1], track[2], os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'), download_path)
+                download_track(track[1], track[2], SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'), download_path)
                 process_downloaded_tracks(playlist_name, conn)
 
         while True:
@@ -237,19 +237,20 @@ def main():
 
                 for track in new_tracks:
                     track_name, artist_name = track[1], track[2]
-                    download_track(track_name, artist_name, os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'), download_path)
+                    download_track(track_name, artist_name, SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'), download_path)
 
                 process_downloaded_tracks(playlist_name, conn)
 
                 # Retry suspended downloads
                 suspended_tracks = retry_suspended_downloads(conn, playlist_name)
                 for track in suspended_tracks:
-                    download_track(track[1], track[2], os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'), download_path)
+                    download_track(track[1], track[2], SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, os.getenv('SLDL_USER'), os.getenv('SLDL_PASS'), download_path)
                     process_downloaded_tracks(playlist_name, conn)
                     
             sleep_interval(5)
     else:
         logging.error("Failed to connect to the SQLite database.")
+
 
 if __name__ == "__main__":
     main()
