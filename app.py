@@ -9,12 +9,18 @@ import random
 import requests
 import time
 import shlex
+import asyncio
+from aioslsk.client import SoulSeekClient
+from aioslsk.settings import Settings, CredentialsSettings
 from db import create_connection, create_table, insert_track, fetch_all_tracks, update_download_status
 from log_config import setup_logging
 from utils import sleep_interval
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, TDRC
 from utils import sanitize_table_name
+
+SOUL_SEEK_USERNAME = os.getenv('SLDL_USER')
+SOUL_SEEK_PASSWORD = os.getenv('SLDL_PASS')
 
 
 def get_playlist_id(playlist_url):
@@ -30,34 +36,40 @@ def get_playlist_id(playlist_url):
 def sanitize_input(text):
     return re.sub(r'[^A-Za-z0-9 ]+', '', text)
 
-def download_track(track_name, artist_name, client_id, client_secret, sldl_user, sldl_pass, download_path):
+# Function to download the track
+async def download_track_async(track_name, artist_name, download_path):
     os.makedirs(download_path, exist_ok=True)
 
     # Clean track and artist names for the query
     cleaned_track_name = track_name.strip().replace('"', '').replace("'", "")
     cleaned_artist_name = artist_name.strip().replace('"', '').replace("'", "")
-    
-    # Use shlex.quote to properly handle special characters
-    search_query = f'title="{shlex.quote(cleaned_track_name)}",artist="{shlex.quote(cleaned_artist_name)}"'
-    
-    command = [
-        "sldl", search_query,
-        "--username", sldl_user,
-        "--password", sldl_pass,
-        "--format", "mp3",
-        "--min-bitrate", "320",
-        "--path", download_path,
-        "--skip-existing",
-    ]
 
-    try:
-        result = subprocess.run(command, check=True, capture_output=True, text=True)
-        logging.info(f"Attempted download for track: {cleaned_artist_name} - {cleaned_track_name} into folder: {download_path}")
-        logging.debug(f"Download command output: {result.stdout}")
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Failed to download track: {cleaned_artist_name} - {cleaned_track_name} with error: {e}")
-        logging.debug(f"Download command stderr: {e.stderr}")
-        logging.debug(f"Download command stdout: {e.stdout}")
+    logging.info(f"Searching for track: {cleaned_track_name} by artist: {cleaned_artist_name}")
+
+    settings = Settings(credentials=CredentialsSettings(username=SOUL_SEEK_USERNAME, password=SOUL_SEEK_PASSWORD))
+
+    # Use async with to ensure connection is properly managed
+    async with SoulSeekClient(settings) as client:
+        await client.login()
+
+        # Perform search on Soulseek
+        try:
+            search_results = await client.searches.search(f'{cleaned_track_name} {cleaned_artist_name}')
+            if search_results.results:
+                file_info = search_results.results[0]  # Take the first result
+                logging.info(f"Found track: {file_info.shared_items[0].filename} ({file_info.shared_items[0].filesize} bytes), starting download...")
+
+                # Initiate the download
+                await client.transfers.download(file_info.username, file_info.shared_items[0].filename)
+                logging.info(f"Download completed: {file_info.shared_items[0].filename}")
+            else:
+                logging.warning(f"No results found for {cleaned_track_name} by {cleaned_artist_name}.")
+        except Exception as e:
+            logging.error(f"Error during search or download: {e}")
+
+# Update the download_track function
+def download_track(track_name, artist_name, download_path):
+    asyncio.run(download_track_async(track_name, artist_name, download_path))
 
 def fetch_and_compare_tracks(conn, playlist_id, table_name, sp):
     logging.info(f"Fetching tracks for playlist ID: {playlist_id} into table: {table_name}")
@@ -256,10 +268,6 @@ def main():
     setup_logging()
 
     logging.info("Starting main process")
-    SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
-    SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
-    SLDL_USER = os.getenv('SLDL_USER')
-    SLDL_PASS = os.getenv('SLDL_PASS')
     NTFY_URL = os.getenv('NTFY_URL')
     NTFY_TOPIC = os.getenv('NTFY_TOPIC')
     playlist_urls = os.getenv('SPOTIFY_PLAYLIST_URLS').split(',')
@@ -282,7 +290,6 @@ def main():
             playlist_name = sanitize_table_name(sp.playlist(playlist_id)['name'])
             create_table(conn, playlist_name)
 
-            # Perform startup check
             startup_check(conn, playlist_name)
 
             new_tracks = fetch_and_compare_tracks(conn, playlist_id, playlist_name, sp)
@@ -292,18 +299,18 @@ def main():
             for track in new_tracks:
                 track_name, artist_name = track[1], track[2]
                 logging.info(f"Attempting download for new track: {track_name} by {artist_name}")
-                download_track(track_name, artist_name, SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SLDL_USER, SLDL_PASS, download_path)
+                
+                # Use the new download logic with aioslsk
+                download_track(track_name, artist_name, download_path)
 
             process_downloaded_tracks(playlist_name, conn)
 
-            # Retry suspended downloads
             suspended_tracks = retry_suspended_downloads(conn, playlist_name)
             for track in suspended_tracks:
                 logging.info(f"Retrying download for suspended track: {track[1]} by {track[2]}")
-                download_track(track[1], track[2], SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SLDL_USER, SLDL_PASS, download_path)
+                download_track(track[1], track[2], download_path)
                 process_downloaded_tracks(playlist_name, conn)
-            
-            # Check if all tracks are downloaded
+
             if all_tracks_downloaded(conn, playlist_name):
                 send_ntfy_notification(NTFY_URL, NTFY_TOPIC, f"All tracks in {playlist_name} have been downloaded! 🎉")
 
@@ -324,24 +331,23 @@ def main():
                 for track in new_tracks:
                     track_name, artist_name = track[1], track[2]
                     logging.info(f"Attempting download for new track: {track_name} by {artist_name}")
-                    download_track(track_name, artist_name, SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SLDL_USER, SLDL_PASS, download_path)
+                    download_track(track_name, artist_name, download_path)
 
                 process_downloaded_tracks(playlist_name, conn)
 
-                # Retry suspended downloads
                 suspended_tracks = retry_suspended_downloads(conn, playlist_name)
                 for track in suspended_tracks:
                     logging.info(f"Retrying download for suspended track: {track[1]} by {track[2]}")
-                    download_track(track[1], track[2], SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SLDL_USER, SLDL_PASS, download_path)
+                    download_track(track[1], track[2], download_path)
                     process_downloaded_tracks(playlist_name, conn)
                 
-                # Check if all tracks are downloaded
                 if all_tracks_downloaded(conn, playlist_name):
                     send_ntfy_notification(NTFY_URL, NTFY_TOPIC, f"All tracks in {playlist_name} have been downloaded! 🎉")
                     
             sleep_interval(5)
     else:
         logging.error("Failed to connect to the SQLite database.")
+
 
 if __name__ == "__main__":
     main()
