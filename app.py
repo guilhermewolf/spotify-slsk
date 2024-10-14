@@ -8,11 +8,13 @@ import difflib
 import random
 import requests
 import time
+import shlex
 from db import create_connection, create_table, insert_track, fetch_all_tracks, update_download_status
 from log_config import setup_logging
-from timing_utils import sleep_interval
+from utils import sleep_interval
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, TDRC
+from utils import sanitize_table_name
 
 
 def get_playlist_id(playlist_url):
@@ -25,13 +27,18 @@ def get_playlist_id(playlist_url):
         logging.error(f"Failed to extract playlist ID from URL: {playlist_url}")
         return None
 
-def sanitize_table_name(name):
-    return re.sub(r'\W+', '_', name)
+def sanitize_input(text):
+    return re.sub(r'[^A-Za-z0-9 ]+', '', text)
 
 def download_track(track_name, artist_name, client_id, client_secret, sldl_user, sldl_pass, download_path):
     os.makedirs(download_path, exist_ok=True)
 
-    search_query = f'title="{track_name}",artist="{artist_name}"'
+    # Clean track and artist names for the query
+    cleaned_track_name = track_name.strip().replace('"', '').replace("'", "")
+    cleaned_artist_name = artist_name.strip().replace('"', '').replace("'", "")
+    
+    # Use shlex.quote to properly handle special characters
+    search_query = f'title="{shlex.quote(cleaned_track_name)}",artist="{shlex.quote(cleaned_artist_name)}"'
     
     command = [
         "sldl", search_query,
@@ -45,10 +52,10 @@ def download_track(track_name, artist_name, client_id, client_secret, sldl_user,
 
     try:
         result = subprocess.run(command, check=True, capture_output=True, text=True)
-        logging.info(f"Attempted download for track: {artist_name} - {track_name} into folder: {download_path}")
+        logging.info(f"Attempted download for track: {cleaned_artist_name} - {cleaned_track_name} into folder: {download_path}")
         logging.debug(f"Download command output: {result.stdout}")
     except subprocess.CalledProcessError as e:
-        logging.error(f"Failed to download track: {artist_name} - {track_name} with error: {e}")
+        logging.error(f"Failed to download track: {cleaned_artist_name} - {cleaned_track_name} with error: {e}")
         logging.debug(f"Download command stderr: {e.stderr}")
         logging.debug(f"Download command stdout: {e.stdout}")
 
@@ -64,6 +71,9 @@ def fetch_and_compare_tracks(conn, playlist_id, table_name, sp):
 
     for item in results['items']:
         track = item['track']
+        # Add debug log to check the extracted track details
+        logging.debug(f"Fetched track: {track['name']} by {', '.join([artist['name'] for artist in track['artists']])}")
+        
         current_track_ids.add(track['id'])
 
         if track['id'] not in db_tracks:
@@ -80,7 +90,9 @@ def fetch_and_compare_tracks(conn, playlist_id, table_name, sp):
 
 def find_closest_match(conn, playlist_name, title, artist):
     logging.info(f"Finding closest match for track: {title} by {artist} in playlist {playlist_name}")
-    potential_matches = conn.execute(f"SELECT id, name, artists FROM {playlist_name}").fetchall()
+    cursor = conn.cursor()
+    cursor.execute(f"""SELECT id, name, artists FROM "{playlist_name}";""")
+    potential_matches = cursor.fetchall()
     
     best_match = None
     best_score = 0.0
