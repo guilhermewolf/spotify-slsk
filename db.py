@@ -13,7 +13,7 @@ def create_connection(db_file):
 
 def create_table(conn, playlist_name):
     """Create a table dynamically based on the sanitized playlist name"""
-    table_name = sanitize_table_name(playlist_name)
+    table_name = playlist_name
     try:
         sql_create_tracks_table = f"""CREATE TABLE IF NOT EXISTS {table_name} (
                                         id TEXT PRIMARY KEY,
@@ -36,7 +36,7 @@ def create_table(conn, playlist_name):
         logging.error(f"Error creating table {table_name}: {e}")
 
 def insert_track(conn, playlist_name, track):
-    table_name = sanitize_table_name(playlist_name)
+    table_name = playlist_name
     sql = f''' INSERT OR IGNORE INTO {table_name}(id, name, artists, album) VALUES(?,?,?,?) '''
     cursor = conn.cursor()
     try:
@@ -48,7 +48,7 @@ def insert_track(conn, playlist_name, track):
         logging.error(f"Error inserting track into {table_name}: {e}")
 
 def fetch_all_tracks(conn, playlist_name):
-    table_name = sanitize_table_name(playlist_name)
+    table_name = playlist_name
     cursor = conn.cursor()
     try:
         cursor.execute(f"SELECT id, name, artists, album FROM {table_name}")
@@ -58,7 +58,7 @@ def fetch_all_tracks(conn, playlist_name):
         return []
 
 def update_download_status(conn, track_id, playlist_name):
-    table_name = sanitize_table_name(playlist_name)
+    table_name = playlist_name
     sql = f"UPDATE {table_name} SET downloaded = 1 WHERE id = ?"
     cursor = conn.cursor()
     try:
