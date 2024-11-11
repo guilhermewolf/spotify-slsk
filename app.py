@@ -1,3 +1,4 @@
+import aioslsk.client
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 import os
@@ -9,6 +10,8 @@ import random
 import requests
 import time
 import shlex
+import asyncio
+import aioslsk 
 from db import create_connection, create_table, insert_track, fetch_all_tracks, update_download_status
 from log_config import setup_logging
 from utils import sleep_interval
@@ -16,6 +19,63 @@ from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, TDRC
 from utils import sanitize_table_name
 
+#sanitizing caracteres
+def sanitize_string(text):
+    return re.sub(r'[^A-Za-z0-9 ]+', '', text)
+
+#function to download a soulseek track
+async def download_from_soulseek(track_name, artist_name, download_path, username, password):
+    os.makedirs(download_path, exist_ok=True)
+
+    # Sanitize track and artist names before using them in the search
+    cleaned_track_name = sanitize_string(track_name)
+    cleaned_artist_name = sanitize_string(artist_name)
+
+    # Use shlex.quote to properly handle special characters
+    search_query = f'title="{shlex.quote(cleaned_track_name)}",artist="{shlex.quote(cleaned_artist_name)}"'
+
+    #creat a client
+    client = aioslsk.client()
+
+    try: 
+        #soulseek login 
+        await client.login(username, password)
+
+         #minimum search parameters
+        search_query = f"{cleaned_track_name} {cleaned_artist_name} {MP3} {320}kbps"
+        logging.info(f"searching for the track: {search_query}, with format: {MP3} minimum bitrate {320}")
+        search_results = await client.search(search_query)
+        
+        if not search_results: 
+            logging.warning(f"No results for {track_name}, of {artist_name}.")
+            return
+        
+        #first results
+        file = search_results[0]
+
+        logging.info(f"File found: {file['name']} of {file['username']}")
+
+        #starting download 
+        download_file_path = os.path.join(download_path, file['name'])
+        logging.info(f"starting download for {download_file_path}")
+
+        #performing download 
+        await client.download(file['file_id'], download_file_path)
+        logging.info(f"Download completed: {download_file_path}")
+
+        #download information
+        logging.info(f"Download completed: {artist_name} - {track_name}")
+        logging.debug(f"Downloaded file: {download_file_path}")
+
+    except Exception as e: 
+        logging.info(f"Error when tryng to download the track: {track_name} of {artist_name} - {e}")
+    finally: 
+        await client.close
+
+#function that integrates with the main flow 
+async def download_track_soulseek(track_name, artist_name, download_path, username, password):
+    await download_from_soulseek(track_name, artist_name, download_path, username, password)
+#replace "download_track" for "download_track_soulseek"
 
 def get_playlist_id(playlist_url):
     try:
@@ -26,38 +86,6 @@ def get_playlist_id(playlist_url):
     except IndexError:
         logging.error(f"Failed to extract playlist ID from URL: {playlist_url}")
         return None
-
-def sanitize_input(text):
-    return re.sub(r'[^A-Za-z0-9 ]+', '', text)
-
-def download_track(track_name, artist_name, client_id, client_secret, sldl_user, sldl_pass, download_path):
-    os.makedirs(download_path, exist_ok=True)
-
-    # Clean track and artist names for the query
-    cleaned_track_name = track_name.strip().replace('"', '').replace("'", "")
-    cleaned_artist_name = artist_name.strip().replace('"', '').replace("'", "")
-    
-    # Use shlex.quote to properly handle special characters
-    search_query = f'title="{shlex.quote(cleaned_track_name)}",artist="{shlex.quote(cleaned_artist_name)}"'
-    
-    command = [
-        "sldl", search_query,
-        "--username", sldl_user,
-        "--password", sldl_pass,
-        "--format", "mp3",
-        "--min-bitrate", "320",
-        "--path", download_path,
-        "--skip-existing",
-    ]
-
-    try:
-        result = subprocess.run(command, check=True, capture_output=True, text=True)
-        logging.info(f"Attempted download for track: {cleaned_artist_name} - {cleaned_track_name} into folder: {download_path}")
-        logging.debug(f"Download command output: {result.stdout}")
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Failed to download track: {cleaned_artist_name} - {cleaned_track_name} with error: {e}")
-        logging.debug(f"Download command stderr: {e.stderr}")
-        logging.debug(f"Download command stdout: {e.stdout}")
 
 def fetch_and_compare_tracks(conn, playlist_id, table_name, sp):
     logging.info(f"Fetching tracks for playlist ID: {playlist_id} into table: {table_name}")
@@ -252,10 +280,11 @@ def all_tracks_downloaded(conn, table_name):
         logging.info(f"{remaining_tracks} tracks in playlist {table_name} are still not downloaded.")
         return False
 
-def main():
+async def main():
     setup_logging()
 
     logging.info("Starting main process")
+
     SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
     SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
     SLDL_USER = os.getenv('SLDL_USER')
@@ -292,7 +321,7 @@ def main():
             for track in new_tracks:
                 track_name, artist_name = track[1], track[2]
                 logging.info(f"Attempting download for new track: {track_name} by {artist_name}")
-                download_track(track_name, artist_name, SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SLDL_USER, SLDL_PASS, download_path)
+                await download_from_soulseek(track_name, artist_name, download_path, SLDL_USER, SLDL_PASS, format="mp3", min_bitrate=320)
 
             process_downloaded_tracks(playlist_name, conn)
 
@@ -300,7 +329,7 @@ def main():
             suspended_tracks = retry_suspended_downloads(conn, playlist_name)
             for track in suspended_tracks:
                 logging.info(f"Retrying download for suspended track: {track[1]} by {track[2]}")
-                download_track(track[1], track[2], SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SLDL_USER, SLDL_PASS, download_path)
+                await download_from_soulseek(track[1], track[2], download_path, SLDL_USER, SLDL_PASS, format="mp3", min_bitrate=320)
                 process_downloaded_tracks(playlist_name, conn)
             
             # Check if all tracks are downloaded
@@ -324,7 +353,7 @@ def main():
                 for track in new_tracks:
                     track_name, artist_name = track[1], track[2]
                     logging.info(f"Attempting download for new track: {track_name} by {artist_name}")
-                    download_track(track_name, artist_name, SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SLDL_USER, SLDL_PASS, download_path)
+                    await download_from_soulseek(track_name, artist_name, download_path, SLDL_USER, SLDL_PASS, format="mp3", min_bitrate=320)
 
                 process_downloaded_tracks(playlist_name, conn)
 
@@ -332,7 +361,7 @@ def main():
                 suspended_tracks = retry_suspended_downloads(conn, playlist_name)
                 for track in suspended_tracks:
                     logging.info(f"Retrying download for suspended track: {track[1]} by {track[2]}")
-                    download_track(track[1], track[2], SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SLDL_USER, SLDL_PASS, download_path)
+                    await download_from_soulseek(track[1], track[2], download_path, SLDL_USER, SLDL_PASS, format="mp3", min_bitrate=320)
                     process_downloaded_tracks(playlist_name, conn)
                 
                 # Check if all tracks are downloaded
