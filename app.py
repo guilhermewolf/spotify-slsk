@@ -1,3 +1,4 @@
+import aioslsk.client
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 import os
@@ -9,6 +10,8 @@ import random
 import requests
 import time
 import shlex
+import asyncio
+import aioslsk 
 from db import create_connection, create_table, insert_track, fetch_all_tracks, update_download_status
 from log_config import setup_logging
 from utils import sleep_interval
@@ -16,6 +19,48 @@ from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, TDRC
 from utils import sanitize_table_name
 
+#function to download a soulseek track
+async def download_from_soulseek(track_name, artist_name, download_path, username, password):
+    os.makedirs(download_path, exist_ok=True)
+
+    #creat a client
+    client = aioslsk.client()
+
+    try: 
+        #soulseek login 
+        await client.login(username, password)
+
+        #searching a file soulseek
+        search_query = f'{track_name} {artist_name}'
+        logging.info(f"searching track: {search_query}")
+        search_results =  await client.search(search_query)
+        
+        if not search_results: 
+            logging.warning(f"No results for {track_name}, of {artist_name}.")
+            return
+        
+        #first results
+        file = search_results[0]
+
+        logging.info(f"File found: {file['name']} of {file['username']}")
+
+        #starting download 
+        download_file_path = os.path.join(download_path, file['name'])
+        logging.info(f"starting download for {download_file_path}")
+
+        #performing download 
+        await client.download(file['file_id'], download_file_path)
+        logging.info(f"Download completed: {download_file_path}")
+
+    except Exception as e: 
+        logging.info(f"Error when tryng to download the track: {track_name} of {artist_name} - {e}")
+    finally: 
+        await client.close
+
+#function that integrates with the main flow 
+async def download_track_soulseek(track_name, artist_name, download_path, username, password):
+    await download_from_soulseek(track_name, artist_name, download_path, username, password)
+#replace "download_track" for "download_track_soulseek"
 
 def get_playlist_id(playlist_url):
     try:
