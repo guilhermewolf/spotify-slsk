@@ -16,6 +16,16 @@ from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, TDRC
 from utils import sanitize_table_name
 
+class Track:
+    def __init__(self, id, name, artists, album):
+        self.id = id
+        self.name = name
+        self.artists = artists
+        self.album = album
+
+    def __repr__(self):
+        return f"Track(id={self.id}, name={self.name}, artists={self.artists}, album={self.album})"
+
 
 def get_playlist_id(playlist_url):
     try:
@@ -83,7 +93,8 @@ def fetch_and_compare_tracks(conn, playlist_id, table_name, sp):
                           track['album']['name'])  # Only provide 4 values
             insert_track(conn, table_name, track_data)
             logging.info(f"New Song found in {table_name}: {track['name']} by {', '.join([artist['name'] for artist in track['artists']])} from the album {track['album']['name']}")
-            new_tracks.append(track['id'])  # Collect new tracks to trigger download later
+            t = Track(track['id'], track['name'], ', '.join([artist['name'] for artist in track['artists']]), track['album']['name'])
+            new_tracks.append(t)  # Collect new tracks to trigger download later
 
     logging.info(f"Found {len(new_tracks)} new tracks to download in playlist {table_name}")
     return new_tracks
@@ -209,7 +220,8 @@ def retry_suspended_downloads(conn, table_name):
         logging.info(f"Retrying track {name} by {artists} after {backoff_time} seconds backoff")
         time.sleep(backoff_time)
 
-    return tracks_to_retry
+    #return tracks_to_retry
+    return [Track(track[0], track[1], track[2], "") for track in tracks_to_retry]
 
 def extract_metadata_from_file(file_path):
     try:
@@ -290,7 +302,7 @@ def main():
             download_path = f"/app/data/downloads/{playlist_name}"
 
             for track in new_tracks:
-                track_name, artist_name = track[1], track[2]
+                track_name, artist_name = track.name, track.artists
                 logging.info(f"Attempting download for new track: {track_name} by {artist_name}")
                 download_track(track_name, artist_name, SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SLDL_USER, SLDL_PASS, download_path)
 
@@ -299,8 +311,8 @@ def main():
             # Retry suspended downloads
             suspended_tracks = retry_suspended_downloads(conn, playlist_name)
             for track in suspended_tracks:
-                logging.info(f"Retrying download for suspended track: {track[1]} by {track[2]}")
-                download_track(track[1], track[2], SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SLDL_USER, SLDL_PASS, download_path)
+                logging.info(f"Retrying download for suspended track: {track.name} by {track.artists}")
+                download_track(track.name, track.artists, SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SLDL_USER, SLDL_PASS, download_path)
                 process_downloaded_tracks(playlist_name, conn)
             
             # Check if all tracks are downloaded
@@ -322,19 +334,26 @@ def main():
                 download_path = f"/app/data/downloads/{playlist_name}"
 
                 for track in new_tracks:
-                    track_name, artist_name = track[1], track[2]
-                    logging.info(f"Attempting download for new track: {track_name} by {artist_name}")
+                    track_name, artist_name = track.name, track.artists
+                    logging.info(f'Attempting download for new track: {track_name} by {artist_name}')
                     download_track(track_name, artist_name, SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SLDL_USER, SLDL_PASS, download_path)
 
                 process_downloaded_tracks(playlist_name, conn)
 
                 # Retry suspended downloads
                 suspended_tracks = retry_suspended_downloads(conn, playlist_name)
+                # for track in suspended_tracks:
+                #     logging.info(f"Retrying download for suspended track: {track.name} by {track.artists}")
+                #     download_track(track['name'], track['artists'], SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SLDL_USER, SLDL_PASS, download_path)
+                #     process_downloaded_tracks(playlist_name, conn)
                 for track in suspended_tracks:
-                    logging.info(f"Retrying download for suspended track: {track[1]} by {track[2]}")
-                    download_track(track[1], track[2], SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SLDL_USER, SLDL_PASS, download_path)
+                    track_id, name, artists, attempts = track
+                    track_obj = Track(track_id, name, artists, "")
+                    logging.info(f"Retrying download for suspended track: {track_obj.name} by {track_obj.artists}")
+                    download_track(track_obj.name, track_obj.artists, SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SLDL_USER, SLDL_PASS, download_path)
                     process_downloaded_tracks(playlist_name, conn)
-                
+
+
                 # Check if all tracks are downloaded
                 if all_tracks_downloaded(conn, playlist_name):
                     send_ntfy_notification(NTFY_URL, NTFY_TOPIC, f"All tracks in {playlist_name} have been downloaded! 🎉")
