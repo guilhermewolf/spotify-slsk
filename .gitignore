@@ -1,2 +1,5 @@
 .env
 data/
+downloads/
+slsk_app/
+.DS_Store

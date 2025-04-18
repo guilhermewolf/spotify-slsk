@@ -1,21 +1,27 @@
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
+import music_tag
+from slskd_api.client import SlskdClient
+import shutil
 import os
 import logging
 import re
-import subprocess
 import difflib
 import random
 import requests
 import time
 import shlex
+import sqlite3
 from db import create_connection, create_table, insert_track, fetch_all_tracks, update_download_status
 from log_config import setup_logging
 from utils import sleep_interval
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, TDRC
 from utils import sanitize_table_name
+from slskd_client import SlskdClient
 
+
+slskd = None
 class Track:
     def __init__(self, id, name, artists, album):
         self.id = id
@@ -39,35 +45,6 @@ def get_playlist_id(playlist_url):
 
 def sanitize_input(text):
     return re.sub(r'[^A-Za-z0-9 ]+', '', text)
-
-def download_track(track_name, artist_name, client_id, client_secret, sldl_user, sldl_pass, download_path):
-    os.makedirs(download_path, exist_ok=True)
-
-    # Clean track and artist names for the query
-    cleaned_track_name = track_name.strip().replace('"', '').replace("'", "")
-    cleaned_artist_name = artist_name.strip().replace('"', '').replace("'", "")
-    
-    # Use shlex.quote to properly handle special characters
-    search_query = f'title="{shlex.quote(cleaned_track_name)}",artist="{shlex.quote(cleaned_artist_name)}"'
-    
-    command = [
-        "sldl", search_query,
-        "--username", sldl_user,
-        "--password", sldl_pass,
-        "--format", "mp3",
-        "--min-bitrate", "320",
-        "--path", download_path,
-        "--skip-existing",
-    ]
-
-    try:
-        result = subprocess.run(command, check=True, capture_output=True, text=True)
-        logging.info(f"Attempted download for track: {cleaned_artist_name} - {cleaned_track_name} into folder: {download_path}")
-        logging.debug(f"Download command output: {result.stdout}")
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Failed to download track: {cleaned_artist_name} - {cleaned_track_name} with error: {e}")
-        logging.debug(f"Download command stderr: {e.stderr}")
-        logging.debug(f"Download command stdout: {e.stdout}")
 
 def fetch_and_compare_tracks(conn, playlist_id, table_name, sp):
     logging.info(f"Fetching tracks for playlist ID: {playlist_id} into table: {table_name}")
@@ -153,17 +130,17 @@ def process_downloaded_tracks(playlist_name, conn):
 def update_download_status(conn, track_id, table_name, success=False, file_path=None):
     cursor = conn.cursor()
     if success:
-        sql = f"UPDATE {table_name} SET downloaded = 1, attempts = 0, suspended_until = NULL, path = ? WHERE id = ?"
+        sql = f'UPDATE "{table_name}" SET downloaded = 1, attempts = 0, suspended_until = NULL, path = ? WHERE id = ?'
         params = (file_path, track_id)
         logging.info(f"Updating status of track ID: {track_id} to downloaded with path: {file_path}")
     else:
-        sql = f"UPDATE {table_name} SET attempts = attempts + 1, last_attempt = CURRENT_TIMESTAMP WHERE id = ?"
+        sql = f'UPDATE "{table_name}" SET attempts = attempts + 1, last_attempt = CURRENT_TIMESTAMP WHERE id = ?'
         params = (track_id,)
         logging.info(f"Incrementing attempt count for track ID: {track_id}")
-        cursor.execute(f"SELECT attempts FROM {table_name} WHERE id = ?", (track_id,))
+        cursor.execute(f'SELECT attempts FROM "{table_name}" WHERE id = ?', (track_id,))
         attempts = cursor.fetchone()[0]
         if attempts >= 3:
-            sql = f"UPDATE {table_name} SET suspended_until = datetime('now', '+2 days') WHERE id = ?"
+            sql = f'UPDATE "{table_name}" SET suspended_until = datetime("now", "+2 days") WHERE id = ?'
             logging.info(f"Track ID: {track_id} has reached max attempts, suspending for 2 days")
 
     try:
@@ -173,6 +150,7 @@ def update_download_status(conn, track_id, table_name, success=False, file_path=
     except sqlite3.Error as e:
         conn.rollback()
         logging.error(f"Error updating track status for {track_id} in {table_name}: {e}")
+
 
 def clean_up_untracked_files(conn, download_path, table_name):
     logging.info(f"Cleaning up untracked files in {download_path}")
@@ -263,102 +241,157 @@ def all_tracks_downloaded(conn, table_name):
     else:
         logging.info(f"{remaining_tracks} tracks in playlist {table_name} are still not downloaded.")
         return False
+    
+def move_downloaded_file(src_file_path, playlist_folder):
+    """Moves the file to the final playlist folder."""
+    playlist_path = os.path.join("/app/data/downloads", playlist_folder)
+    os.makedirs(playlist_path, exist_ok=True)
 
+    filename = os.path.basename(src_file_path)
+    dst_path = os.path.join(playlist_path, filename)
+
+    try:
+        shutil.move(src_file_path, dst_path)
+        logging.info(f"Moved {src_file_path} to {dst_path}")
+        return dst_path
+    except Exception as e:
+        logging.error(f"Failed to move file: {e}")
+        return None
+    
 def main():
     setup_logging()
-
     logging.info("Starting main process")
+
     SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
     SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
-    SLDL_USER = os.getenv('SLDL_USER')
-    SLDL_PASS = os.getenv('SLDL_PASS')
+    SLSKD_API_KEY = os.getenv("SLSKD_API_KEY")
+    SLSKD_HOST_URL = os.getenv("SLSKD_HOST_URL", "http://slskd:5030")
     NTFY_URL = os.getenv('NTFY_URL')
     NTFY_TOPIC = os.getenv('NTFY_TOPIC')
     playlist_urls = os.getenv('SPOTIFY_PLAYLIST_URLS').split(',')
 
-    send_ntfy_notification(NTFY_URL, NTFY_TOPIC, "Starting Spotify Playlist Downloader 🚀")
+    global slskd
+    slskd = SlskdClient(host=SLSKD_HOST_URL, api_key=SLSKD_API_KEY)
 
+    send_ntfy_notification(NTFY_URL, NTFY_TOPIC, "Starting Spotify Playlist Downloader 🚀")
     sp = setup_spotify_client()
 
     database = "/app/data/playlist_tracks.db"
     conn = create_connection(database)
 
-    if conn:
+    if not conn:
+        logging.error("Failed to connect to the SQLite database.")
+        return
+
+    for playlist_url in playlist_urls:
+        logging.info(f"Processing playlist URL: {playlist_url}")
+        playlist_id = get_playlist_id(playlist_url)
+        if not playlist_id:
+            logging.error(f"Skipping invalid playlist URL: {playlist_url}")
+            continue
+
+        playlist_name = sanitize_table_name(sp.playlist(playlist_id)['name'])
+        create_table(conn, playlist_name)
+
+        # Perform startup check
+        startup_check(conn, playlist_name)
+
+        # Fetch new tracks
+        new_tracks = fetch_and_compare_tracks(conn, playlist_id, playlist_name, sp)
+
+        for track in new_tracks:
+            logging.info(f"Attempting download for new track: {track.name} by {track.artists}")
+            file_path = slskd.download_from_search(track.artists, track.name, playlist_name)
+            if file_path:
+                final_path = move_downloaded_file(file_path, playlist_name)
+
+                if final_path:
+                    update_download_status(conn, track.id, playlist_name, success=True, file_path=final_path)
+                    logging.info(f"Marked track {track.name} as downloaded after retry.")
+                    process_downloaded_tracks(playlist_name, conn)  # Trigger metadata tagging
+                else:
+                    logging.warning(f"File was downloaded but could not be moved: {file_path}")
+            else:
+                logging.info(f"Retry failed: {track.name}")
+
+        process_downloaded_tracks(playlist_name, conn)
+
+        # Retry suspended tracks
+        suspended_tracks = retry_suspended_downloads(conn, playlist_name)
+        for track in suspended_tracks:
+            logging.info(f"Retrying download for suspended track: {track.name} by {track.artists}")
+            download_success = slskd.download_from_search(track.artists, track.name, playlist_name)
+
+            if download_success:
+                update_download_status(conn, track.id, playlist_name, success=True, file_path=None)
+                logging.info(f"Marked track {track.name} as downloaded after retry.")
+            else:
+                logging.info(f"Retry failed: {track.name}")
+
+            process_downloaded_tracks(playlist_name, conn)
+
+        # Notify if all are downloaded
+        if all_tracks_downloaded(conn, playlist_name):
+            send_ntfy_notification(NTFY_URL, NTFY_TOPIC, f"All tracks in {playlist_name} have been downloaded! 🎉")
+
+    # Continuous loop
+    while True:
+        logging.info("Starting new cycle of playlist checks")
         for playlist_url in playlist_urls:
-            logging.info(f"Processing playlist URL: {playlist_url}")
+            logging.info(f"Checking playlist: {playlist_url}")
             playlist_id = get_playlist_id(playlist_url)
             if not playlist_id:
                 logging.error(f"Skipping invalid playlist URL: {playlist_url}")
                 continue
 
             playlist_name = sanitize_table_name(sp.playlist(playlist_id)['name'])
-            create_table(conn, playlist_name)
 
-            # Perform startup check
-            startup_check(conn, playlist_name)
-
+            # Refresh tracks
             new_tracks = fetch_and_compare_tracks(conn, playlist_id, playlist_name, sp)
-
-            download_path = f"/app/data/downloads/{playlist_name}"
-
             for track in new_tracks:
-                track_name, artist_name = track.name, track.artists
-                logging.info(f"Attempting download for new track: {track_name} by {artist_name}")
-                download_track(track_name, artist_name, SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SLDL_USER, SLDL_PASS, download_path)
+                logging.info(f'Attempting download for new track: {track.name} by {track.artists}')
+                file_path = slskd.download_from_search(track.artists, track.name, playlist_name)
+                if file_path:
+                    final_path = move_downloaded_file(file_path, playlist_name)
+
+                    if final_path:
+                        update_download_status(conn, track.id, playlist_name, success=True, file_path=final_path)
+                        logging.info(f"Marked track {track.name} as downloaded after retry.")
+                        
+                        process_downloaded_tracks(playlist_name, conn)  # Trigger metadata tagging
+                    else:
+                        logging.warning(f"File was downloaded but could not be moved: {file_path}")
+                else:
+                    logging.info(f"Retry failed: {track.name}")
+
 
             process_downloaded_tracks(playlist_name, conn)
 
-            # Retry suspended downloads
+            # Retry suspended tracks
             suspended_tracks = retry_suspended_downloads(conn, playlist_name)
             for track in suspended_tracks:
                 logging.info(f"Retrying download for suspended track: {track.name} by {track.artists}")
-                download_track(track.name, track.artists, SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SLDL_USER, SLDL_PASS, download_path)
+                file_path = slskd.download_from_search(track.artists, track.name, playlist_name)
+                if file_path:
+                    final_path = move_downloaded_file(file_path, playlist_name)
+
+                    if final_path:
+                        update_download_status(conn, track.id, playlist_name, success=True, file_path=final_path)
+                        logging.info(f"Marked track {track.name} as downloaded after retry.")
+                        process_downloaded_tracks(playlist_name, conn)  # Trigger metadata tagging
+                    else:
+                        logging.warning(f"File was downloaded but could not be moved: {file_path}")
+                else:
+                    logging.info(f"Retry failed: {track.name}")
+
                 process_downloaded_tracks(playlist_name, conn)
-            
-            # Check if all tracks are downloaded
+
+            # Notify if all are downloaded
             if all_tracks_downloaded(conn, playlist_name):
                 send_ntfy_notification(NTFY_URL, NTFY_TOPIC, f"All tracks in {playlist_name} have been downloaded! 🎉")
 
-        while True:
-            logging.info("Starting new cycle of playlist checks")
-            for playlist_url in playlist_urls:
-                logging.info(f"Checking playlist: {playlist_url}")
-                playlist_id = get_playlist_id(playlist_url)
-                if not playlist_id:
-                    logging.error(f"Skipping invalid playlist URL: {playlist_url}")
-                    continue
+        sleep_interval(5)
 
-                playlist_name = sanitize_table_name(sp.playlist(playlist_id)['name'])
-                new_tracks = fetch_and_compare_tracks(conn, playlist_id, playlist_name, sp)
-
-                download_path = f"/app/data/downloads/{playlist_name}"
-
-                for track in new_tracks:
-                    track_name, artist_name = track.name, track.artists
-                    logging.info(f'Attempting download for new track: {track_name} by {artist_name}')
-                    download_track(track_name, artist_name, SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SLDL_USER, SLDL_PASS, download_path)
-
-                process_downloaded_tracks(playlist_name, conn)
-
-                # Retry suspended downloads
-                suspended_tracks = retry_suspended_downloads(conn, playlist_name)
-                # for track in suspended_tracks:
-                #     logging.info(f"Retrying download for suspended track: {track.name} by {track.artists}")
-                #     download_track(track['name'], track['artists'], SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SLDL_USER, SLDL_PASS, download_path)
-                #     process_downloaded_tracks(playlist_name, conn)
-                for track in suspended_tracks:
-                    track_id, name, artists, attempts = track
-                    track_obj = Track(track_id, name, artists, "")
-                    logging.info(f"Retrying download for suspended track: {track_obj.name} by {track_obj.artists}")
-                    download_track(track_obj.name, track_obj.artists, SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SLDL_USER, SLDL_PASS, download_path)
-                    process_downloaded_tracks(playlist_name, conn)
-
-
-                # Check if all tracks are downloaded
-                if all_tracks_downloaded(conn, playlist_name):
-                    send_ntfy_notification(NTFY_URL, NTFY_TOPIC, f"All tracks in {playlist_name} have been downloaded! 🎉")
-                    
-            sleep_interval(5)
     else:
         logging.error("Failed to connect to the SQLite database.")
 
