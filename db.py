@@ -23,13 +23,13 @@ def create_table(conn, playlist_name):
                                         downloaded INTEGER DEFAULT 0,
                                         path TEXT,
                                         attempts INTEGER DEFAULT 0,
-                                        suspended_until TEXT
+                                        last_attempt TIMESTAMP,
+                                        suspended_until TIMESTAMP
                                     );"""
         cursor = conn.cursor()
         cursor.execute(sql_create_tracks_table)
         logging.info(f"Table {table_name} created or already exists.")
         
-        # Optionally, create an index on the 'id' column for faster lookups
         cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_id ON {table_name} (id);")
         logging.info(f"Index on {table_name}(id) created or already exists.")
     except sqlite3.Error as e:
@@ -57,14 +57,30 @@ def fetch_all_tracks(conn, playlist_name):
         logging.error(f"Error fetching tracks from {table_name}: {e}")
         return []
 
-def update_download_status(conn, track_id, playlist_name):
-    table_name = playlist_name
-    sql = f"UPDATE {table_name} SET downloaded = 1 WHERE id = ?"
+def update_download_status(conn, track_id, table_name, success=False, file_path=None):
     cursor = conn.cursor()
+    if success:
+        sql = f'UPDATE "{table_name}" SET downloaded = 1, attempts = 0, suspended_until = NULL, path = ?, last_attempt = CURRENT_TIMESTAMP WHERE id = ?'
+        params = (file_path, track_id)
+        logging.info(f"Updating status of track ID: {track_id} to downloaded with path: {file_path}")
+    else:
+        # Increment attempts and update last_attempt
+        cursor.execute(f'SELECT attempts FROM "{table_name}" WHERE id = ?', (track_id,))
+        row = cursor.fetchone()
+        attempts = row[0] if row else 0
+        params = (track_id,)
+        sql = f'UPDATE "{table_name}" SET attempts = attempts + 1, last_attempt = CURRENT_TIMESTAMP WHERE id = ?'
+        logging.info(f"Incrementing attempt count for track ID: {track_id}")
+        
+        if attempts >= 2:
+            suspend_sql = f'UPDATE "{table_name}" SET suspended_until = datetime("now", "+2 days") WHERE id = ?'
+            cursor.execute(suspend_sql, (track_id,))
+            logging.info(f"Track ID: {track_id} has reached max attempts, suspending for 2 days")
+
     try:
-        cursor.execute(sql, (track_id,))
+        cursor.execute(sql, params)
         conn.commit()
-        logging.info(f"Updated track {track_id} as downloaded in {table_name}.")
+        logging.info(f"Updated track {track_id} status in {table_name}.")
     except sqlite3.Error as e:
         conn.rollback()
-        logging.error(f"Error updating download status for {track_id} in {table_name}: {e}")
+        logging.error(f"Error updating track status for {track_id} in {table_name}: {e}")

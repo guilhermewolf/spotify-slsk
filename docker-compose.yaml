@@ -7,7 +7,7 @@ services:
       - .env
     volumes:
       - ./data:/app/data
-      - slskd-downloads:/downloads
+      - ./downloads:/downloads
     depends_on:
       - slskd
     #restart: unless-stopped

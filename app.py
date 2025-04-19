@@ -1,6 +1,6 @@
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
-import music_tag
+#import music_tag
 from slskd_api.client import SlskdClient
 import shutil
 import os
@@ -15,11 +15,14 @@ import sqlite3
 from db import create_connection, create_table, insert_track, fetch_all_tracks, update_download_status
 from log_config import setup_logging
 from utils import sleep_interval
+from mutagen import File
+from mutagen.id3 import ID3, TIT2, TPE1, TALB
+from mutagen.flac import FLAC
+from mutagen.aiff import AIFF
 from mutagen.mp3 import MP3
-from mutagen.id3 import ID3, TIT2, TPE1, TALB, TDRC
 from utils import sanitize_table_name
 from slskd_client import SlskdClient
-
+from slskd_api.client import SlskdClient as BaseSlskdClient
 
 slskd = None
 class Track:
@@ -104,12 +107,14 @@ def find_closest_match(conn, playlist_name, title, artist):
     return best_match, best_score
 
 def process_downloaded_tracks(playlist_name, conn):
-    download_path = f"/app/data/downloads/{playlist_name}"
+    download_path = os.getenv("SLSKD_DOWNLOADS_DIR", "/downloads")
     logging.info(f"Checking for downloaded tracks in {download_path}")
+
+    supported_extensions = (".mp3", ".flac", ".aiff", ".wav")
 
     for root, dirs, files in os.walk(download_path):
         for file in files:
-            if file.endswith(".mp3"):
+            if file.lower().endswith(supported_extensions) and "incomplete" not in root.lower():
                 file_path = os.path.join(root, file)
                 logging.info(f"Processing file: {file_path}")
 
@@ -120,12 +125,19 @@ def process_downloaded_tracks(playlist_name, conn):
                     match, match_score = find_closest_match(conn, playlist_name, title, artist)
 
                     if match and match_score >= 0.6:
-                        logging.info(f"Match found with similarity {match_score:.2f}. Updating database and marking as downloaded.")
-                        update_download_status(conn, match[0], playlist_name, success=True, file_path=file_path)
+                        logging.info(f"Match found with similarity {match_score:.2f}. Tagging, moving, and updating database.")
+                        
+                        tagged = tag_audio_file(file_path, title, artist, album)
+                        if not tagged:
+                            logging.warning(f"Failed to tag {file_path}, continuing anyway.")
+
+                        final_path = move_track_to_playlist_folder(file_path, playlist_name)
+                        update_download_status(conn, match[0], playlist_name, success=True, file_path=final_path)
                     else:
                         logging.warning(f"Could not find track {title} by {artist} in the database.")
                 else:
                     logging.warning(f"Metadata incomplete or missing for file: {file_path}")
+
 
 def update_download_status(conn, track_id, table_name, success=False, file_path=None):
     cursor = conn.cursor()
@@ -203,16 +215,21 @@ def retry_suspended_downloads(conn, table_name):
 
 def extract_metadata_from_file(file_path):
     try:
-        audio = MP3(file_path, ID3=ID3)
-        title = audio.get("TIT2").text[0] if audio.get("TIT2") else None
-        artist = audio.get("TPE1").text[0] if audio.get("TPE1") else None
-        album = audio.get("TALB").text[0] if audio.get("TALB") else None
+        audio = File(file_path)
+        if not audio:
+            return None, None, None
+
+        title = audio.get("title", [None])[0]
+        artist = audio.get("artist", [None])[0]
+        album = audio.get("album", [None])[0]
+
         logging.info(f"Extracted metadata from file: {file_path} - Title: {title}, Artist: {artist}, Album: {album}")
         return title, artist, album
+
     except Exception as e:
         logging.error(f"Error reading metadata from {file_path}: {e}")
         return None, None, None
-
+    
 def setup_spotify_client():
     logging.info("Setting up Spotify client")
     auth_manager = SpotifyClientCredentials()
@@ -242,22 +259,92 @@ def all_tracks_downloaded(conn, table_name):
         logging.info(f"{remaining_tracks} tracks in playlist {table_name} are still not downloaded.")
         return False
     
-def move_downloaded_file(src_file_path, playlist_folder):
-    """Moves the file to the final playlist folder."""
-    playlist_path = os.path.join("/app/data/downloads", playlist_folder)
-    os.makedirs(playlist_path, exist_ok=True)
 
-    filename = os.path.basename(src_file_path)
-    dst_path = os.path.join(playlist_path, filename)
 
+def move_track_to_playlist_folder(track_path: str, playlist_name: str) -> str:
     try:
-        shutil.move(src_file_path, dst_path)
-        logging.info(f"Moved {src_file_path} to {dst_path}")
-        return dst_path
+        # Extract only the filename
+        filename = os.path.basename(track_path)
+
+        # Find the actual file inside the playlist folder under /downloads
+        real_path = os.path.join("/downloads", playlist_name, filename)
+
+        # Define destination folder inside local data/ for organized storage
+        dest_dir = os.path.join("data", playlist_name)
+        os.makedirs(dest_dir, exist_ok=True)
+
+        destination = os.path.join(dest_dir, filename)
+
+        try:
+            shutil.move(real_path, destination)
+        except OSError as e:
+            logging.error(f"Failed to move file across devices: {e}")
+            shutil.copy2(real_path, destination)
+
+        logging.info(f"Moved file to playlist folder: {destination}")
+        return destination
+
     except Exception as e:
         logging.error(f"Failed to move file: {e}")
         return None
+
+def tag_audio_file(file_path, title, artist, album):
+    ext = os.path.splitext(file_path)[1].lower()
+
+    try:
+        if ext == '.mp3':
+            audio = MP3(file_path, ID3=ID3)
+            audio.tags.add(TIT2(encoding=3, text=title))
+            audio.tags.add(TPE1(encoding=3, text=artist))
+            audio.tags.add(TALB(encoding=3, text=album))
+            audio.save()
+
+        elif ext == '.flac':
+            audio = FLAC(file_path)
+            audio['title'] = title
+            audio['artist'] = artist
+            audio['album'] = album
+            audio.save()
+
+        elif ext == '.aiff':
+            audio = AIFF(file_path)
+            audio.tags.add(TIT2(encoding=3, text=title))
+            audio.tags.add(TPE1(encoding=3, text=artist))
+            audio.tags.add(TALB(encoding=3, text=album))
+            audio.save()
+
+        elif ext == '.wav':
+            logging.warning("WAV tagging is not fully supported; skipping tags.")
+
+        else:
+            logging.warning(f"Unsupported format for tagging: {ext}")
+            return False
+
+        logging.info(f"Tagged {file_path} successfully.")
+        return True
+
+    except Exception as e:
+        logging.error(f"Failed to tag {file_path}: {e}")
+        return False
     
+def wait_for_slskd(host, api_key, timeout=60):
+    logging.info(f"Waiting for slskd at {host}...")
+
+    client = BaseSlskdClient(host=host, api_key=api_key)
+
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            version_info = client.misc.version()
+            if version_info and "version" in version_info:
+                logging.info(f"slskd is ready. Version: {version_info['version']}")
+                return
+        except Exception as e:
+            logging.debug(f"slskd not ready yet: {e}")
+        time.sleep(1)
+
+    raise RuntimeError("slskd did not become ready in time.")
+
 def main():
     setup_logging()
     logging.info("Starting main process")
@@ -270,21 +357,24 @@ def main():
     NTFY_TOPIC = os.getenv('NTFY_TOPIC')
     playlist_urls = os.getenv('SPOTIFY_PLAYLIST_URLS').split(',')
 
+    wait_for_slskd(SLSKD_HOST_URL, SLSKD_API_KEY)
     global slskd
     slskd = SlskdClient(host=SLSKD_HOST_URL, api_key=SLSKD_API_KEY)
 
     send_ntfy_notification(NTFY_URL, NTFY_TOPIC, "Starting Spotify Playlist Downloader 🚀")
     sp = setup_spotify_client()
 
-    database = "/app/data/playlist_tracks.db"
+    database = "./data/playlist_tracks.db"
     conn = create_connection(database)
+
 
     if not conn:
         logging.error("Failed to connect to the SQLite database.")
         return
 
+    
+
     for playlist_url in playlist_urls:
-        logging.info(f"Processing playlist URL: {playlist_url}")
         playlist_id = get_playlist_id(playlist_url)
         if not playlist_id:
             logging.error(f"Skipping invalid playlist URL: {playlist_url}")
@@ -292,108 +382,87 @@ def main():
 
         playlist_name = sanitize_table_name(sp.playlist(playlist_id)['name'])
         create_table(conn, playlist_name)
-
-        # Perform startup check
         startup_check(conn, playlist_name)
 
-        # Fetch new tracks
-        new_tracks = fetch_and_compare_tracks(conn, playlist_id, playlist_name, sp)
+        fetch_and_compare_tracks(conn, playlist_id, playlist_name, sp)
 
-        for track in new_tracks:
-            logging.info(f"Attempting download for new track: {track.name} by {track.artists}")
-            file_path = slskd.download_from_search(track.artists, track.name, playlist_name)
-            if file_path:
-                final_path = move_downloaded_file(file_path, playlist_name)
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT id, name, artists, album FROM \"{playlist_name}\" WHERE downloaded = 0 AND (suspended_until IS NULL OR suspended_until < datetime('now'))")
+        rows = cursor.fetchall()
+        pending_tracks = [Track(row[0], row[1], row[2], row[3]) for row in rows]
+        logging.info(f"{len(pending_tracks)} tracks in playlist {playlist_name} are still not downloaded.")
 
-                if final_path:
-                    update_download_status(conn, track.id, playlist_name, success=True, file_path=final_path)
-                    logging.info(f"Marked track {track.name} as downloaded after retry.")
-                    process_downloaded_tracks(playlist_name, conn)  # Trigger metadata tagging
-                else:
-                    logging.warning(f"File was downloaded but could not be moved: {file_path}")
-            else:
-                logging.info(f"Retry failed: {track.name}")
+        for track in pending_tracks:
+            logging.info(f"Attempting download for: {track.name} by {track.artists}")
+            search_result = slskd.perform_search(track.artists, track.name)
 
-        process_downloaded_tracks(playlist_name, conn)
+            if search_result:
+                file_path = slskd.download_best_candidate(search_result)
+                if file_path:
+                    verified = process_downloaded_tracks(playlist_name, conn)
+                    if verified:
+                        file_path = os.path.normpath(file_path.replace("\\", "/"))
+                        final_path = move_track_to_playlist_folder(file_path, playlist_name)
+                        update_download_status(conn, track.id, playlist_name, success=True, file_path=final_path)
+                        continue
+                file_path = slskd.download_best_candidate(search_result, exclude_first=True)
+                if file_path:
+                    verified = process_downloaded_tracks(playlist_name, conn)
+                    if verified:
+                        file_path = os.path.normpath(file_path.replace("\\", "/"))
+                        final_path = move_track_to_playlist_folder(file_path, playlist_name)
+                        update_download_status(conn, track.id, playlist_name, success=True, file_path=final_path)
+                        continue
 
-        # Retry suspended tracks
-        suspended_tracks = retry_suspended_downloads(conn, playlist_name)
-        for track in suspended_tracks:
-            logging.info(f"Retrying download for suspended track: {track.name} by {track.artists}")
-            download_success = slskd.download_from_search(track.artists, track.name, playlist_name)
+            logging.warning(f"All download attempts failed for: {track.name}")
+            update_download_status(conn, track.id, playlist_name, success=False)
 
-            if download_success:
-                update_download_status(conn, track.id, playlist_name, success=True, file_path=None)
-                logging.info(f"Marked track {track.name} as downloaded after retry.")
-            else:
-                logging.info(f"Retry failed: {track.name}")
-
-            process_downloaded_tracks(playlist_name, conn)
-
-        # Notify if all are downloaded
         if all_tracks_downloaded(conn, playlist_name):
             send_ntfy_notification(NTFY_URL, NTFY_TOPIC, f"All tracks in {playlist_name} have been downloaded! 🎉")
 
-    # Continuous loop
     while True:
         logging.info("Starting new cycle of playlist checks")
         for playlist_url in playlist_urls:
-            logging.info(f"Checking playlist: {playlist_url}")
             playlist_id = get_playlist_id(playlist_url)
             if not playlist_id:
                 logging.error(f"Skipping invalid playlist URL: {playlist_url}")
                 continue
 
             playlist_name = sanitize_table_name(sp.playlist(playlist_id)['name'])
+            fetch_and_compare_tracks(conn, playlist_id, playlist_name, sp)
 
-            # Refresh tracks
-            new_tracks = fetch_and_compare_tracks(conn, playlist_id, playlist_name, sp)
-            for track in new_tracks:
-                logging.info(f'Attempting download for new track: {track.name} by {track.artists}')
-                file_path = slskd.download_from_search(track.artists, track.name, playlist_name)
-                if file_path:
-                    final_path = move_downloaded_file(file_path, playlist_name)
+            cursor = conn.cursor()
+            cursor.execute(f"""
+                SELECT id, name, artists, album FROM "{playlist_name}"
+                WHERE downloaded = 0 AND (suspended_until IS NULL OR suspended_until < datetime('now'))
+            """)
+            rows = cursor.fetchall()
+            pending_tracks = [Track(row[0], row[1], row[2], row[3]) for row in rows]
+            logging.info(f"{len(pending_tracks)} tracks in playlist {playlist_name} are still not downloaded.")
 
-                    if final_path:
+            for track in pending_tracks:
+                logging.info(f"Retrying track: {track.name} by {track.artists}")
+                search_result = slskd.perform_search(track.artists, track.name)
+
+                if search_result:
+                    file_path = slskd.download_best_candidate(search_result)
+                    if file_path and process_downloaded_tracks(playlist_name, conn):
+                        final_path = move_track_to_playlist_folder(file_path, playlist_name)
                         update_download_status(conn, track.id, playlist_name, success=True, file_path=final_path)
-                        logging.info(f"Marked track {track.name} as downloaded after retry.")
-                        
-                        process_downloaded_tracks(playlist_name, conn)  # Trigger metadata tagging
-                    else:
-                        logging.warning(f"File was downloaded but could not be moved: {file_path}")
-                else:
-                    logging.info(f"Retry failed: {track.name}")
+                        continue
 
-
-            process_downloaded_tracks(playlist_name, conn)
-
-            # Retry suspended tracks
-            suspended_tracks = retry_suspended_downloads(conn, playlist_name)
-            for track in suspended_tracks:
-                logging.info(f"Retrying download for suspended track: {track.name} by {track.artists}")
-                file_path = slskd.download_from_search(track.artists, track.name, playlist_name)
-                if file_path:
-                    final_path = move_downloaded_file(file_path, playlist_name)
-
-                    if final_path:
+                    file_path = slskd.download_best_candidate(search_result, exclude_first=True)
+                    if file_path and process_downloaded_tracks(playlist_name, conn):
+                        final_path = move_track_to_playlist_folder(file_path, playlist_name)
                         update_download_status(conn, track.id, playlist_name, success=True, file_path=final_path)
-                        logging.info(f"Marked track {track.name} as downloaded after retry.")
-                        process_downloaded_tracks(playlist_name, conn)  # Trigger metadata tagging
-                    else:
-                        logging.warning(f"File was downloaded but could not be moved: {file_path}")
-                else:
-                    logging.info(f"Retry failed: {track.name}")
+                        continue
 
-                process_downloaded_tracks(playlist_name, conn)
+                update_download_status(conn, track.id, playlist_name, success=False)
 
-            # Notify if all are downloaded
             if all_tracks_downloaded(conn, playlist_name):
                 send_ntfy_notification(NTFY_URL, NTFY_TOPIC, f"All tracks in {playlist_name} have been downloaded! 🎉")
 
         sleep_interval(5)
-
-    else:
-        logging.error("Failed to connect to the SQLite database.")
 
 if __name__ == "__main__":
     main()
