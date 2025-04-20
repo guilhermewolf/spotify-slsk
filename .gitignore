@@ -1,2 +1,8 @@
 .env
 data/
+downloads/
+slsk_app/
+.DS_Store
+__pycache__/
+.cache
+test.py

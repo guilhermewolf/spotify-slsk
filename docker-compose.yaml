@@ -4,7 +4,25 @@ services:
   spotify-slsk:
     build: .
     env_file:
-      - .env  # Load environment variables from .env file
+      - .env
     volumes:
       - ./data:/app/data
+      - ./downloads:/downloads
+    depends_on:
+      - slskd
     #restart: unless-stopped
+
+  slskd:
+    image: slskd/slskd:latest
+    env_file:
+      - .env
+    volumes:
+      - ./downloads:/downloads
+      - ./downloads/incomplete:/downloads/incomplete
+      - ./slsk_app:/app
+    ports:
+      - "5030:5030"
+    # restart: unless-stopped
+
+volumes:
+  slskd-downloads:
