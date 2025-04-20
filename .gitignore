@@ -1,6 +1,7 @@
 .env
 data/
 downloads/
+playlists/
 slsk_app/
 .DS_Store
 __pycache__/

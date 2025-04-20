@@ -227,14 +227,17 @@ def wait_for_completion(candidate, timeout=300):
         time.sleep(2)
 
 
-def _wait_for_external_processing(filename):
+def _wait_for_external_processing(file_path):
+    if "/incomplete/" in file_path:
+        logging.warning(f"Rejected incomplete path: {file_path}")
+        return False
+
     start = time.time()
     while time.time() - start < EXTERNAL_PROCESS_WAIT_TIMEOUT:
-        file_path = find_file_in_downloads(os.path.basename(filename), base_dir=DOWNLOAD_DIR)
-        if file_path and os.path.exists(file_path):
-            logging.info(f"File confirmed: {file_path}")
-            return file_path
+        if os.path.exists(file_path):
+            logging.info(f"File confirmed at: {file_path}")
+            return True
         time.sleep(2)
 
-    logging.warning(f"File did not appear in expected location within timeout: {file_path or filename}")
-    return None
+    logging.warning(f"File did not appear within timeout: {file_path}")
+    return False

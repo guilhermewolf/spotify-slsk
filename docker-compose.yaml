@@ -3,11 +3,13 @@ version: '3.8'
 services:
   spotify-slsk:
     build: .
+    #image: ghcr.io/guilhermewolf/spotify-slsk/spotify-slsk:latest
     env_file:
       - .env
     volumes:
       - ./data:/app/data
       - ./downloads:/downloads
+      - ./playlists:/playlists
     depends_on:
       - slskd
     #restart: unless-stopped
@@ -22,7 +24,5 @@ services:
       - ./slsk_app:/app
     ports:
       - "5030:5030"
-    # restart: unless-stopped
+  #   # restart: unless-stopped
 
-volumes:
-  slskd-downloads:

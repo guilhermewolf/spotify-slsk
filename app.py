@@ -217,13 +217,37 @@ def retry_suspended_downloads(conn, table_name):
 
 def extract_metadata_from_file(file_path):
     try:
-        audio = File(file_path)
-        if not audio:
+        ext = os.path.splitext(file_path)[1].lower()
+        
+        if ext == ".mp3":
+            audio = MP3(file_path, ID3=ID3)
+            title = audio.tags.get("TIT2")
+            artist = audio.tags.get("TPE1")
+            album = audio.tags.get("TALB")
+
+            title = title.text[0] if title else None
+            artist = artist.text[0] if artist else None
+            album = album.text[0] if album else None
+
+        elif ext == ".flac":
+            audio = FLAC(file_path)
+            title = audio.get("title", [None])[0]
+            artist = audio.get("artist", [None])[0]
+            album = audio.get("album", [None])[0]
+
+        elif ext == ".aiff":
+            audio = AIFF(file_path)
+            title = audio.get("TIT2", [None])[0]
+            artist = audio.get("TPE1", [None])[0]
+            album = audio.get("TALB", [None])[0]
+
+        elif ext == ".wav":
+            logging.warning("WAV format may not have embedded metadata.")
             return None, None, None
 
-        title = safe_get(audio.get("title", [None]))
-        artist = safe_get(audio.get("artist", [None]))
-        album = safe_get(audio.get("album", [None]))
+        else:
+            logging.warning(f"Unsupported audio format for metadata: {ext}")
+            return None, None, None
 
         logging.info(f"Extracted metadata from file: {file_path} - Title: {title}, Artist: {artist}, Album: {album}")
         return title, artist, album
