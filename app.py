@@ -266,7 +266,7 @@ def all_tracks_downloaded(conn, table_name):
 def move_track_to_playlist_folder(track_path: str, playlist_name: str) -> str:
     try:
         # Use the correct base path
-        base_dir = os.getenv("DATA_ROOT", "/app/data")
+        base_dir = os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists")
         dest_dir = os.path.join(base_dir, playlist_name)
         os.makedirs(dest_dir, exist_ok=True)
 
