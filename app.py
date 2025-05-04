@@ -35,6 +35,21 @@ def get_playlist_id(playlist_url):
 def sanitize_input(text):
     return re.sub(r'[^A-Za-z0-9 ]+', '', text)
 
+def fetch_all_playlist_tracks(sp, playlist_id):
+    tracks = []
+    offset = 0
+    limit = 100
+
+    while True:
+        results = sp.playlist_tracks(playlist_id, offset=offset, limit=limit)
+        items = results.get('items', [])
+        if not items:
+            break
+        tracks.extend(items)
+        offset += len(items)
+
+    return tracks
+
 def fetch_and_compare_tracks(conn, playlist_id, sp):
     playlist_info = sp.playlist(playlist_id)
     playlist_title = playlist_info['name']
@@ -43,23 +58,32 @@ def fetch_and_compare_tracks(conn, playlist_id, sp):
     create_table(conn, table_name)
 
     logging.info(f"Fetching tracks for playlist ID: {playlist_id} into table: {table_name}")
-    results = sp.playlist_tracks(playlist_id)
-    logging.info(f"Fetched {len(results['items'])} tracks from Spotify for playlist {table_name}")
+    items = fetch_all_playlist_tracks(sp, playlist_id)
+    logging.info(f"Fetched {len(items)} tracks from Spotify for playlist {table_name}")
 
     db_tracks = {track[0]: track for track in fetch_all_tracks(conn, table_name)}
     new_tracks = []
 
-    for item in results['items']:
+    for item in items:
         track = item['track']
         artists_str = extract_artists_string(track)
 
         logging.debug(f"Fetched track: {track['name']} by {artists_str}")
 
         if track['id'] not in db_tracks:
-            track_data = (track['id'], track['name'], artists_str, track['album']['name'])
+            track_data = (
+                track['id'],
+                track['name'],
+                artists_str,
+                track['album']['name']
+            )
             insert_track(conn, table_name, track_data)
-            logging.info(f"New Song found in {table_name}: {track['name']} by {artists_str} from album {track['album']['name']}")
-            new_tracks.append(Track(track['id'], track['name'], artists_str, track['album']['name'], playlist_id))
+            logging.info(
+                f"New Song found in {table_name}: {track['name']} by {artists_str} from album {track['album']['name']}"
+            )
+            new_tracks.append(
+                Track(track['id'], track['name'], artists_str, track['album']['name'], playlist_id)
+            )
 
     logging.info(f"Found {len(new_tracks)} new tracks to download in playlist {table_name}")
     return new_tracks, table_name
