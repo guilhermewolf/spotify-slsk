@@ -31,8 +31,10 @@ def perform_search(artist, title, timeout=30):
     logging.info(f"Searching for: {query}")
 
     try:
-        search = slskd.searches.search_text(searchText=query)
-
+        search = slskd.searches.search_text(
+            searchText=query,
+            filterResponses=True
+        )
         start = time.time()
         while time.time() - start < timeout:
             state = slskd.searches.state(search["id"])["state"]
@@ -85,6 +87,12 @@ def extract_candidates(search_results, expected_title, expected_artist, min_titl
             if ext not in PREFERRED_FORMATS:
                 continue
 
+            # Filter MP3s that are not 320 kbps
+            bitrate = file.get("bitRate")
+            if ext == ".mp3" and bitrate != 320:
+                logging.debug(f"Skipped {filename} — MP3 with bitrate {bitrate} kbps")
+                continue
+
             base = os.path.basename(filename)
             clean_base = base.replace("_", " ").replace("-", " ").lower()
 
@@ -98,8 +106,9 @@ def extract_candidates(search_results, expected_title, expected_artist, min_titl
                 )
                 candidates.append({
                     "user": user,
-                    "filename": base,  # store only basename here
+                    "filename": base,
                     "size": file.get("size"),
+                    "bitrate": bitrate,
                     "ext": ext,
                     "title_score": title_score,
                     "artist_score": artist_score,
