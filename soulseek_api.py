@@ -26,7 +26,7 @@ slskd = slskd_api.SlskdClient(
     url_base=slskd_url_base,
 )
 
-def perform_search(artist, title, timeout=30):
+def perform_search(artist, title, timeout=300):
     query = f"{title} {artist}"
     logging.info(f"Searching for: {query}")
 
