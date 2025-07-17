@@ -3,6 +3,7 @@ import time
 import logging
 import slskd_api
 import shutil
+import re
 from rapidfuzz import fuzz
 from db import get_tried_files, add_tried_file
 
@@ -27,13 +28,16 @@ slskd = slskd_api.SlskdClient(
 )
 
 def perform_search(artist, title, timeout=300):
-    query = f"{title} {artist}"
+    # Sanitize title and artist, removing special characters
+    clean_title = re.sub(r'[^\w\s]', '', title).lower().strip()
+    clean_artist = re.sub(r'[^\w\s]', '', artist).lower().strip()
+    query = f"{clean_title} {clean_artist}"
     logging.info(f"Searching for: {query}")
 
     try:
         search = slskd.searches.search_text(
             searchText=query,
-            filterResponses=True
+            filterResponses=False
         )
         start = time.time()
         while time.time() - start < timeout:
@@ -52,7 +56,6 @@ def perform_search(artist, title, timeout=300):
     except Exception as e:
         logging.error(f"Search failed for '{query}': {e}")
         return []
-
 def slskd_version_check(version, target="0.22.2"):
     version_tuple = tuple(map(int, version.split(".")[:3]))
     target_tuple = tuple(map(int, target.split(".")[:3]))
