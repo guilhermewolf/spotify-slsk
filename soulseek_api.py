@@ -76,44 +76,89 @@ def cancel_and_delete(delete_dir, username, files):
         except Exception as e:
             logging.warning(f"Could not delete {delete_dir}: {e}")
 
-def extract_candidates(search_results, expected_title, expected_artist, min_title_score=85, min_artist_score=75):
-    candidates = []
+def clean_filename(filename):
+    """
+    Clean a filename by removing common tags, normalizing spaces, and removing the extension.
+    
+    Args:
+        filename (str): The raw filename from Soulseek search results.
+    
+    Returns:
+        str: The cleaned filename in lowercase, without tags or extension.
+    """
+    # Remove text within brackets and parentheses (e.g., [FLAC], (2013))
+    filename = re.sub(r'\[.*?\]', '', filename)
+    filename = re.sub(r'\(.*?\)', '', filename)
+    # Remove common metadata tags (e.g., 24bit, 44.1kHz)
+    filename = re.sub(r'\b\d{1,2}bit\b|\b\d{1,3}\.\d{1,2}kHz\b|\b\d{4}\b', '', filename, flags=re.IGNORECASE)
+    # Remove file extension
+    filename = os.path.splitext(filename)[0]
+    # Replace underscores and hyphens with spaces
+    filename = filename.replace("_", " ").replace("-", " ")
+    # Normalize multiple spaces to a single space
+    filename = ' '.join(filename.split())
+    return filename.lower().strip()
 
+def extract_candidates(search_results, expected_title, expected_artist, min_title_score=85, min_artist_score=75):
+    """
+    Extract valid file candidates from Soulseek search results based on title and artist matching.
+    
+    Args:
+        search_results (list): List of search result dictionaries from slskd API.
+        expected_title (str): The expected track title from Spotify.
+        expected_artist (str): The expected artist(s) from Spotify, comma-separated.
+        min_title_score (float): Minimum fuzzy matching score for title (default: 85).
+        min_artist_score (float): Minimum fuzzy matching score for artist (default: 75).
+    
+    Returns:
+        list: List of candidate dictionaries with user, filename, size, bitrate, extension, and scores.
+    """
+    candidates = []
+    # Clean expected title
+    expected_title_clean = ' '.join(expected_title.lower().split())
+    # Split and clean expected artists
+    expected_artists = [artist.strip().lower() for artist in expected_artist.split(',')]
+    
     logging.debug(f"Search results received: {len(search_results)} total users")
+    logging.debug(f"Expected title: {expected_title_clean}")
+    logging.debug(f"Expected artists: {expected_artists}")
+    
     for result in search_results:
-        logging.debug(f"User: {result['username']} has {len(result.get('files', []))} files")
-        user = result["username"]
-        for file in result.get("files", []):
+        user = result.get("username", "unknown")
+        files = result.get("files", [])
+        logging.debug(f"User: {user} has {len(files)} files")
+        
+        for file in files:
             filename = file.get("filename")
             if not filename:
+                logging.debug(f"Skipping file: No filename in {file}")
                 continue
-
+                
             ext = os.path.splitext(filename)[1].lower()
-            if ext not in PREFERRED_FORMATS:
-                continue
-
-            # Filter MP3s that are not 320 kbps
-            bitrate = file.get("bitRate")
-            logging.debug(f"Inspecting file: {filename} | Ext: {ext} | Bitrate: {bitrate}")
-
             if ext not in PREFERRED_FORMATS:
                 logging.debug(f"Skipping {filename}: unsupported format ({ext})")
                 continue
+                
+            # Filter MP3s that are not 320 kbps
+            bitrate = file.get("bitrate")
             if ext == ".mp3" and bitrate != 320:
                 logging.debug(f"Skipped {filename} — MP3 with bitrate {bitrate} kbps")
                 continue
-
+                
             base = os.path.basename(filename)
-            clean_base = base.replace("_", " ").replace("-", " ").lower()
-
-            title_score = fuzz.partial_ratio(expected_title.lower(), clean_base)
-            artist_score = fuzz.partial_ratio(expected_artist.lower(), clean_base)
-
-            if title_score >= min_title_score and artist_score >= min_artist_score:
-                logging.debug(
-                    f"Accepted: {base} "
-                    f"(title_score: {title_score:.2f}, artist_score: {artist_score:.2f})"
-                )
+            clean_base = clean_filename(base)
+            logging.debug(f"Cleaned filename: {clean_base}")
+            
+            # Compute title score
+            title_score = fuzz.partial_ratio(expected_title_clean, clean_base)
+            # Compute artist scores and take the maximum
+            artist_scores = [fuzz.partial_ratio(artist, clean_base) for artist in expected_artists]
+            max_artist_score = max(artist_scores) if artist_scores else 0
+            
+            logging.debug(f"Scores for {base} - Title: {title_score:.2f}, Max Artist: {max_artist_score:.2f}")
+            
+            if title_score >= min_title_score and max_artist_score >= min_artist_score:
+                logging.debug(f"Accepted: {base} (title_score: {title_score:.2f}, artist_score: {max_artist_score:.2f})")
                 candidates.append({
                     "user": user,
                     "filename": base,
@@ -121,14 +166,12 @@ def extract_candidates(search_results, expected_title, expected_artist, min_titl
                     "bitrate": bitrate,
                     "ext": ext,
                     "title_score": title_score,
-                    "artist_score": artist_score,
+                    "artist_score": max_artist_score,
                 })
             else:
-                logging.debug(
-                    f"Rejected: {base} "
-                    f"(title_score: {title_score:.2f}, artist_score: {artist_score:.2f})"
-                )
-
+                logging.debug(f"Rejected: {base} (title_score: {title_score:.2f}, artist_score: {max_artist_score:.2f})")
+    
+    logging.debug(f"Final candidates count: {len(candidates)}")
     return candidates
 
 def sort_candidates(candidates):
