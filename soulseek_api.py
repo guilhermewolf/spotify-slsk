@@ -76,7 +76,9 @@ def cancel_and_delete(delete_dir, username, files):
 def extract_candidates(search_results, expected_title, expected_artist, min_title_score=85, min_artist_score=75):
     candidates = []
 
+    logging.debug(f"Search results received: {len(search_results)} total users")
     for result in search_results:
+        logging.debug(f"User: {result['username']} has {len(result.get('files', []))} files")
         user = result["username"]
         for file in result.get("files", []):
             filename = file.get("filename")
@@ -89,6 +91,11 @@ def extract_candidates(search_results, expected_title, expected_artist, min_titl
 
             # Filter MP3s that are not 320 kbps
             bitrate = file.get("bitRate")
+            logging.debug(f"Inspecting file: {filename} | Ext: {ext} | Bitrate: {bitrate}")
+
+            if ext not in PREFERRED_FORMATS:
+                logging.debug(f"Skipping {filename}: unsupported format ({ext})")
+                continue
             if ext == ".mp3" and bitrate != 320:
                 logging.debug(f"Skipped {filename} — MP3 with bitrate {bitrate} kbps")
                 continue

@@ -13,21 +13,21 @@ class TimezoneFormatter(logging.Formatter):
         return record_time.strftime(datefmt or "%Y-%m-%d %H:%M:%S")
 
 def setup_logging():
-    log_level = logging.INFO
+    log_level_str = os.getenv('LOGLEVEL', 'INFO').upper()
+    log_level = getattr(logging, log_level_str, logging.INFO)
     timezone = os.getenv('TZ', 'UTC')
 
-    # Set up basic configuration
     logging.basicConfig(level=log_level)
-    
-    # Use the TimezoneFormatter
+
     formatter = TimezoneFormatter(
         fmt='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S',
         tz=timezone
     )
-    
+
     handler = logging.StreamHandler()
     handler.setFormatter(formatter)
     logging.getLogger().handlers = [handler]
-    
+
     logging.info(f"Logging is configured with timezone: {timezone}")
+    logging.info(f"Logging level is set to: {log_level_str}")
