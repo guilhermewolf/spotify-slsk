@@ -7,9 +7,12 @@ import re
 from rapidfuzz import fuzz
 from db import get_tried_files, add_tried_file
 
+DEFAULT_FORMATS = ".flac,.mp3,.aiff,.wav"
+
 PREFERRED_FORMATS = [
-    fmt.strip().lower()
-    for fmt in os.getenv("SLSKD_PREFERRED_FORMATS", ".flac,.mp3,.aiff,.wav").split(",")
+    fmt_cleaned.lower()
+    for fmt in os.getenv("SLSKD_PREFERRED_FORMATS", DEFAULT_FORMATS).split(",")
+    if (fmt_cleaned := fmt.strip().strip('"').strip("'"))
 ]
 
 DOWNLOAD_DIR = os.getenv("SLSKD_DOWNLOADS_DIR", "/downloads")
