@@ -102,7 +102,7 @@ def clean_filename(filename):
     filename = ' '.join(filename.split())
     return filename.lower().strip()
 
-def extract_candidates(search_results, expected_title, expected_artist, min_title_score=85, min_artist_score=75):
+def extract_candidates(search_results, expected_title, expected_artist, min_title_score=80, min_artist_score=70):
     """
     Extract valid file candidates from Soulseek search results based on title and artist matching.
     
@@ -118,12 +118,11 @@ def extract_candidates(search_results, expected_title, expected_artist, min_titl
     """
     candidates = []
     # Clean expected title
-    expected_title_clean = ' '.join(expected_title.lower().split())
-    # Split and clean expected artists
-    expected_artists = [artist.strip().lower() for artist in expected_artist.split(',')]
+    expected_title_norm = " ".join(expected_title.lower().replace("-", " ").split())
+    expected_artists = [a.strip().lower() for a in expected_artist.split(",")]
     
     logging.debug(f"Search results received: {len(search_results)} total users")
-    logging.debug(f"Expected title: {expected_title_clean}")
+    logging.debug(f"Expected title: {expected_title_norm}")
     logging.debug(f"Expected artists: {expected_artists}")
     
     for result in search_results:
@@ -153,9 +152,9 @@ def extract_candidates(search_results, expected_title, expected_artist, min_titl
             logging.debug(f"Cleaned filename: {clean_base}")
             
             # Compute title score
-            title_score = fuzz.partial_ratio(expected_title_clean, clean_base)
+            title_score = fuzz.token_set_ratio(expected_title_norm, clean_base)
             # Compute artist scores and take the maximum
-            artist_scores = [fuzz.partial_ratio(artist, clean_base) for artist in expected_artists]
+            artist_scores = [fuzz.token_set_ratio(artist, clean_base) for artist in expected_artists]
             max_artist_score = max(artist_scores) if artist_scores else 0
             
             logging.debug(f"Scores for {base} - Title: {title_score:.2f}, Max Artist: {max_artist_score:.2f}")
