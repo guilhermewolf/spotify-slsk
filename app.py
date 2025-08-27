@@ -50,159 +50,12 @@ def fetch_all_playlist_tracks(sp, playlist_id):
 
     return tracks
 
-# --- BEGIN: Existing files reconciliation helpers ---
-
-def _first(val, default=""):
-    """Return first element if val is a list/tuple, else the string itself."""
-    if val is None:
-        return default
-    if isinstance(val, (list, tuple)):
-        return val[0] if val else default
-    return val
-
-def _normalize_text(s: str) -> str:
-    """Loose normalization for matching (case/spacing/punctuation-insensitive)."""
-    if not s:
-        return ""
-    s = s.lower()
-    s = re.sub(r"[^a-z0-9]+", "", s)  # keep only alphanumerics
-    return s.strip()
-
-def _read_audio_tags(path: str):
-    """
-    Read tags using mutagen (EasyID3-like keys when possible).
-    Returns (title, artist, album). Falls back to filename for title.
-    """
-    title = artist = album = ""
-    try:
-        audio = File(path, easy=True)  # uses your existing import
-        if audio:
-            title  = _first(audio.get("title", ""), "")
-            artist = _first(audio.get("artist", ""), "")
-            album  = _first(audio.get("album", ""), "")
-    except Exception as e:
-        logging.debug(f"Tag read failed for {path}: {e}")
-
-    if not title:
-        title = os.path.splitext(os.path.basename(path))[0]
-    return title or "", artist or "", album or ""
-
-def _preferred_exts_from_env() -> tuple:
-    """
-    Build a tuple of allowed lowercase extensions (including the dot) from
-    SLSKD_PREFERRED_FORMATS. Examples:
-      - 'mp3,flac' -> ('.mp3', '.flac')
-      - 'MP3|WAV'  -> ('.mp3', '.wav')
-    If not set, default to common audio types.
-    """
-    raw = os.environ.get("SLSKD_PREFERRED_FORMATS", "")
-    if not raw.strip():
-        return (".mp3", ".flac", ".aiff", ".wav", ".m4a", ".ogg")
-    parts = re.split(r"[,\|]+", raw.strip())
-    exts = []
-    for p in parts:
-        p = p.strip().lower()
-        if not p:
-            continue
-        if not p.startswith("."):
-            p = "." + p
-        exts.append(p)
-    return tuple(sorted(set(exts)))
-
-def _resolve_playlist_dir(playlist_name: str) -> str:
-    """
-    Determine where files for this playlist should live.
-    Prefers <SLSKD_DOWNLOADS_DIR>/<sanitized playlist name> if it exists,
-    otherwise falls back to <SLSKD_DOWNLOADS_DIR>.
-    """
-    downloads_base = os.environ.get("SLSKD_DOWNLOADS_DIR", "/downloads")
-    from utils import sanitize_table_name
-    candidate = os.path.join(downloads_base, sanitize_table_name(playlist_name))
-    if os.path.isdir(candidate):
-        return candidate
-    return downloads_base
-
-def scan_existing_files_for_playlist(conn, table_name: str, playlist_name: str):
-    """
-    Scan the playlist folder and mark DB rows as downloaded when we find
-    matching audio files by (title, artist) metadata. Only files with
-    extensions from SLSKD_PREFERRED_FORMATS are considered.
-    """
-    from db import fetch_all_tracks, update_download_status
-
-    playlist_dir = _resolve_playlist_dir(playlist_name)
-    if not os.path.isdir(playlist_dir):
-        logging.info(f"No playlist directory found to scan: {playlist_dir}")
-        return
-
-    allowed_exts = _preferred_exts_from_env()
-    logging.info(f"Reconciling existing files in {playlist_dir} (allowed: {', '.join(allowed_exts)})")
-
-    # Build quick lookup of DB rows not yet downloaded
-    rows = fetch_all_tracks(conn, table_name) or []
-    pending = []
-    for r in rows:
-        if isinstance(r, dict):
-            downloaded = int(r.get("downloaded", 0))
-            name = r.get("name") or ""
-            artist = r.get("artist") or ""
-            track_id = r.get("id")
-        else:
-            # Fallback if fetch_all_tracks returns tuples in order:
-            # (id, name, artist, album, downloaded, final_path, ...)
-            track_id, name, artist, *rest = r
-            downloaded = int(rest[1]) if len(rest) > 1 else 0
-
-        if not downloaded:
-            pending.append((track_id, _normalize_text(name), _normalize_text(artist)))
-
-    if not pending:
-        logging.info(f"No pending tracks in DB for table '{table_name}' to reconcile.")
-        return
-
-    pending_map = {(title, artist): tid for (tid, title, artist) in pending}
-
-    matched = 0
-    scanned = 0
-
-    for root, _dirs, files in os.walk(playlist_dir):
-        for fname in files:
-            if not fname.lower().endswith(allowed_exts):
-                continue
-            scanned += 1
-            fpath = os.path.join(root, fname)
-            title, artist, album = _read_audio_tags(fpath)
-            key = (_normalize_text(title), _normalize_text(artist))
-
-            tid = pending_map.get(key)
-            if tid is None:
-                continue
-
-            try:
-                # Named-args version
-                update_download_status(conn, table_name, tid, downloaded=1, final_path=fpath)
-            except TypeError:
-                # Positional-args fallback: (conn, table, track_id, downloaded, final_path)
-                update_download_status(conn, table_name, tid, 1, fpath)
-            matched += 1
-            pending_map.pop(key, None)
-            logging.info(f"Matched existing file -> DB updated: '{title}' by '{artist}' @ {fpath}")
-
-    logging.info(
-        f"Existing-files reconciliation complete for '{playlist_name}'. "
-        f"Scanned {scanned} files, matched {matched}."
-    )
-
-# --- END: Existing files reconciliation helpers ---
-
-
 def fetch_and_compare_tracks(conn, playlist_id, sp):
     playlist_info = sp.playlist(playlist_id)
     playlist_title = playlist_info['name']
     table_name = f"{sanitize_table_name(playlist_title)}"
 
     create_table(conn, table_name)
-    scan_existing_files_for_playlist(conn, table_name, playlist_title)
 
     logging.info(f"Fetching tracks for playlist ID: {playlist_id} into table: {table_name}")
     items = fetch_all_playlist_tracks(sp, playlist_id)
@@ -332,43 +185,33 @@ def update_download_status(conn, track_id, table_name, success=False, file_path=
 
 def clean_up_untracked_files(conn, download_path, table_name):
     logging.info(f"Cleaning up untracked files in {download_path}")
-    allowed_exts = _preferred_exts_from_env()
+    tracked_files = set()
 
     # Fetch paths from the database
     cursor = conn.cursor()
-    cursor.execute(f'SELECT path FROM "{table_name}" WHERE downloaded = 1')
+    cursor.execute(f"SELECT path FROM {table_name} WHERE downloaded = 1")
     db_files = {row[0] for row in cursor.fetchall() if row[0] is not None}
 
     # List files on the filesystem
     for root, dirs, files in os.walk(download_path):
         for file in files:
-            if not file.lower().endswith(allowed_exts):
-                continue
-            file_path = os.path.join(root, file)
-            if file_path not in db_files:
-                try:
+            if file.endswith(".mp3"):
+                file_path = os.path.join(root, file)
+                if file_path not in db_files:
                     os.remove(file_path)
                     logging.info(f"Deleted untracked file: {file_path}")
-                except Exception as e:
-                    logging.error(f"Failed to delete untracked file {file_path}: {e}")
-            else:
-                logging.info(f"Retaining tracked file: {file_path}")
+                else:
+                    logging.info(f"Retaining tracked file: {file_path}")
 
 def startup_check(conn, playlist_name):
     logging.info(f"Performing startup check for playlist: {playlist_name}")
-
-    # Use configured downloads base and the supplied (sanitized) playlist_name
-    downloads_base = os.environ.get("SLSKD_DOWNLOADS_DIR", "/downloads")
-    download_path = os.path.join(downloads_base, playlist_name)
-
-    allowed_exts = _preferred_exts_from_env()
+    download_path = f"/downloads/{playlist_name}"
 
     for root, _, files in os.walk(download_path):
         for f in files:
-            if not f.lower().endswith(allowed_exts):
-                continue
-            file_path = os.path.join(root, f)
-            process_downloaded_file(file_path, playlist_name, conn)
+            if f.lower().endswith(('.mp3', '.flac', '.aiff', '.wav')):
+                file_path = os.path.join(root, f)
+                process_downloaded_file(file_path, playlist_name, conn)
 
     clean_up_untracked_files(conn, download_path, playlist_name)
     logging.info(f"Startup check complete for playlist: {playlist_name}")
