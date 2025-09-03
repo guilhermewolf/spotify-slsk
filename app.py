@@ -9,7 +9,16 @@ import random
 import requests
 import time
 import sqlite3
-from db import create_connection, create_table, insert_track, fetch_all_tracks, update_download_status, clear_tried_entries, add_tried_file, get_pending_tracks
+from db import (
+    create_connection,
+    create_table,
+    insert_track,
+    fetch_all_tracks,
+    update_download_status,
+    clear_tried_entries,
+    add_tried_file,
+    get_pending_tracks,
+)
 from log_config import setup_logging
 from utils import sleep_interval
 from mutagen import File
@@ -89,55 +98,122 @@ def fetch_and_compare_tracks(conn, playlist_id, sp):
     return new_tracks, table_name
 
 
-def find_closest_match(conn, playlist_name, title, artist):
-    logging.info(f"Finding closest match for track: {title} by {artist} in playlist {playlist_name}")
+def find_closest_match(conn, table_name, title, artist):
+    """
+    Return (best_row, score) where best_row is (id, name, artists).
+    More tolerant matching:
+      - normalizes punctuation/case
+      - strips bracketed parts in titles (e.g., remixes)
+      - supports multi-artist strings ("A, B" vs "A feat. B")
+      - weights title (0.6) higher than artist (0.4)
+    """
+    import re
+    import difflib
+
+    def norm(s: str) -> str:
+        if not s:
+            return ""
+        s = s.lower()
+        s = re.sub(r"\s*\([^)]*\)|\s*\[[^\]]*\]", " ", s)     # drop (...) and [...]
+        s = re.sub(r"(feat\.|featuring|ft\.)", "", s)          # drop feat variants
+        s = re.sub(r"[^\w\s]+", " ", s)                        # punctuation -> space
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
+
+    def artist_tokens(s: str) -> set:
+        # split on commas, ampersand, " x ", " and ", etc.
+        s = norm(s)
+        parts = re.split(r"\s*(?:,|&| x | and )\s*", s)
+        return {p for p in parts if p}
+
+    title_q = norm(title)
+    artist_q = norm(artist)
+    artist_q_tokens = artist_tokens(artist)
+
+    logging.info(f"Finding closest match for: title='{title}' artist='{artist}' in table {table_name}")
     cursor = conn.cursor()
-    cursor.execute(f"""SELECT id, name, artists FROM "{playlist_name}";""")
-    potential_matches = cursor.fetchall()
-    
-    best_match = None
+    cursor.execute(f'SELECT id, name, artists FROM "{table_name}";')
+    rows = cursor.fetchall()
+
+    best = None
     best_score = 0.0
-    
-    for match in potential_matches:
-        db_title, db_artist = match[1], match[2]
-        title_similarity = difflib.SequenceMatcher(None, title.lower(), db_title.lower()).ratio()
-        artist_similarity = difflib.SequenceMatcher(None, artist.lower(), db_artist.lower()).ratio()
-        
-        overall_similarity = (title_similarity + artist_similarity) / 2
-        
-        if overall_similarity > best_score:
-            best_score = overall_similarity
-            best_match = match
-    
-    if best_match:
-        logging.info(f"Best match found: {best_match[1]} by {best_match[2]} with similarity score: {best_score}")
+
+    for row in rows:
+        tid, db_title, db_artists = row
+        db_title_n = norm(db_title)
+        db_artist_n = norm(db_artists)
+        db_artist_tokens = artist_tokens(db_artists)
+
+        # Title similarity
+        s_title = difflib.SequenceMatcher(None, title_q, db_title_n).ratio()
+
+        # Artist similarity: max of token-to-token sims + token overlap bonus
+        token_sims = []
+        for tq in artist_q_tokens or {artist_q}:
+            for tk in db_artist_tokens or {db_artist_n}:
+                token_sims.append(difflib.SequenceMatcher(None, tq, tk).ratio())
+        s_artist = max(token_sims) if token_sims else 0.0
+
+        # Bonus for token overlap (handles lists like "A, B")
+        if artist_q_tokens and db_artist_tokens:
+            inter = len(artist_q_tokens & db_artist_tokens)
+            union = len(artist_q_tokens | db_artist_tokens)
+            jacc = inter / union if union else 0.0
+            s_artist = max(s_artist, jacc)
+
+        score = 0.6 * s_title + 0.4 * s_artist
+        if score > best_score:
+            best_score = score
+            best = row
+
+    if best:
+        logging.info(f"Best match: {best[1]} by {best[2]} (score={best_score:.2f})")
     else:
-        logging.warning(f"No suitable match found for track: {title} by {artist}")
+        logging.warning(f"No suitable match for: '{title}' by '{artist}'")
 
-    return best_match, best_score
+    return best, best_score
 
-def process_downloaded_file(file_path, playlist_name, conn):
+def process_downloaded_file(file_path, playlist_name, conn, reconcile: bool = False):
+    """
+    Process a file that is either freshly downloaded or already on disk.
+
+    When reconcile=True:
+      - Never delete files on mismatch.
+      - If the file already lives in /playlists/<playlist_name>, don't move it again.
+    """
     title, artist, album = extract_metadata_from_file(file_path)
 
     if not title or not artist:
         logging.warning(f"❌ Missing metadata for {file_path}. Skipping tagging and DB update.")
-        _reject_and_log(file_path, playlist_name, conn, reason="invalid metadata")
+        _reject_and_log(file_path, playlist_name, conn, reason="invalid metadata", destructive=not reconcile)
         return False, None
 
     match, score = find_closest_match(conn, playlist_name, title, artist)
     if not match:
         logging.warning(f"❌ No match found in DB for {title} by {artist}.")
-        _reject_and_log(file_path, playlist_name, conn, reason="no match")
+        _reject_and_log(file_path, playlist_name, conn, reason="no match", destructive=not reconcile)
         return False, None
 
     if score < 0.6:
-        logging.warning(f"⚠️ Low match score ({score:.2f}) for {title} by {artist} — expected something else. Skipping update.")
-        _reject_and_log(file_path, playlist_name, conn, track_id=match[0], reason="low score")
+        logging.warning(f"⚠️ Low match score ({score:.2f}) for {title} by {artist}. Skipping update.")
+        _reject_and_log(file_path, playlist_name, conn, track_id=match[0], reason="low score", destructive=not reconcile)
         return False, None
 
+    # Tag before placement
     tag_audio_file(file_path, title, artist, album)
 
-    final_path = move_track_to_playlist_folder(file_path, playlist_name)
+    # If the file is already inside the playlists dir, don't move it.
+    playlists_root = os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists")
+    try:
+        already_in_library = os.path.commonpath([os.path.abspath(file_path), os.path.abspath(playlists_root)]) == os.path.abspath(playlists_root)
+    except Exception:
+        already_in_library = False
+
+    if already_in_library:
+        final_path = file_path
+    else:
+        final_path = move_track_to_playlist_folder(file_path, playlist_name)
+
     if final_path:
         update_download_status(conn, match[0], playlist_name, success=True, file_path=final_path)
         return True, final_path
@@ -145,76 +221,135 @@ def process_downloaded_file(file_path, playlist_name, conn):
     logging.error(f"❌ Failed to move {file_path} to playlist folder.")
     return False, None
 
-def _reject_and_log(file_path, playlist_name, conn, track_id=None, reason="unknown"):
+
+def _reject_and_log(file_path, playlist_name, conn, track_id=None, reason="unknown", destructive: bool = True):
+    """
+    On normal downloads we delete bad files; on reconcile we never delete.
+    """
     filename = os.path.basename(file_path)
-    try:
-        os.remove(file_path)
-        logging.info(f"🧹 Deleted file due to {reason}: {file_path}")
-    except Exception as e:
-        logging.error(f"❌ Failed to delete file {file_path}: {e}")
+
+    if destructive:
+        try:
+            os.remove(file_path)
+            logging.info(f"🧹 Deleted file due to {reason}: {file_path}")
+        except Exception as e:
+            logging.error(f"❌ Failed to delete file {file_path}: {e}")
+    else:
+        logging.info(f"ℹ️ (reconcile) Keeping unmatched file due to {reason}: {file_path}")
 
     if track_id:
         add_tried_file(conn, playlist_name, track_id, filename)
     else:
         logging.debug(f"Skipping add_tried_file() because track ID is unknown for: {filename}")
 
-def update_download_status(conn, track_id, table_name, success=False, file_path=None):
+# def update_download_status(conn, track_id, table_name, success=False, file_path=None):
+#     cursor = conn.cursor()
+#     if success:
+#         sql = f'UPDATE "{table_name}" SET downloaded = 1, attempts = 0, suspended_until = NULL, path = ? WHERE id = ?'
+#         params = (file_path, track_id)
+#         logging.info(f"Updating status of track ID: {track_id} to downloaded with path: {file_path}")
+#     else:
+#         sql = f'UPDATE "{table_name}" SET attempts = attempts + 1, last_attempt = CURRENT_TIMESTAMP WHERE id = ?'
+#         params = (track_id,)
+#         logging.info(f"Incrementing attempt count for track ID: {track_id}")
+#         cursor.execute(f'SELECT attempts FROM "{table_name}" WHERE id = ?', (track_id,))
+#         attempts = cursor.fetchone()[0]
+#         if attempts >= 3:
+#             sql = f'UPDATE "{table_name}" SET suspended_until = datetime("now", "+2 days") WHERE id = ?'
+#             logging.info(f"Track ID: {track_id} has reached max attempts, suspending for 2 days")
+
+#     try:
+#         cursor.execute(sql, params)
+#         conn.commit()
+#         logging.info(f"Updated track {track_id} status in {table_name}.")
+#     except sqlite3.Error as e:
+#         conn.rollback()
+#         logging.error(f"Error updating track status for {track_id} in {table_name}: {e}")
+
+
+def clean_up_untracked_files(conn, download_path, table_name, delete: bool = False):
+    """
+    Compare files on disk vs DB. By default, do NOT delete (safe).
+    If delete=True, remove files not present in DB.
+    """
+    logging.info(f"Cleaning up untracked files in {download_path} (delete={delete})")
     cursor = conn.cursor()
-    if success:
-        sql = f'UPDATE "{table_name}" SET downloaded = 1, attempts = 0, suspended_until = NULL, path = ? WHERE id = ?'
-        params = (file_path, track_id)
-        logging.info(f"Updating status of track ID: {track_id} to downloaded with path: {file_path}")
-    else:
-        sql = f'UPDATE "{table_name}" SET attempts = attempts + 1, last_attempt = CURRENT_TIMESTAMP WHERE id = ?'
-        params = (track_id,)
-        logging.info(f"Incrementing attempt count for track ID: {track_id}")
-        cursor.execute(f'SELECT attempts FROM "{table_name}" WHERE id = ?', (track_id,))
-        attempts = cursor.fetchone()[0]
-        if attempts >= 3:
-            sql = f'UPDATE "{table_name}" SET suspended_until = datetime("now", "+2 days") WHERE id = ?'
-            logging.info(f"Track ID: {track_id} has reached max attempts, suspending for 2 days")
-
-    try:
-        cursor.execute(sql, params)
-        conn.commit()
-        logging.info(f"Updated track {track_id} status in {table_name}.")
-    except sqlite3.Error as e:
-        conn.rollback()
-        logging.error(f"Error updating track status for {track_id} in {table_name}: {e}")
-
-
-def clean_up_untracked_files(conn, download_path, table_name):
-    logging.info(f"Cleaning up untracked files in {download_path}")
-    tracked_files = set()
-
-    # Fetch paths from the database
-    cursor = conn.cursor()
-    cursor.execute(f"SELECT path FROM {table_name} WHERE downloaded = 1")
-    db_files = {row[0] for row in cursor.fetchall() if row[0] is not None}
-
-    # List files on the filesystem
-    for root, dirs, files in os.walk(download_path):
-        for file in files:
-            if file.endswith(".mp3"):
-                file_path = os.path.join(root, file)
-                if file_path not in db_files:
-                    os.remove(file_path)
-                    logging.info(f"Deleted untracked file: {file_path}")
-                else:
-                    logging.info(f"Retaining tracked file: {file_path}")
-
-def startup_check(conn, playlist_name):
-    logging.info(f"Performing startup check for playlist: {playlist_name}")
-    download_path = f"/downloads/{playlist_name}"
+    cursor.execute(f'SELECT path FROM "{table_name}" WHERE downloaded = 1')
+    db_files = {row[0] for row in cursor.fetchall() if row[0]}
 
     for root, _, files in os.walk(download_path):
-        for f in files:
-            if f.lower().endswith(('.mp3', '.flac', '.aiff', '.wav')):
-                file_path = os.path.join(root, f)
-                process_downloaded_file(file_path, playlist_name, conn)
+        for file in files:
+            if file.lower().endswith(('.mp3', '.flac', '.aiff', '.wav', '.m4a', '.ogg')):
+                file_path = os.path.join(root, file)
+                if file_path not in db_files:
+                    if delete:
+                        try:
+                            os.remove(file_path)
+                            logging.info(f"Deleted untracked file: {file_path}")
+                        except Exception as e:
+                            logging.error(f"Failed to delete {file_path}: {e}")
+                    else:
+                        logging.info(f"(dry-run) Would delete untracked file: {file_path}")
 
-    clean_up_untracked_files(conn, download_path, playlist_name)
-    logging.info(f"Startup check complete for playlist: {playlist_name}")
+def startup_check(conn, table_name):
+    """
+    Reconcile DB with files already on disk for a given playlist table.
+    - Scans the library folder: /playlists/<table_name>
+    - Scans ONLY completed downloads: /downloads/complete (ignores /downloads/incomplete)
+    - Never deletes files during reconciliation.
+    """
+    playlists_root = os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists")
+    downloads_root = os.getenv("SLSKD_DOWNLOADS_DIR", "/downloads")
+    downloads_complete = os.path.join(downloads_root, "complete")
+
+    valid_exts = ('.mp3', '.flac', '.aiff', '.wav', '.m4a', '.ogg')
+
+    processed_count = 0
+
+    # 1) Library folder for this playlist
+    playlist_dir = os.path.join(playlists_root, table_name)
+    if os.path.isdir(playlist_dir):
+        logging.info(f"[startup] Reconciling library folder: {playlist_dir}")
+        for root, _, files in os.walk(playlist_dir):
+            for f in files:
+                lf = f.lower()
+                if not lf.endswith(valid_exts):
+                    continue
+                # Skip obvious temp/incomplete artifacts
+                if lf.endswith(('.part', '.tmp', '.partial')) or lf.startswith(('._', '~$')):
+                    continue
+                file_path = os.path.join(root, f)
+                try:
+                    process_downloaded_file(file_path, table_name, conn, reconcile=True)
+                    processed_count += 1
+                except Exception as e:
+                    logging.exception(f"[startup] Failed to reconcile {file_path}: {e}")
+    else:
+        logging.info(f"[startup] No library folder found at {playlist_dir}")
+
+    # 2) Only completed downloads (ignore /downloads/incomplete)
+    if os.path.isdir(downloads_complete):
+        logging.info(f"[startup] Reconciling completed downloads: {downloads_complete}")
+        for root, _, files in os.walk(downloads_complete):
+            for f in files:
+                lf = f.lower()
+                if not lf.endswith(valid_exts):
+                    continue
+                # Skip obvious temp/incomplete artifacts (defensive)
+                if lf.endswith(('.part', '.tmp', '.partial')) or lf.startswith(('._', '~$')):
+                    continue
+                file_path = os.path.join(root, f)
+                try:
+                    process_downloaded_file(file_path, table_name, conn, reconcile=True)
+                    processed_count += 1
+                except Exception as e:
+                    logging.exception(f"[startup] Failed to reconcile {file_path}: {e}")
+    else:
+        logging.info(f"[startup] No completed downloads folder at {downloads_complete}")
+
+    # 3) Never delete during reconcile; if you really want cleanup later, run with delete=True
+    clean_up_untracked_files(conn, playlists_root, table_name, delete=False)
+    logging.info(f"[startup] Reconciliation complete for: {table_name} (files processed: {processed_count})")
 
 def extract_artists_string(track):
     return ', '.join(artist['name'] for artist in track['artists'])
@@ -419,6 +554,8 @@ def process_playlist(sp, conn, playlist_id, ntfy_url, ntfy_topic):
     logging.info(f"🎧 Processing playlist ID: {playlist_id}")
 
     new_tracks, playlist_name = fetch_and_compare_tracks(conn, playlist_id, sp)
+
+    startup_check(conn, playlist_name)
 
     if new_tracks:
         msg = f"🔄 Playlist updated: {len(new_tracks)} new track(s) added to {playlist_name}"
