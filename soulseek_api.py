@@ -102,86 +102,109 @@ def clean_filename(filename):
     filename = ' '.join(filename.split())
     return filename.lower().strip()
 
+def _infer_bitrate_from_name(name: str) -> int | None:
+    """
+    Try to infer bitrate from the filename text.
+    Returns an integer kbps (e.g. 320) or None if not inferable.
+    """
+    text = name.lower()
+    # common patterns like [320], (320 kbps), - 320k, _320kbps, '320 kbps'
+    m = re.search(r'(?<!\d)(320|256|224|192|160|128)\s*(k|kbps)?(?!\d)', text)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:
+        return None
+
+
 def extract_candidates(search_results, expected_title, expected_artist, min_title_score=80, min_artist_score=70):
     """
     Extract valid file candidates from Soulseek search results based on title and artist matching.
-    
-    Args:
-        search_results (list): List of search result dictionaries from slskd API.
-        expected_title (str): The expected track title from Spotify.
-        expected_artist (str): The expected artist(s) from Spotify, comma-separated.
-        min_title_score (float): Minimum fuzzy matching score for title (default: 85).
-        min_artist_score (float): Minimum fuzzy matching score for artist (default: 75).
-    
-    Returns:
-        list: List of candidate dictionaries with user, filename, size, bitrate, extension, and scores.
+    Unknown MP3 bitrates are allowed (slskd often returns None); we only hard-reject if we know it's <320 kbps.
     """
     candidates = []
-    # Clean expected title
     expected_title_norm = " ".join(expected_title.lower().replace("-", " ").split())
     expected_artists = [a.strip().lower() for a in expected_artist.split(",")]
-    
+
     logging.debug(f"Search results received: {len(search_results)} total users")
     logging.debug(f"Expected title: {expected_title_norm}")
     logging.debug(f"Expected artists: {expected_artists}")
-    
+
     for result in search_results:
         user = result.get("username", "unknown")
         files = result.get("files", [])
         logging.debug(f"User: {user} has {len(files)} files")
-        
+
         for file in files:
             filename = file.get("filename")
             if not filename:
                 logging.debug(f"Skipping file: No filename in {file}")
                 continue
-                
+
             ext = os.path.splitext(filename)[1].lower()
             if ext not in PREFERRED_FORMATS:
                 logging.debug(f"Skipping {filename}: unsupported format ({ext})")
                 continue
-                
-            # Filter MP3s that are not 320 kbps
-            bitrate = file.get("bitrate")
-            if ext == ".mp3" and bitrate != 320:
-                logging.debug(f"Skipped {filename} — MP3 with bitrate {bitrate} kbps")
+
+            # bitrate as reported by slskd (may be None) + optional inference from name
+            reported_bitrate = file.get("bitrate")
+            inferred_bitrate = _infer_bitrate_from_name(os.path.basename(filename))
+            effective_bitrate = reported_bitrate if reported_bitrate is not None else inferred_bitrate
+
+            # Only reject MP3s we *know* are below 320 kbps.
+            if ext == ".mp3" and (effective_bitrate is not None) and (effective_bitrate < 320):
+                logging.debug(f"Skipped {filename} — MP3 with known sub-320 bitrate ({effective_bitrate} kbps)")
                 continue
-                
+
             base = os.path.basename(filename)
             clean_base = clean_filename(base)
             logging.debug(f"Cleaned filename: {clean_base}")
-            
+
             # Compute title score
             title_score = fuzz.token_set_ratio(expected_title_norm, clean_base)
             # Compute artist scores and take the maximum
             artist_scores = [fuzz.token_set_ratio(artist, clean_base) for artist in expected_artists]
             max_artist_score = max(artist_scores) if artist_scores else 0
-            
+
             logging.debug(f"Scores for {base} - Title: {title_score:.2f}, Max Artist: {max_artist_score:.2f}")
-            
+
             if title_score >= min_title_score and max_artist_score >= min_artist_score:
-                logging.debug(f"Accepted: {base} (title_score: {title_score:.2f}, artist_score: {max_artist_score:.2f})")
+                # Persist effective bitrate so we can sort by it; may still be None
                 candidates.append({
                     "user": user,
                     "filename": base,
                     "size": file.get("size"),
-                    "bitrate": bitrate,
+                    "bitrate": effective_bitrate,
                     "ext": ext,
                     "title_score": title_score,
                     "artist_score": max_artist_score,
                 })
+                logging.debug(
+                    f"Accepted: {base} (title_score: {title_score:.2f}, artist_score: {max_artist_score:.2f}, "
+                    f"reported_bitrate={reported_bitrate}, inferred_bitrate={inferred_bitrate})"
+                )
             else:
                 logging.debug(f"Rejected: {base} (title_score: {title_score:.2f}, artist_score: {max_artist_score:.2f})")
-    
+
     logging.debug(f"Final candidates count: {len(candidates)}")
     return candidates
 
+
 def sort_candidates(candidates):
+    """
+    Sort by preferred extension first, then by bitrate desc (unknown last).
+    """
+    def fmt_rank(ext: str) -> int:
+        return PREFERRED_FORMATS.index(ext) if ext in PREFERRED_FORMATS else len(PREFERRED_FORMATS)
+
+    def bitrate_rank(bps_k: int | None) -> int:
+        # higher is better; None treated as 0 so it sorts last
+        return bps_k or 0
+
     return sorted(
         candidates,
-        key=lambda c: PREFERRED_FORMATS.index(c["ext"])
-        if c["ext"] in PREFERRED_FORMATS
-        else len(PREFERRED_FORMATS),
+        key=lambda c: (fmt_rank(c["ext"]), -bitrate_rank(c.get("bitrate")))
     )
 
 def find_file_in_downloads(filename, base_dir="/downloads"):
