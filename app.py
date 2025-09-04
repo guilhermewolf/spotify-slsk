@@ -22,6 +22,7 @@ from db import (
 from log_config import setup_logging
 from utils import sleep_interval
 from mutagen import File
+from mutagen import File as MutagenFile
 from mutagen.id3 import ID3, TIT2, TPE1, TALB
 from mutagen.flac import FLAC
 from mutagen.aiff import AIFF
@@ -30,6 +31,18 @@ from utils import sanitize_table_name
 from spotipy.oauth2 import SpotifyClientCredentials
 from soulseek_api import perform_search, download_and_verify
 from models import Track
+
+
+MIN_MATCH_SCORE = float(os.getenv("MIN_MATCH_SCORE", "0.62"))
+PREFERRED_FORMATS = os.getenv("SLSKD_PREFERRED_FORMATS", "mp3,flac,aiff,wav,m4a,ogg")
+AUDIO_EXTS = tuple(f".{ext.strip().lower()}" for ext in PREFERRED_FORMATS.split(","))
+_STOP_PHRASES = [
+    "original mix", "extended mix", "radio edit", "remastered", "remaster",
+    "edit", "dub", "club mix", "mix", "version", "vip", "instrumental",
+    "clean", "explicit"
+]
+# Splitters for artists like "Disclosure, AlunaGeorge", "Artist A & B", "feat.", "ft."
+_ARTIST_SPLIT_RE = re.compile(r"\s*(?:,|&| and | feat\.? | ft\.? | featuring )\s*", re.IGNORECASE)
 
 def get_playlist_id(playlist_url):
     try:
@@ -97,81 +110,131 @@ def fetch_and_compare_tracks(conn, playlist_id, sp):
     logging.info(f"Found {len(new_tracks)} new tracks to download in playlist {table_name}")
     return new_tracks, table_name
 
+def _mm_strip_brackets(s: str) -> str:
+    return re.sub(r"[\[\(\{].*?[\]\)\}]", " ", s or "")
+
+def _mm_clean_title(s: str) -> str:
+    s = _mm_strip_brackets(s).lower()
+    s = re.sub(r"\b\d{3,4}\s?k?bps\b", " ", s)  # 320 kbps, etc.
+    s = re.sub(r"[-_\.]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    for phrase in _STOP_PHRASES:
+        s = re.sub(rf"\b{re.escape(phrase)}\b", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _mm_norm(s: str) -> str:
+    s = (s or "").lower().strip()
+    s = re.sub(r"[-_\.]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+def _mm_tokenize_title(s: str) -> set:
+    return {t for t in re.split(r"\W+", _mm_clean_title(s)) if t}
+
+def _mm_split_artists(s: str) -> set:
+    if not s:
+        return set()
+    parts = _ARTIST_SPLIT_RE.split(s)
+    return {p.strip().lower() for p in parts if p.strip()}
+
+def _mm_similar(a: str, b: str) -> float:
+    return difflib.SequenceMatcher(a=_mm_norm(a), b=_mm_norm(b)).ratio()
+
+def _mm_artists_overlap(a: str, b: str) -> bool:
+    A = _mm_split_artists(a)
+    B = _mm_split_artists(b)
+    if not A or not B:
+        return False
+    return bool(A.intersection(B))
+
+def _mm_titles_token_equivalent(file_title: str, db_title: str) -> bool:
+    ft = _mm_tokenize_title(file_title)
+    dt = _mm_tokenize_title(db_title)
+    if not ft or not dt:
+        return False
+    # Accept if all tokens from the shorter set are present in the longer one
+    shorter, longer = (ft, dt) if len(ft) <= len(dt) else (dt, ft)
+    return shorter.issubset(longer) or len(shorter.intersection(longer)) >= max(1, len(shorter) - 1)
+
+def _mm_remix_equivalent(file_title: str, db_title: str) -> bool:
+    # Normalize "(Walker & Royce Remix)" vs "- Walker & Royce Remix"
+    f = re.sub(r"[()\[\]{}\-–—]", " ", file_title or "", flags=re.IGNORECASE)
+    d = re.sub(r"[()\[\]{}\-–—]", " ", db_title or "", flags=re.IGNORECASE)
+    f = re.sub(r"\s+remix\b", " remix", f, flags=re.IGNORECASE)
+    d = re.sub(r"\s+remix\b", " remix", d, flags=re.IGNORECASE)
+    return _mm_titles_token_equivalent(f, d)
+
 
 def find_closest_match(conn, table_name, title, artist):
     """
-    Return (best_row, score) where best_row is (id, name, artists).
-    More tolerant matching:
-      - normalizes punctuation/case
-      - strips bracketed parts in titles (e.g., remixes)
-      - supports multi-artist strings ("A, B" vs "A feat. B")
-      - weights title (0.6) higher than artist (0.4)
+    Compatibility wrapper that delegates to the robust scorer.
+    Returns (best_row, score) where best_row is (id, name, artists).
     """
-    import re
-    import difflib
+    track_id, db_title, db_artist, score, reason = find_closest_db_match(
+        conn, table_name, file_title=title, file_artist=artist
+    )
 
-    def norm(s: str) -> str:
-        if not s:
-            return ""
-        s = s.lower()
-        s = re.sub(r"\s*\([^)]*\)|\s*\[[^\]]*\]", " ", s)     # drop (...) and [...]
-        s = re.sub(r"(feat\.|featuring|ft\.)", "", s)          # drop feat variants
-        s = re.sub(r"[^\w\s]+", " ", s)                        # punctuation -> space
-        s = re.sub(r"\s+", " ", s).strip()
-        return s
+    if track_id:
+        logging.info(f"Best match: {db_title} by {db_artist} (score={score:.2f}, reason={reason})")
+        return (track_id, db_title, db_artist), score
 
-    def artist_tokens(s: str) -> set:
-        # split on commas, ampersand, " x ", " and ", etc.
-        s = norm(s)
-        parts = re.split(r"\s*(?:,|&| x | and )\s*", s)
-        return {p for p in parts if p}
+    logging.warning(f"No suitable match for: '{title}' by '{artist}'")
+    return None, 0.0
 
-    title_q = norm(title)
-    artist_q = norm(artist)
-    artist_q_tokens = artist_tokens(artist)
+def score_track_match(file_title: str, file_artist: str, db_title: str, db_artist: str) -> tuple[float, str]:
+    """
+    Returns (score, reason). Score in [0..1]. Reason is a short string for debugging.
+    """
+    # Fast path: token equivalence (ignores mix labels/brackets)
+    if _mm_titles_token_equivalent(file_title, db_title):
+        if _mm_artists_overlap(file_artist, db_artist):
+            return 0.97, "title_tokens+artist_overlap"
+        # title tokens match but artist missing/mismatched — still very strong
+        return 0.90, "title_tokens_only"
 
-    logging.info(f"Finding closest match for: title='{title}' artist='{artist}' in table {table_name}")
-    cursor = conn.cursor()
-    cursor.execute(f'SELECT id, name, artists FROM "{table_name}";')
-    rows = cursor.fetchall()
+    # Remix-aware equivalence (hyphen vs parentheses)
+    if _mm_remix_equivalent(file_title, db_title):
+        if _mm_artists_overlap(file_artist, db_artist):
+            return 0.95, "remix_equivalent+artist_overlap"
+        return 0.88, "remix_equivalent_title_only"
 
+    # Fuzzy fallback (weighted)
+    title_sim = _mm_similar(file_title, db_title)      # handles punctuation differences
+    artist_sim = _mm_similar(file_artist, db_artist) if (file_artist and db_artist) else 0.0
+
+    # Blend title and artist; title is main signal
+    score = max(
+        title_sim,                                      # pure title similarity
+        0.75 * title_sim + 0.25 * artist_sim            # weighted blend when artist present
+    )
+
+    # Boost a bit if any artist overlap exists
+    if _mm_artists_overlap(file_artist, db_artist):
+        score = max(score, min(1.0, title_sim * 0.85 + 0.15))  # light boost
+
+    reason = f"fuzzy(title={title_sim:.2f}, artist={artist_sim:.2f})"
+    return score, reason
+
+def find_closest_db_match(conn, table_name: str, file_title: str, file_artist: str):
+    """
+    Scan the table and return (track_id, db_title, db_artist, score, reason).
+    """
+    cur = conn.cursor()
+    cur.execute(f'SELECT id, name, artists FROM "{table_name}"')
     best = None
-    best_score = 0.0
+    best_score = -1.0
+    best_reason = ""
+    best_row = (None, "", "")
 
-    for row in rows:
-        tid, db_title, db_artists = row
-        db_title_n = norm(db_title)
-        db_artist_n = norm(db_artists)
-        db_artist_tokens = artist_tokens(db_artists)
-
-        # Title similarity
-        s_title = difflib.SequenceMatcher(None, title_q, db_title_n).ratio()
-
-        # Artist similarity: max of token-to-token sims + token overlap bonus
-        token_sims = []
-        for tq in artist_q_tokens or {artist_q}:
-            for tk in db_artist_tokens or {db_artist_n}:
-                token_sims.append(difflib.SequenceMatcher(None, tq, tk).ratio())
-        s_artist = max(token_sims) if token_sims else 0.0
-
-        # Bonus for token overlap (handles lists like "A, B")
-        if artist_q_tokens and db_artist_tokens:
-            inter = len(artist_q_tokens & db_artist_tokens)
-            union = len(artist_q_tokens | db_artist_tokens)
-            jacc = inter / union if union else 0.0
-            s_artist = max(s_artist, jacc)
-
-        score = 0.6 * s_title + 0.4 * s_artist
+    for track_id, db_title, db_artist in cur.fetchall():
+        score, reason = score_track_match(file_title, file_artist, db_title, db_artist)
+        logging.debug(f"[match] candidate: file='{file_title}'/{file_artist} vs db='{db_title}'/{db_artist} -> {score:.2f} ({reason})")
         if score > best_score:
             best_score = score
-            best = row
+            best_reason = reason
+            best_row = (track_id, db_title, db_artist)
 
-    if best:
-        logging.info(f"Best match: {best[1]} by {best[2]} (score={best_score:.2f})")
-    else:
-        logging.warning(f"No suitable match for: '{title}' by '{artist}'")
-
-    return best, best_score
+    return (*best_row, best_score, best_reason)
 
 def process_downloaded_file(file_path, playlist_name, conn, reconcile: bool = False):
     """
@@ -188,15 +251,16 @@ def process_downloaded_file(file_path, playlist_name, conn, reconcile: bool = Fa
         _reject_and_log(file_path, playlist_name, conn, reason="invalid metadata", destructive=not reconcile)
         return False, None
 
+    # Route through the robust scorer (via wrapper)
     match, score = find_closest_match(conn, playlist_name, title, artist)
     if not match:
-        logging.warning(f"❌ No match found in DB for {title} by {artist}.")
         _reject_and_log(file_path, playlist_name, conn, reason="no match", destructive=not reconcile)
         return False, None
 
-    if score < 0.6:
+    track_id, db_title, db_artist = match
+    if score < MIN_MATCH_SCORE:
         logging.warning(f"⚠️ Low match score ({score:.2f}) for {title} by {artist}. Skipping update.")
-        _reject_and_log(file_path, playlist_name, conn, track_id=match[0], reason="low score", destructive=not reconcile)
+        _reject_and_log(file_path, playlist_name, conn, track_id=track_id, reason="low score", destructive=not reconcile)
         return False, None
 
     # Tag before placement
@@ -205,7 +269,9 @@ def process_downloaded_file(file_path, playlist_name, conn, reconcile: bool = Fa
     # If the file is already inside the playlists dir, don't move it.
     playlists_root = os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists")
     try:
-        already_in_library = os.path.commonpath([os.path.abspath(file_path), os.path.abspath(playlists_root)]) == os.path.abspath(playlists_root)
+        already_in_library = os.path.commonpath(
+            [os.path.abspath(file_path), os.path.abspath(playlists_root)]
+        ) == os.path.abspath(playlists_root)
     except Exception:
         already_in_library = False
 
@@ -215,7 +281,7 @@ def process_downloaded_file(file_path, playlist_name, conn, reconcile: bool = Fa
         final_path = move_track_to_playlist_folder(file_path, playlist_name)
 
     if final_path:
-        update_download_status(conn, match[0], playlist_name, success=True, file_path=final_path)
+        update_download_status(conn, track_id, playlist_name, success=True, file_path=final_path)
         return True, final_path
 
     logging.error(f"❌ Failed to move {file_path} to playlist folder.")
@@ -242,31 +308,6 @@ def _reject_and_log(file_path, playlist_name, conn, track_id=None, reason="unkno
     else:
         logging.debug(f"Skipping add_tried_file() because track ID is unknown for: {filename}")
 
-# def update_download_status(conn, track_id, table_name, success=False, file_path=None):
-#     cursor = conn.cursor()
-#     if success:
-#         sql = f'UPDATE "{table_name}" SET downloaded = 1, attempts = 0, suspended_until = NULL, path = ? WHERE id = ?'
-#         params = (file_path, track_id)
-#         logging.info(f"Updating status of track ID: {track_id} to downloaded with path: {file_path}")
-#     else:
-#         sql = f'UPDATE "{table_name}" SET attempts = attempts + 1, last_attempt = CURRENT_TIMESTAMP WHERE id = ?'
-#         params = (track_id,)
-#         logging.info(f"Incrementing attempt count for track ID: {track_id}")
-#         cursor.execute(f'SELECT attempts FROM "{table_name}" WHERE id = ?', (track_id,))
-#         attempts = cursor.fetchone()[0]
-#         if attempts >= 3:
-#             sql = f'UPDATE "{table_name}" SET suspended_until = datetime("now", "+2 days") WHERE id = ?'
-#             logging.info(f"Track ID: {track_id} has reached max attempts, suspending for 2 days")
-
-#     try:
-#         cursor.execute(sql, params)
-#         conn.commit()
-#         logging.info(f"Updated track {track_id} status in {table_name}.")
-#     except sqlite3.Error as e:
-#         conn.rollback()
-#         logging.error(f"Error updating track status for {track_id} in {table_name}: {e}")
-
-
 def clean_up_untracked_files(conn, download_path, table_name, delete: bool = False):
     """
     Compare files on disk vs DB. By default, do NOT delete (safe).
@@ -291,65 +332,307 @@ def clean_up_untracked_files(conn, download_path, table_name, delete: bool = Fal
                     else:
                         logging.info(f"(dry-run) Would delete untracked file: {file_path}")
 
-def startup_check(conn, table_name):
+def _normalize_ext_list_env(var_name: str, default_csv: str) -> tuple:
     """
-    Reconcile DB with files already on disk for a given playlist table.
-    - Scans the library folder: /playlists/<table_name>
-    - Scans ONLY completed downloads: /downloads/complete (ignores /downloads/incomplete)
-    - Never deletes files during reconciliation.
+    Normalize env formats into a tuple of extensions like ('.flac', '.mp3', ...),
+    accepting values with or without leading dots and stripping quotes & spaces.
     """
+    raw = os.getenv(var_name, default_csv)
+    items = []
+    seen = set()
+    for token in raw.split(","):
+        fmt = token.strip().strip('"').strip("'").lower()
+        if not fmt:
+            continue
+        if not fmt.startswith("."):
+            fmt = "." + fmt
+        if fmt not in seen:
+            seen.add(fmt)
+            items.append(fmt)
+    return tuple(items)
+
+def startup_check(conn, table_name: str):
+    """
+    Smart, scoped startup reconciliation for ONE playlist table (table_name).
+    """
+
     playlists_root = os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists")
-    downloads_root = os.getenv("SLSKD_DOWNLOADS_DIR", "/downloads")
-    downloads_complete = os.path.join(downloads_root, "complete")
-
-    valid_exts = ('.mp3', '.flac', '.aiff', '.wav', '.m4a', '.ogg')
-
-    processed_count = 0
-
-    # 1) Library folder for this playlist
     playlist_dir = os.path.join(playlists_root, table_name)
-    if os.path.isdir(playlist_dir):
-        logging.info(f"[startup] Reconciling library folder: {playlist_dir}")
-        for root, _, files in os.walk(playlist_dir):
-            for f in files:
-                lf = f.lower()
-                if not lf.endswith(valid_exts):
-                    continue
-                # Skip obvious temp/incomplete artifacts
-                if lf.endswith(('.part', '.tmp', '.partial')) or lf.startswith(('._', '~$')):
-                    continue
-                file_path = os.path.join(root, f)
-                try:
-                    process_downloaded_file(file_path, table_name, conn, reconcile=True)
-                    processed_count += 1
-                except Exception as e:
-                    logging.exception(f"[startup] Failed to reconcile {file_path}: {e}")
-    else:
-        logging.info(f"[startup] No library folder found at {playlist_dir}")
 
-    # 2) Only completed downloads (ignore /downloads/incomplete)
-    if os.path.isdir(downloads_complete):
-        logging.info(f"[startup] Reconciling completed downloads: {downloads_complete}")
-        for root, _, files in os.walk(downloads_complete):
-            for f in files:
-                lf = f.lower()
-                if not lf.endswith(valid_exts):
-                    continue
-                # Skip obvious temp/incomplete artifacts (defensive)
-                if lf.endswith(('.part', '.tmp', '.partial')) or lf.startswith(('._', '~$')):
-                    continue
-                file_path = os.path.join(root, f)
-                try:
-                    process_downloaded_file(file_path, table_name, conn, reconcile=True)
-                    processed_count += 1
-                except Exception as e:
-                    logging.exception(f"[startup] Failed to reconcile {file_path}: {e}")
-    else:
-        logging.info(f"[startup] No completed downloads folder at {downloads_complete}")
+    # Use preferred formats from ENV (e.g., "flac,mp3")
+    PREFERRED_FORMATS = os.getenv("SLSKD_PREFERRED_FORMATS", "mp3,flac,aiff,wav,m4a,ogg")
+    AUDIO_EXTS = _normalize_ext_list_env("SLSKD_PREFERRED_FORMATS", "mp3,flac,aiff,wav,m4a,ogg")
 
-    # 3) Never delete during reconcile; if you really want cleanup later, run with delete=True
-    clean_up_untracked_files(conn, playlists_root, table_name, delete=False)
-    logging.info(f"[startup] Reconciliation complete for: {table_name} (files processed: {processed_count})")
+    if not os.path.isdir(playlist_dir):
+        logging.info(f"[startup] Skipping {table_name}: no folder at {playlist_dir}")
+        # Extra hint if path missing
+        try:
+            parent = os.path.dirname(playlist_dir)
+            if os.path.isdir(parent):
+                logging.info(f"[startup] Parent exists, contents of {parent}: {os.listdir(parent)}")
+            else:
+                logging.info(f"[startup] Parent does not exist either: {parent}")
+        except Exception as e:
+            logging.debug(f"[startup] Could not list parent: {e}")
+        return
+
+    logging.info(f"[startup] Building local index for {table_name} in {playlist_dir} (exts={AUDIO_EXTS})")
+    file_index = _index_playlist_files(playlist_dir, AUDIO_EXTS)
+
+    # NEW: visibility into what we actually found
+    try:
+        indexed_count = len(file_index)
+        logging.info(f"[startup] Indexed {indexed_count} audio file(s) under {playlist_dir}")
+
+        if indexed_count == 0:
+            # Dump raw directory listing once (non-recursive) to catch mount or filter issues
+            try:
+                top_level = os.listdir(playlist_dir)
+                logging.info(f"[startup] Directory is accessible but no matching files were indexed. "
+                             f"Top-level entries in {playlist_dir}: {top_level}")
+                # Show a few recursive entries as a hint
+                sample = []
+                for r, _, files in os.walk(playlist_dir):
+                    for f in files:
+                        sample.append(os.path.join(r, f))
+                        if len(sample) >= 10:
+                            break
+                    if len(sample) >= 10:
+                        break
+                logging.info(f"[startup] Sample of discovered files (unfiltered): {sample}")
+                logging.info(f"[startup] If you see your .mp3 files above but index is 0, check SLSKD_PREFERRED_FORMATS={PREFERRED_FORMATS}")
+            except Exception as e:
+                logging.info(f"[startup] Could not list contents of {playlist_dir}: {e}")
+    except Exception as e:
+        logging.debug(f"[startup] Could not compute index diagnostics: {e}")
+
+    # Read DB rows: expect tuples -> (id, name, artists, album, path, downloaded)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(f'SELECT id, name, artists, album, path, downloaded FROM "{table_name}"')
+        rows = cursor.fetchall()
+    except Exception as e:
+        logging.exception(f"[startup] Failed to fetch rows for {table_name}: {e}")
+        return
+
+    verified = 0
+    updated = 0
+    missing = 0
+
+    for row in rows:
+        # tuple indices aligned with the SELECT above
+        track_id = row[0]
+        track_name = row[1] or ""
+        track_artist = row[2] or ""
+        # album = row[3]  # not needed for matching here
+        file_path = (row[4] or "").strip() if row[4] else ""
+        # downloaded = row[5]  # informational
+
+        # 1) If we have a stored path, verify it and do nothing if correct
+        if file_path:
+            if os.path.isfile(file_path) and _file_matches_track(file_path, track_name, track_artist):
+                verified += 1
+                continue  # NO DB write when already correct
+            # else: either file missing or mismatch -> try to re-locate below
+
+        logging.debug(f"[startup] Trying to reconcile DB row: id={track_id} name='{track_name}' artist='{track_artist}'")
+        # 2) Try to find a local match for this track
+        match_path = _find_best_local_match(file_index, track_name, track_artist)
+        if match_path:
+            logging.info(f"[startup] Reconciled locally: [{track_artist}] {track_name} -> {match_path}")
+            try:
+                # Your signature: update_download_status(conn, track_id, table_name, success=False, file_path=None)
+                update_download_status(conn, track_id, table_name, success=True, file_path=match_path)
+                updated += 1
+                logging.info(f"[startup] Reconciled locally: [{track_artist}] {track_name} -> {match_path}")
+            except Exception as e:
+                logging.exception(f"[startup] Failed to update DB for track {track_id} in {table_name}: {e}")
+        else:
+            logging.debug(f"[startup] No local match found for: [{track_artist}] {track_name}")
+            missing += 1  # leave for normal download flow later
+
+    logging.info(f"[startup] {table_name}: verified(no-op)={verified}, updated(from local)={updated}, still-missing={missing}")
+
+def _strip_brackets(s: str) -> str:
+    # remove [stuff], (stuff), {stuff}
+    return re.sub(r"[\[\(\{].*?[\]\)\}]", " ", s)
+
+def _clean_title(s: str) -> str:
+    s = (s or "")
+    s = _strip_brackets(s).lower()
+    s = re.sub(r"\b\d{3,4}\s?k?bps\b", " ", s)  # 320 kbps, etc.
+    s = re.sub(r"[-_\.]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    for phrase in _STOP_PHRASES:
+        s = re.sub(rf"\b{re.escape(phrase)}\b", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+def _norm(s: str) -> str:
+    s = (s or "").lower().strip()
+    s = re.sub(r"[-_\.]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+def _tokenize(s: str) -> set:
+    s = _clean_title(s)
+    tokens = re.split(r"\W+", s)
+    return {t for t in tokens if t}
+
+def _split_artists(artist_str: str) -> set:
+    if not artist_str:
+        return set()
+    parts = _ARTIST_SPLIT_RE.split(artist_str)
+    return {p.strip().lower() for p in parts if p.strip()}
+
+def _similar(a: str, b: str) -> float:
+    return difflib.SequenceMatcher(a=_norm(a), b=_norm(b)).ratio()
+
+def _read_audio_tags_safe(path: str):
+    """Return (title, artist) using mutagen; fall back to filename for title."""
+    title = ""
+    artist = ""
+    try:
+        mf = MutagenFile(path, easy=True)
+        if mf is not None:
+            t = mf.get("title", [])
+            a = mf.get("artist", [])
+            title = t[0] if t else ""
+            artist = a[0] if a else ""
+    except Exception:
+        pass
+    if not title:
+        title = os.path.splitext(os.path.basename(path))[0]
+    return title, artist
+
+def _derive_artist_title_from_stem(stem: str):
+    """
+    Parse from filename pattern '<artist> - <title>'.
+    Returns (artist_guess, title_guess). If pattern not present, title_guess=stem.
+    """
+    parts = re.split(r"\s+-\s+", stem, maxsplit=1)
+    if len(parts) == 2:
+        return parts[0].strip(), parts[1].strip()
+    return "", stem.strip()
+
+def _index_playlist_files(playlist_dir: str, audio_exts: tuple):
+    """Index local audio files with robust metadata and precomputed tokens."""
+    index = []
+    for root, _, files in os.walk(playlist_dir):
+        for f in files:
+            if not f.lower().endswith(audio_exts):
+                continue
+            path = os.path.join(root, f)
+            stem = os.path.splitext(f)[0]
+            title_tag, artist_tag = _read_audio_tags_safe(path)
+            artist_guess, title_guess = _derive_artist_title_from_stem(stem)
+            artist = artist_tag or artist_guess
+            title = title_tag or title_guess or stem
+            index.append({
+                "path": path,
+                "title": title,
+                "artist": artist,
+                "stem": stem,
+                "title_tokens": _tokenize(title),
+                "stem_tokens": _tokenize(stem),
+                "artist_set": _split_artists(artist),
+            })
+    return index
+
+def _looks_like_match(track_name: str, track_artist: str, file_title: str, file_artist: str, file_stem: str) -> bool:
+    """
+    Pragmatic matcher:
+    - If (almost) all title tokens are present in file title OR filename -> accept.
+    - If artist info is available, prefer intersection but don't require it when title is strong.
+    - Tolerant to 'ft./feat./extended mix/[320 kbps]' noise.
+    """
+    tn_tokens = _tokenize(track_name)
+    ta_set = _split_artists(track_artist)
+
+    title_tokens = _tokenize(file_title)
+    stem_tokens  = _tokenize(file_stem)
+    fa_set       = _split_artists(file_artist)
+
+    if not tn_tokens:
+        return False
+
+    # --- Strong title containment rules ---
+    # require all tokens for short titles (<=2 tokens), allow one miss for longer titles
+    needed_title = len(tn_tokens) if len(tn_tokens) <= 2 else len(tn_tokens) - 1
+
+    title_hit = len(tn_tokens.intersection(title_tokens)) >= needed_title
+    stem_hit  = len(tn_tokens.intersection(stem_tokens))  >= needed_title
+
+    if title_hit or stem_hit:
+        # If we know artists on either side, prefer seeing at least one overlap.
+        # BUT: if title is a single clear word (len>=6) OR multi-word, accept even without artist.
+        if ta_set and fa_set:
+            if ta_set.intersection(fa_set) or any(a in " ".join(stem_tokens) for a in ta_set):
+                return True
+            # Title is multi-word or a long single word? Accept to avoid over-strict failures.
+            if len(tn_tokens) >= 2 or len(next(iter(tn_tokens))).__int__ if False else len(list(tn_tokens)[0]) >= 6:
+                return True
+        else:
+            # Missing artist info on one/both sides → accept strong title match
+            return True
+
+    # --- Fuzzy backup ---
+    name_title = _similar(track_name, file_title)
+    name_stem  = _similar(track_name, file_stem)
+    artist_sim = _similar(track_artist, file_artist) if (track_artist and file_artist) else 0.0
+
+    if name_title >= 0.78 and artist_sim >= 0.50:
+        return True
+    if name_stem  >= 0.83 and artist_sim >= 0.50:
+        return True
+
+    # Title-only last resort when artist data absent
+    if (not track_artist or not file_artist) and max(name_title, name_stem) >= 0.90:
+        return True
+
+    return False
+
+def _find_best_local_match(file_index, track_name: str, track_artist: str):
+    """
+    Return best candidate path or None based on combined evidence.
+    Adds DEBUG logs for each candidate score for transparency.
+    """
+    best = None
+    best_score = 0.0
+    tn_norm = _norm(track_name)
+    ta_set = _split_artists(track_artist)
+
+    for item in file_index:
+        # compute plausibility
+        plausible = _looks_like_match(track_name, track_artist, item["title"], item["artist"], item["stem"])
+
+        # score components
+        title_score = _similar(track_name, item["title"])
+        stem_score  = _similar(track_name, item["stem"])
+        artist_hit  = 1.0 if (ta_set and (ta_set.intersection(item["artist_set"]) or
+                                          any(a in " ".join(item["stem_tokens"]) for a in ta_set))) else 0.0
+
+        score = max(title_score * 0.65 + artist_hit * 0.35,
+                    stem_score  * 0.65 + artist_hit * 0.35,
+                    max(title_score, stem_score))
+
+        logging.debug(
+            f"[startup] candidate score for '{track_name}' / '{track_artist}': "
+            f"path='{item['path']}', title='{item['title']}', artist='{item['artist']}', "
+            f"title_score={title_score:.2f}, stem_score={stem_score:.2f}, artist_hit={artist_hit:.0f}, "
+            f"plausible={plausible}"
+        )
+
+        if plausible and score > best_score:
+            best_score = score
+            best = item["path"]
+
+    # Lowered threshold to accept good real-world matches once plausible
+    return best if (best and best_score >= 0.68) else None
+
+def _file_matches_track(file_path: str, track_name: str, track_artist: str) -> bool:
+    """Validate that an existing DB path still corresponds to the intended track."""
+    title, artist = _read_audio_tags_safe(file_path)
+    stem = os.path.splitext(os.path.basename(file_path))[0]
+    return _looks_like_match(track_name, track_artist, title, artist, stem)
 
 def extract_artists_string(track):
     return ', '.join(artist['name'] for artist in track['artists'])
