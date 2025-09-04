@@ -7,13 +7,27 @@ import re
 from rapidfuzz import fuzz
 from db import get_tried_files, add_tried_file
 
-DEFAULT_FORMATS = ".flac,.mp3,.aiff,.wav"
+DEFAULT_FORMATS = "flac,mp3,aiff,wav"
 
-PREFERRED_FORMATS = [
-    fmt_cleaned.lower()
-    for fmt in os.getenv("SLSKD_PREFERRED_FORMATS", DEFAULT_FORMATS).split(",")
-    if (fmt_cleaned := fmt.strip().strip('"').strip("'"))
-]
+def _normalize_ext_list(env_val: str):
+    """
+    Return a normalized, ordered list of extensions like ['.flac', '.mp3', ...],
+    accepting inputs with or without leading dots and removing duplicates.
+    """
+    items = []
+    seen = set()
+    for raw in env_val.split(","):
+        fmt = raw.strip().strip('"').strip("'").lower()
+        if not fmt:
+            continue
+        if not fmt.startswith("."):
+            fmt = "." + fmt
+        if fmt not in seen:
+            seen.add(fmt)
+            items.append(fmt)
+    return items
+
+PREFERRED_FORMATS = _normalize_ext_list(os.getenv("SLSKD_PREFERRED_FORMATS", DEFAULT_FORMATS))
 
 DOWNLOAD_DIR = os.getenv("SLSKD_DOWNLOADS_DIR", "/downloads")
 EXTERNAL_PROCESS_WAIT_TIMEOUT = int(os.getenv("SLSKD_WAIT_TIMEOUT", "60"))
