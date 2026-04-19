@@ -12,30 +12,38 @@ class TimezoneFormatter(logging.Formatter):
         record_time = datetime.fromtimestamp(record.created, self.tz)
         return record_time.strftime(datefmt or "%Y-%m-%d %H:%M:%S")
 
+_NOISY_LIBRARIES = (
+    "urllib3",
+    "urllib3.connectionpool",
+    "requests",
+    "spotipy",
+    "spotipy.client",
+    "spotipy.cache_handler",
+    "spotipy.oauth2",
+)
+
+
 def setup_logging():
     """
     Configure root logging:
-      - Level from $LOGLEVEL (default INFO)
-      - Timestamps rendered in $TIMEZONE (default UTC)
-      - Single StreamHandler with our TimezoneFormatter
+      - App-code level from $LOGLEVEL (default INFO).
+      - Third-party library level from $LIB_LOGLEVEL (default WARNING) — so
+        LOGLEVEL=DEBUG doesn't drown us in urllib3/spotipy traffic.
+      - Timestamps rendered in $TIMEZONE (default UTC).
     """
     log_level_str = os.getenv("LOGLEVEL", "INFO").upper()
+    lib_log_level_str = os.getenv("LIB_LOGLEVEL", "WARNING").upper()
     timezone = os.getenv("TIMEZONE", "UTC")
 
-    # Map to logging level, default to INFO if unknown
     log_level = getattr(logging, log_level_str, logging.INFO)
+    lib_log_level = getattr(logging, lib_log_level_str, logging.WARNING)
 
-    # Ensure basicConfig has the desired level
-    logging.basicConfig(level=log_level)
-
-    # Build our timezone-aware formatter
     formatter = TimezoneFormatter(
         fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         tz=timezone,
     )
 
-    # Replace existing handlers with a single stream handler using our formatter
     handler = logging.StreamHandler()
     handler.setFormatter(formatter)
 
@@ -43,5 +51,9 @@ def setup_logging():
     root.handlers = [handler]
     root.setLevel(log_level)
 
-    logging.info(f"Logging is configured with timezone: {timezone}")
-    logging.info(f"Logging level is set to: {log_level_str}")
+    for name in _NOISY_LIBRARIES:
+        logging.getLogger(name).setLevel(lib_log_level)
+
+    logging.info(
+        f"Logging configured: app={log_level_str}, libs={lib_log_level_str}, tz={timezone}"
+    )

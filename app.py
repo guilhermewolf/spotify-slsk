@@ -841,6 +841,11 @@ def _run_startup_reconciliation(sp, conn, playlist_urls):
 
 
 def main():
+    # Persist the Spotipy auth token across restarts on the data volume, and
+    # silence the "Couldn't write token to cache at: .cache" warning that
+    # spams otherwise (WORKDIR isn't writable by the non-root container user).
+    os.environ.setdefault("SPOTIPY_CACHE_PATH", "/app/data/.spotipy-cache")
+
     setup_logging()
     _install_signal_handlers()
     _slsk_set_shutdown_event(_shutdown)
