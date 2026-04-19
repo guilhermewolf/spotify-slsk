@@ -1,7 +1,6 @@
 import sqlite3
 import logging
 import json
-from utils import sanitize_table_name
 from models import Track
 
 SCHEMA_VERSION = 1

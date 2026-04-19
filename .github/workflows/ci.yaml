@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Syntax-check all Python sources
+        run: python -m compileall -q .
+      - name: Install ruff
+        run: pip install --quiet ruff==0.5.5
+      - name: Run ruff (errors only)
+        run: ruff check --select=E,F,W --ignore=E501 .

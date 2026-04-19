@@ -19,7 +19,6 @@ from db import (
     get_pending_tracks,
 )
 from log_config import setup_logging
-from mutagen import File
 from mutagen import File as MutagenFile
 from mutagen.id3 import ID3, TIT2, TPE1, TALB
 from mutagen.flac import FLAC
@@ -34,8 +33,18 @@ from models import Track
 MIN_MATCH_SCORE = float(os.getenv("MIN_MATCH_SCORE", "0.62"))
 CYCLE_INTERVAL_SECONDS = int(os.getenv("CYCLE_INTERVAL_SECONDS", "300"))
 CYCLE_ERROR_BACKOFF_SECONDS = int(os.getenv("CYCLE_ERROR_BACKOFF_SECONDS", "60"))
+HEARTBEAT_FILE = os.getenv("HEARTBEAT_FILE", "/tmp/heartbeat")
 
 _shutdown = threading.Event()
+
+
+def _touch_heartbeat():
+    """Update the heartbeat file so Docker HEALTHCHECK can detect a wedged loop."""
+    try:
+        with open(HEARTBEAT_FILE, "w") as f:
+            f.write(str(time.time()))
+    except Exception:
+        logging.debug("Could not write heartbeat file", exc_info=True)
 
 
 def _install_signal_handlers():
@@ -173,7 +182,6 @@ def find_closest_db_match(conn, table_name: str, file_title: str, file_artist: s
     """
     cur = conn.cursor()
     cur.execute(f'SELECT id, name, artists FROM "{table_name}"')
-    best = None
     best_score = -1.0
     best_reason = ""
     best_row = (None, "", "")
@@ -551,7 +559,7 @@ def _find_best_local_match(file_index, track_name: str, track_artist: str):
     """
     best = None
     best_score = 0.0
-    tn_norm = _norm(track_name)
+    _norm(track_name)
     ta_set = _split_artists(track_artist)
 
     for item in file_index:
@@ -594,7 +602,7 @@ def extract_artists_string(track):
 def extract_metadata_from_file(file_path):
     try:
         ext = os.path.splitext(file_path)[1].lower()
-        
+
         if ext == ".mp3":
             audio = MP3(file_path, ID3=ID3)
             title = audio.tags.get("TIT2")
@@ -631,7 +639,7 @@ def extract_metadata_from_file(file_path):
     except Exception as e:
         logging.error(f"Error reading metadata from {file_path}: {e}")
         return None, None, None
-    
+
 def setup_spotify_client():
     logging.info("Setting up Spotify client")
     auth_manager = SpotifyClientCredentials()
@@ -726,7 +734,7 @@ def tag_audio_file(file_path, title, artist, album):
         logging.error(f"Failed to tag {file_path}: {e}")
         return False
 
-    
+
 def wait_for_slskd_healthy(host, api_key, timeout=90, check_interval=1):
     logging.info(f"Waiting for slskd at {host} (timeout: {timeout}s)...")
     client = get_slskd_client()
@@ -864,6 +872,7 @@ def main():
         _run_startup_reconciliation(sp, conn, playlist_urls)
 
         while not _shutdown.is_set():
+            _touch_heartbeat()
             logging.info("Starting new cycle of playlist checks")
             try:
                 for playlist_url in playlist_urls:

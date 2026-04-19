@@ -9,8 +9,17 @@ services:
       - ./downloads:/downloads
       - ./playlists:/playlists
     depends_on:
-      - slskd
+      slskd:
+        condition: service_started
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Override UID/GID via PUID/PGID in .env to match the host user that owns
+    # ./data, ./downloads, ./playlists. Defaults to 1000:1000.
+    user: "${PUID:-1000}:${PGID:-1000}"
 
   slskd:
     image: slskd/slskd:0.23.1
@@ -23,4 +32,8 @@ services:
     ports:
       - "127.0.0.1:5030:5030"
     restart: unless-stopped
-
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
