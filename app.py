@@ -135,15 +135,15 @@ def fetch_and_compare_tracks(conn, playlist_id, sp):
 def find_closest_match(conn, table_name, title, artist):
     """
     Compatibility wrapper that delegates to the robust scorer.
-    Returns (best_row, score) where best_row is (id, name, artists).
+    Returns (best_row, score) where best_row is (id, name, artists, album).
     """
-    track_id, db_title, db_artist, score, reason = find_closest_db_match(
+    track_id, db_title, db_artist, db_album, score, reason = find_closest_db_match(
         conn, table_name, file_title=title, file_artist=artist
     )
 
     if track_id:
         logging.info(f"Best match: {db_title} by {db_artist} (score={score:.2f}, reason={reason})")
-        return (track_id, db_title, db_artist), score
+        return (track_id, db_title, db_artist, db_album), score
 
     logging.warning(f"No suitable match for: '{title}' by '{artist}'")
     return None, 0.0
@@ -178,21 +178,21 @@ def score_track_match(file_title: str, file_artist: str, db_title: str, db_artis
 
 def find_closest_db_match(conn, table_name: str, file_title: str, file_artist: str):
     """
-    Scan the table and return (track_id, db_title, db_artist, score, reason).
+    Scan the table and return (track_id, db_title, db_artist, db_album, score, reason).
     """
     cur = conn.cursor()
-    cur.execute(f'SELECT id, name, artists FROM "{table_name}"')
+    cur.execute(f'SELECT id, name, artists, album FROM "{table_name}"')
     best_score = -1.0
     best_reason = ""
-    best_row = (None, "", "")
+    best_row = (None, "", "", "")
 
-    for track_id, db_title, db_artist in cur.fetchall():
+    for track_id, db_title, db_artist, db_album in cur.fetchall():
         score, reason = score_track_match(file_title, file_artist, db_title, db_artist)
         logging.debug(f"[match] candidate: file='{file_title}'/{file_artist} vs db='{db_title}'/{db_artist} -> {score:.2f} ({reason})")
         if score > best_score:
             best_score = score
             best_reason = reason
-            best_row = (track_id, db_title, db_artist)
+            best_row = (track_id, db_title, db_artist, db_album)
 
     return (*best_row, best_score, best_reason)
 
@@ -217,14 +217,16 @@ def process_downloaded_file(file_path, playlist_name, conn, reconcile: bool = Fa
         _reject_and_log(file_path, playlist_name, conn, reason="no match", destructive=not reconcile)
         return False, None
 
-    track_id, db_title, db_artist = match
+    track_id, db_title, db_artist, db_album = match
     if score < MIN_MATCH_SCORE:
         logging.warning(f"⚠️ Low match score ({score:.2f}) for {title} by {artist}. Skipping update.")
         _reject_and_log(file_path, playlist_name, conn, track_id=track_id, reason="low score", destructive=not reconcile)
         return False, None
 
-    # Tag before placement
-    tag_audio_file(file_path, title, artist, album)
+    # Fall back to the Spotify-known album when the downloaded file has no
+    # album tag (observed during Phase B testing: downloaded MP3 had no TALB).
+    effective_album = album or db_album
+    tag_audio_file(file_path, title, artist, effective_album)
 
     # If the file is already inside the playlists dir, don't move it.
     playlists_root = os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists")
