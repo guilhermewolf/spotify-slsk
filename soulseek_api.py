@@ -38,6 +38,9 @@ MIN_PEER_UPLOAD_SPEED = int(os.getenv("SLSKD_MIN_PEER_UPLOAD_SPEED", "0"))
 # MP3s whose effective bitrate (size*8/duration/1000) falls below this are
 # rejected even if their reported bitrate claims 320 — catches upsampled fakes.
 MIN_EFFECTIVE_MP3_KBPS = int(os.getenv("SLSKD_MIN_EFFECTIVE_MP3_KBPS", "280"))
+# Cut the slskd search short once we have this many responses. slskd will
+# keep collecting responses for the full searchTimeout window otherwise.
+EARLY_STOP_RESPONSES = int(os.getenv("SLSKD_EARLY_STOP_RESPONSES", "20"))
 
 _client = None
 _shutdown_event = None
@@ -145,8 +148,23 @@ def perform_search(artist, title, album=None, timeout=60):
             start = time.time()
             timed_out = True
             while time.time() - start < timeout:
-                state = client.searches.state(search_id).get("state", "")
+                state_info = client.searches.state(search_id)
+                state = state_info.get("state", "")
+                response_count = state_info.get("responseCount", 0) or 0
                 if state != "InProgress":
+                    timed_out = False
+                    break
+                if response_count >= EARLY_STOP_RESPONSES:
+                    logging.info(
+                        f"Early-stopping search after {response_count} responses "
+                        f"(threshold {EARLY_STOP_RESPONSES})"
+                    )
+                    try:
+                        client.searches.stop(search_id)
+                    except Exception:
+                        logging.debug(
+                            f"Could not stop search {search_id}", exc_info=True
+                        )
                     timed_out = False
                     break
                 if _interruptible_sleep(1):
