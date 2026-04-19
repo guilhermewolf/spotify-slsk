@@ -1,13 +1,15 @@
 import os
 import time
 import logging
-import slskd_api
-import shutil
 import re
+
+import slskd_api
 from rapidfuzz import fuzz
+
 from db import get_tried_files, add_tried_file
 
 DEFAULT_FORMATS = "flac,mp3,aiff,wav"
+
 
 def _normalize_ext_list(env_val: str):
     """
@@ -27,83 +29,162 @@ def _normalize_ext_list(env_val: str):
             items.append(fmt)
     return items
 
-PREFERRED_FORMATS = _normalize_ext_list(os.getenv("SLSKD_PREFERRED_FORMATS", DEFAULT_FORMATS))
 
+PREFERRED_FORMATS = _normalize_ext_list(os.getenv("SLSKD_PREFERRED_FORMATS", DEFAULT_FORMATS))
 DOWNLOAD_DIR = os.getenv("SLSKD_DOWNLOADS_DIR", "/downloads")
 EXTERNAL_PROCESS_WAIT_TIMEOUT = int(os.getenv("SLSKD_WAIT_TIMEOUT", "60"))
 MAX_RETRIES = int(os.getenv("SLSKD_MAX_RETRIES", "2"))
+MIN_PEER_UPLOAD_SPEED = int(os.getenv("SLSKD_MIN_PEER_UPLOAD_SPEED", "0"))
+# MP3s whose effective bitrate (size*8/duration/1000) falls below this are
+# rejected even if their reported bitrate claims 320 — catches upsampled fakes.
+MIN_EFFECTIVE_MP3_KBPS = int(os.getenv("SLSKD_MIN_EFFECTIVE_MP3_KBPS", "280"))
 
-slskd_host_url = os.getenv("SLSKD_HOST_URL", "http://slskd:5030")
-slskd_api_key = os.getenv("SLSKD_API_KEY")
-slskd_url_base = os.getenv("SLSKD_URL_BASE", "")
-slskd_download_dir = os.getenv("SLSKD_DOWNLOAD_DIR", "/downloads")
+_client = None
 
-slskd = slskd_api.SlskdClient(
-    host=slskd_host_url,
-    api_key=slskd_api_key,
-    url_base=slskd_url_base,
-)
 
-def perform_search(artist, title, timeout=300):
-    # Sanitize title and artist, removing special characters
-    clean_title = re.sub(r'[^\w\s]', '', title).lower().strip()
-    clean_artist = re.sub(r'[^\w\s]', '', artist).lower().strip()
-    query = f"{clean_title} {clean_artist}"
-    logging.info(f"Searching for: {query}")
-
-    try:
-        search = slskd.searches.search_text(
-            searchText=query,
-            filterResponses=False
+def get_client():
+    """Lazily build and cache the SlskdClient. Reads env at first call."""
+    global _client
+    if _client is None:
+        _client = slskd_api.SlskdClient(
+            host=os.getenv("SLSKD_HOST_URL", "http://slskd:5030"),
+            api_key=os.getenv("SLSKD_API_KEY"),
+            url_base=os.getenv("SLSKD_URL_BASE", ""),
         )
-        start = time.time()
-        while time.time() - start < timeout:
-            state = slskd.searches.state(search["id"])["state"]
-            if state != "InProgress":
-                break
-            time.sleep(1)
-        else:
-            logging.warning(f"Search timed out for: {query}")
-            return []
+    return _client
 
-        results = slskd.searches.search_responses(search["id"])
-        logging.info(f"Search returned {len(results)} results for: {query}")
-        return results
 
-    except Exception as e:
-        logging.error(f"Search failed for '{query}': {e}")
+def _is_ascii(s: str) -> bool:
+    return s.isascii() if isinstance(s, str) else True
+
+
+def _build_search_queries(artist: str, title: str, album: str | None = None) -> list:
+    """
+    Return a waterfall of slskd queries, most- to least-specific. Non-ASCII
+    (CJK, etc.) titles bypass punctuation stripping because it mangles them.
+    """
+    queries = []
+    seen = set()
+
+    def add(q: str):
+        q = (q or "").strip()
+        key = q.lower()
+        if q and key not in seen:
+            seen.add(key)
+            queries.append(q)
+
+    raw_title = (title or "").strip()
+    raw_artist = (artist or "").strip()
+    raw_album = (album or "").strip()
+
+    if not _is_ascii(raw_title + raw_artist):
+        add(f"{raw_title} {raw_artist}")
+        add(raw_title)
+
+    clean_title = re.sub(r"[^\w\s]", "", raw_title).lower().strip()
+    clean_artist = re.sub(r"[^\w\s]", "", raw_artist).lower().strip()
+    clean_album = re.sub(r"[^\w\s]", "", raw_album).lower().strip()
+
+    if clean_title and clean_artist:
+        add(f"{clean_title} {clean_artist}")
+
+    if clean_album and clean_title:
+        album_tokens = set(clean_album.split())
+        title_wo_album = " ".join(
+            t for t in clean_title.split() if t not in album_tokens
+        )
+        if title_wo_album and title_wo_album != clean_title and clean_artist:
+            add(f"{title_wo_album} {clean_artist}")
+
+    if clean_title:
+        add(clean_title)
+
+    if not queries and raw_title:
+        add(raw_title)
+
+    return queries
+
+
+def perform_search(artist, title, album=None, timeout=60):
+    """
+    Run a waterfall of slskd searches for one track. Returns the first query's
+    responses that yields at least one result, else an empty list.
+    """
+    client = get_client()
+    queries = _build_search_queries(artist, title, album)
+    if not queries:
         return []
+
+    for query in queries:
+        logging.info(f"Searching for: {query}")
+        search_id = None
+        try:
+            search = client.searches.search_text(
+                searchText=query,
+                minimumPeerUploadSpeed=MIN_PEER_UPLOAD_SPEED,
+            )
+            search_id = search.get("id")
+            if not search_id:
+                continue
+
+            start = time.time()
+            timed_out = True
+            while time.time() - start < timeout:
+                state = client.searches.state(search_id).get("state", "")
+                if state != "InProgress":
+                    timed_out = False
+                    break
+                time.sleep(1)
+            if timed_out:
+                logging.warning(f"Search timed out for: {query}")
+                continue
+
+            results = client.searches.search_responses(search_id)
+            logging.info(f"Search returned {len(results)} results for: {query}")
+            if results:
+                return results
+        except Exception as e:
+            logging.error(f"Search failed for '{query}': {e}")
+        finally:
+            if search_id:
+                try:
+                    client.searches.delete(search_id)
+                except Exception:
+                    logging.debug(
+                        f"Could not delete slskd search {search_id}",
+                        exc_info=True,
+                    )
+    return []
+
+
 def clean_filename(filename):
     """
-    Clean a filename by removing common tags, normalizing spaces, and removing the extension.
-    
-    Args:
-        filename (str): The raw filename from Soulseek search results.
-    
-    Returns:
-        str: The cleaned filename in lowercase, without tags or extension.
+    Clean a filename by removing common tags, normalizing spaces, and removing
+    the extension.
     """
-    # Remove text within brackets and parentheses (e.g., [FLAC], (2013))
-    filename = re.sub(r'\[.*?\]', '', filename)
-    filename = re.sub(r'\(.*?\)', '', filename)
-    # Remove common metadata tags (e.g., 24bit, 44.1kHz)
-    filename = re.sub(r'\b\d{1,2}bit\b|\b\d{1,3}\.\d{1,2}kHz\b|\b\d{4}\b', '', filename, flags=re.IGNORECASE)
-    # Remove file extension
+    filename = re.sub(r"\[.*?\]", "", filename)
+    filename = re.sub(r"\(.*?\)", "", filename)
+    filename = re.sub(
+        r"\b\d{1,2}bit\b|\b\d{1,3}\.\d{1,2}kHz\b|\b\d{4}\b",
+        "",
+        filename,
+        flags=re.IGNORECASE,
+    )
     filename = os.path.splitext(filename)[0]
-    # Replace underscores and hyphens with spaces
     filename = filename.replace("_", " ").replace("-", " ")
-    # Normalize multiple spaces to a single space
-    filename = ' '.join(filename.split())
+    filename = " ".join(filename.split())
     return filename.lower().strip()
 
-def _infer_bitrate_from_name(name: str) -> int | None:
+
+def _infer_bitrate_from_name(name: str):
     """
-    Try to infer bitrate from the filename text.
-    Returns an integer kbps (e.g. 320) or None if not inferable.
+    Try to infer bitrate from the filename text. Returns kbps or None.
     """
     text = name.lower()
-    # common patterns like [320], (320 kbps), - 320k, _320kbps, '320 kbps'
-    m = re.search(r'(?<!\d)(320|256|224|192|160|128)\s*(k|kbps)?(?!\d)', text)
+    m = re.search(
+        r"(?<!\d)(320|256|224|192|160|128)\s*(k|kbps)?(?!\d)",
+        text,
+    )
     if not m:
         return None
     try:
@@ -112,102 +193,176 @@ def _infer_bitrate_from_name(name: str) -> int | None:
         return None
 
 
-def extract_candidates(search_results, expected_title, expected_artist, min_title_score=80, min_artist_score=70):
+_VERSION_MARKERS = (
+    "remix", "remake", "rework", "bootleg", "mashup",
+    "live", "acoustic", "unplugged", "instrumental", "karaoke",
+    "radio edit", "extended edit", "club edit",
+)
+
+
+def _has_version_marker(text: str):
+    t = (text or "").lower()
+    for marker in _VERSION_MARKERS:
+        if re.search(rf"\b{re.escape(marker)}\b", t):
+            return marker
+    return None
+
+
+def _version_mismatch(expected_title: str, file_title: str) -> bool:
+    """True when exactly one side declares a version marker, or both declare different ones."""
+    e = _has_version_marker(expected_title)
+    f = _has_version_marker(file_title)
+    if e is None and f is None:
+        return False
+    return e != f
+
+
+def _effective_mp3_kbps(size_bytes, length_sec):
+    if not size_bytes or not length_sec or length_sec <= 0:
+        return None
+    try:
+        return int((size_bytes * 8) / length_sec / 1000)
+    except Exception:
+        return None
+
+
+def extract_candidates(
+    search_results,
+    expected_title,
+    expected_artist,
+    min_title_score=80,
+    min_artist_score=70,
+):
     """
-    Extract valid file candidates from Soulseek search results based on title and artist matching.
-    Unknown MP3 bitrates are allowed (slskd often returns None); we only hard-reject if we know it's <320 kbps.
+    Extract valid file candidates from slskd search results based on title and
+    artist matching. Unknown MP3 bitrates are allowed (slskd often reports None);
+    files are hard-rejected only when we *know* quality is too low.
     """
     candidates = []
     expected_title_norm = " ".join(expected_title.lower().replace("-", " ").split())
     expected_artists = [a.strip().lower() for a in expected_artist.split(",")]
 
-    logging.debug(f"Search results received: {len(search_results)} total users")
-    logging.debug(f"Expected title: {expected_title_norm}")
-    logging.debug(f"Expected artists: {expected_artists}")
-
     for result in search_results:
         user = result.get("username", "unknown")
+        user_upload_speed = result.get("uploadSpeed", 0) or 0
         files = result.get("files", [])
-        logging.debug(f"User: {user} has {len(files)} files")
 
         for file in files:
             filename = file.get("filename")
             if not filename:
-                logging.debug(f"Skipping file: No filename in {file}")
                 continue
 
             ext = os.path.splitext(filename)[1].lower()
             if ext not in PREFERRED_FORMATS:
-                logging.debug(f"Skipping {filename}: unsupported format ({ext})")
                 continue
 
-            # bitrate as reported by slskd (may be None) + optional inference from name
             reported_bitrate = file.get("bitrate")
+            length_sec = file.get("length")
+            size_bytes = file.get("size")
             inferred_bitrate = _infer_bitrate_from_name(os.path.basename(filename))
-            effective_bitrate = reported_bitrate if reported_bitrate is not None else inferred_bitrate
+            effective_bitrate = (
+                reported_bitrate if reported_bitrate is not None else inferred_bitrate
+            )
+            effective_mp3 = (
+                _effective_mp3_kbps(size_bytes, length_sec) if ext == ".mp3" else None
+            )
 
-            # Only reject MP3s we *know* are below 320 kbps.
-            if ext == ".mp3" and (effective_bitrate is not None) and (effective_bitrate < 320):
-                logging.debug(f"Skipped {filename} — MP3 with known sub-320 bitrate ({effective_bitrate} kbps)")
+            # Reject MP3s whose reported/inferred bitrate is known-low.
+            if ext == ".mp3" and effective_bitrate is not None and effective_bitrate < 320:
+                logging.debug(
+                    f"Skipped {filename}: reported bitrate {effective_bitrate} < 320"
+                )
+                continue
+
+            # Reject MP3s whose size/duration shows they're effectively below the
+            # configured floor — catches 128 kbps files retagged as 320.
+            if (
+                ext == ".mp3"
+                and effective_mp3 is not None
+                and effective_mp3 < MIN_EFFECTIVE_MP3_KBPS
+            ):
+                logging.debug(
+                    f"Skipped {filename}: effective bitrate {effective_mp3} < {MIN_EFFECTIVE_MP3_KBPS}"
+                )
                 continue
 
             base = os.path.basename(filename)
             clean_base = clean_filename(base)
-            logging.debug(f"Cleaned filename: {clean_base}")
 
-            # Compute title score
             title_score = fuzz.token_set_ratio(expected_title_norm, clean_base)
-            # Compute artist scores and take the maximum
-            artist_scores = [fuzz.token_set_ratio(artist, clean_base) for artist in expected_artists]
+            artist_scores = [
+                fuzz.token_set_ratio(a, clean_base) for a in expected_artists
+            ]
             max_artist_score = max(artist_scores) if artist_scores else 0
 
-            logging.debug(f"Scores for {base} - Title: {title_score:.2f}, Max Artist: {max_artist_score:.2f}")
+            # Version-gate penalty: if expected track doesn't mention a version
+            # (remix/live/...) but the file does (or vice versa), or they mention
+            # different versions, penalize the title score.
+            if _version_mismatch(expected_title, base):
+                title_score = max(0, title_score - 25)
 
             if title_score >= min_title_score and max_artist_score >= min_artist_score:
-                # Persist effective bitrate so we can sort by it; may still be None
-                candidates.append({
-                    "user": user,
-                    "filename": base,
-                    "size": file.get("size"),
-                    "bitrate": effective_bitrate,
-                    "ext": ext,
-                    "title_score": title_score,
-                    "artist_score": max_artist_score,
-                })
-                logging.debug(
-                    f"Accepted: {base} (title_score: {title_score:.2f}, artist_score: {max_artist_score:.2f}, "
-                    f"reported_bitrate={reported_bitrate}, inferred_bitrate={inferred_bitrate})"
+                candidates.append(
+                    {
+                        "user": user,
+                        "user_upload_speed": user_upload_speed,
+                        "filename": base,
+                        "size": size_bytes,
+                        "bitrate": effective_bitrate,
+                        "effective_mp3": effective_mp3,
+                        "ext": ext,
+                        "title_score": title_score,
+                        "artist_score": max_artist_score,
+                    }
                 )
-            else:
-                logging.debug(f"Rejected: {base} (title_score: {title_score:.2f}, artist_score: {max_artist_score:.2f})")
 
-    logging.debug(f"Final candidates count: {len(candidates)}")
     return candidates
 
 
 def sort_candidates(candidates):
     """
-    Sort by preferred extension first, then by bitrate desc (unknown last).
+    Sort by preferred extension first, then by bitrate desc (unknown last),
+    then by peer upload speed desc.
     """
     def fmt_rank(ext: str) -> int:
-        return PREFERRED_FORMATS.index(ext) if ext in PREFERRED_FORMATS else len(PREFERRED_FORMATS)
+        return (
+            PREFERRED_FORMATS.index(ext)
+            if ext in PREFERRED_FORMATS
+            else len(PREFERRED_FORMATS)
+        )
 
-    def bitrate_rank(bps_k: int | None) -> int:
-        # higher is better; None treated as 0 so it sorts last
+    def bitrate_rank(bps_k) -> int:
         return bps_k or 0
 
     return sorted(
         candidates,
-        key=lambda c: (fmt_rank(c["ext"]), -bitrate_rank(c.get("bitrate")))
+        key=lambda c: (
+            fmt_rank(c["ext"]),
+            -bitrate_rank(c.get("bitrate")),
+            -(c.get("user_upload_speed") or 0),
+        ),
     )
 
-def find_file_in_downloads(filename, base_dir="/downloads"):
+
+def find_file_in_downloads(filename, base_dir=None):
+    if base_dir is None:
+        base_dir = DOWNLOAD_DIR
     for root, _, files in os.walk(base_dir):
         if filename in files:
             return os.path.join(root, filename)
     return None
 
-def download_and_verify(search_results, expected_title, expected_artist, conn, playlist_name, track_id, max_attempts=2):
+
+def download_and_verify(
+    search_results,
+    expected_title,
+    expected_artist,
+    conn,
+    playlist_name,
+    track_id,
+    max_attempts=2,
+):
+    client = get_client()
     candidates = extract_candidates(search_results, expected_title, expected_artist)
     if not candidates:
         logging.warning("No valid candidates found.")
@@ -217,38 +372,42 @@ def download_and_verify(search_results, expected_title, expected_artist, conn, p
     tried_filenames = set(get_tried_files(conn, playlist_name, track_id))
 
     for candidate in sorted_candidates:
-        basename = os.path.basename(candidate['filename'])
+        basename = os.path.basename(candidate["filename"])
 
         if basename in tried_filenames:
             logging.info(f"Skipping previously tried file: {basename}")
             continue
 
-        logging.info(f"Attempting download: {candidate['filename']} from {candidate['user']}")
+        logging.info(
+            f"Attempting download: {candidate['filename']} from {candidate['user']}"
+        )
         try:
-            slskd.transfers.enqueue(
-                username=candidate['user'],
-                files=[{
-                    "filename": candidate['filename'],
-                    "size": candidate['size']
-                }]
+            client.transfers.enqueue(
+                username=candidate["user"],
+                files=[
+                    {
+                        "filename": candidate["filename"],
+                        "size": candidate["size"],
+                    }
+                ],
             )
 
             file_path = wait_for_completion(candidate)
             if file_path:
-                logging.info(f"✅ Downloaded and verified: {file_path}")
-
+                logging.info(f"Downloaded and verified: {file_path}")
                 if not _wait_for_external_processing(file_path):
-                    logging.warning(f"❌ Post-download verification failed for: {basename}")
+                    logging.warning(
+                        f"Post-download verification failed for: {basename}"
+                    )
                     add_tried_file(conn, playlist_name, track_id, basename)
                     continue
-
                 return file_path
-            else:
-                logging.warning(f"❌ Download failed or was not confirmed: {basename}")
-                add_tried_file(conn, playlist_name, track_id, basename)
-
+            logging.warning(f"Download failed or was not confirmed: {basename}")
+            add_tried_file(conn, playlist_name, track_id, basename)
         except Exception as e:
-            logging.error(f"Error downloading {basename} from {candidate['user']}: {e}")
+            logging.error(
+                f"Error downloading {basename} from {candidate['user']}: {e}"
+            )
             add_tried_file(conn, playlist_name, track_id, basename)
 
     logging.warning("Exhausted all download attempts.")
@@ -256,18 +415,19 @@ def download_and_verify(search_results, expected_title, expected_artist, conn, p
 
 
 def wait_for_completion(candidate, timeout=300):
+    client = get_client()
     logging.debug(f"Waiting for transfer of {candidate['filename']} to complete...")
     transfer_id = None
     start = time.time()
 
-    # First, locate the transfer ID
     while time.time() - start < 10:
-        downloads = slskd.transfers.get_downloads(candidate["user"])
+        downloads = client.transfers.get_downloads(candidate["user"])
         for directory in downloads.get("directories", []):
             for file in directory.get("files", []):
                 if (
-                    os.path.basename(file["filename"]) == os.path.basename(candidate["filename"]) and
-                    file["size"] == candidate["size"]
+                    os.path.basename(file["filename"])
+                    == os.path.basename(candidate["filename"])
+                    and file["size"] == candidate["size"]
                 ):
                     transfer_id = file["id"]
                     break
@@ -281,26 +441,30 @@ def wait_for_completion(candidate, timeout=300):
         logging.error(f"Transfer ID not found for {candidate['filename']}")
         return None
 
-    # Monitor transfer state
     start = time.time()
     while True:
-        downloads = slskd.transfers.get_downloads(candidate["user"])
+        downloads = client.transfers.get_downloads(candidate["user"])
         for directory in downloads.get("directories", []):
             for file in directory.get("files", []):
                 if file["id"] == transfer_id:
                     state = file.get("state", "").lower()
                     logging.debug(f"State for {file['filename']}: {state}")
                     if "completed" in state and "succeeded" in state:
-                        filename = os.path.basename(candidate["filename"].replace("\\", "/"))
-                        real_path = find_file_in_downloads(filename, base_dir=DOWNLOAD_DIR)
+                        filename = os.path.basename(
+                            candidate["filename"].replace("\\", "/")
+                        )
+                        real_path = find_file_in_downloads(filename)
                         logging.info(f"File found: {real_path}")
                         if real_path and _wait_for_external_processing(real_path):
                             return real_path
-                        else:
-                            logging.warning(f"File not confirmed after download: {filename}")
-                            return None
-                    elif any(word in state for word in ["failed", "aborted", "errored"]):
-                        logging.warning(f"Transfer failed: {file['filename']} — state: {state}")
+                        logging.warning(
+                            f"File not confirmed after download: {filename}"
+                        )
+                        return None
+                    if any(w in state for w in ("failed", "aborted", "errored")):
+                        logging.warning(
+                            f"Transfer failed: {file['filename']} — state: {state}"
+                        )
                         return None
         if time.time() - start > timeout:
             logging.warning(f"Transfer timeout for {candidate['filename']}")

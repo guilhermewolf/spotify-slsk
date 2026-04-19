@@ -1,5 +1,4 @@
 import spotipy
-import slskd_api
 import shutil
 import os
 import logging
@@ -28,7 +27,7 @@ from mutagen.aiff import AIFF
 from mutagen.mp3 import MP3
 from utils import sanitize_table_name
 from spotipy.oauth2 import SpotifyClientCredentials
-from soulseek_api import perform_search, download_and_verify
+from soulseek_api import perform_search, download_and_verify, get_client as get_slskd_client
 from models import Track
 
 
@@ -124,61 +123,6 @@ def fetch_and_compare_tracks(conn, playlist_id, sp):
     logging.info(f"Found {len(new_tracks)} new tracks to download in playlist {table_name}")
     return new_tracks, table_name
 
-def _mm_strip_brackets(s: str) -> str:
-    return re.sub(r"[\[\(\{].*?[\]\)\}]", " ", s or "")
-
-def _mm_clean_title(s: str) -> str:
-    s = _mm_strip_brackets(s).lower()
-    s = re.sub(r"\b\d{3,4}\s?k?bps\b", " ", s)  # 320 kbps, etc.
-    s = re.sub(r"[-_\.]+", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    for phrase in _STOP_PHRASES:
-        s = re.sub(rf"\b{re.escape(phrase)}\b", " ", s)
-    return re.sub(r"\s+", " ", s).strip()
-
-
-def _mm_norm(s: str) -> str:
-    s = (s or "").lower().strip()
-    s = re.sub(r"[-_\.]+", " ", s)
-    return re.sub(r"\s+", " ", s).strip()
-
-def _mm_tokenize_title(s: str) -> set:
-    return {t for t in re.split(r"\W+", _mm_clean_title(s)) if t}
-
-def _mm_split_artists(s: str) -> set:
-    if not s:
-        return set()
-    parts = _ARTIST_SPLIT_RE.split(s)
-    return {p.strip().lower() for p in parts if p.strip()}
-
-def _mm_similar(a: str, b: str) -> float:
-    return difflib.SequenceMatcher(a=_mm_norm(a), b=_mm_norm(b)).ratio()
-
-def _mm_artists_overlap(a: str, b: str) -> bool:
-    A = _mm_split_artists(a)
-    B = _mm_split_artists(b)
-    if not A or not B:
-        return False
-    return bool(A.intersection(B))
-
-def _mm_titles_token_equivalent(file_title: str, db_title: str) -> bool:
-    ft = _mm_tokenize_title(file_title)
-    dt = _mm_tokenize_title(db_title)
-    if not ft or not dt:
-        return False
-    # Accept if all tokens from the shorter set are present in the longer one
-    shorter, longer = (ft, dt) if len(ft) <= len(dt) else (dt, ft)
-    return shorter.issubset(longer) or len(shorter.intersection(longer)) >= max(1, len(shorter) - 1)
-
-def _mm_remix_equivalent(file_title: str, db_title: str) -> bool:
-    # Normalize "(Walker & Royce Remix)" vs "- Walker & Royce Remix"
-    f = re.sub(r"[()\[\]{}\-–—]", " ", file_title or "", flags=re.IGNORECASE)
-    d = re.sub(r"[()\[\]{}\-–—]", " ", db_title or "", flags=re.IGNORECASE)
-    f = re.sub(r"\s+remix\b", " remix", f, flags=re.IGNORECASE)
-    d = re.sub(r"\s+remix\b", " remix", d, flags=re.IGNORECASE)
-    return _mm_titles_token_equivalent(f, d)
-
-
 def find_closest_match(conn, table_name, title, artist):
     """
     Compatibility wrapper that delegates to the robust scorer.
@@ -199,32 +143,26 @@ def score_track_match(file_title: str, file_artist: str, db_title: str, db_artis
     """
     Returns (score, reason). Score in [0..1]. Reason is a short string for debugging.
     """
-    # Fast path: token equivalence (ignores mix labels/brackets)
-    if _mm_titles_token_equivalent(file_title, db_title):
-        if _mm_artists_overlap(file_artist, db_artist):
+    if _titles_token_equivalent(file_title, db_title):
+        if _artists_overlap(file_artist, db_artist):
             return 0.97, "title_tokens+artist_overlap"
-        # title tokens match but artist missing/mismatched — still very strong
         return 0.90, "title_tokens_only"
 
-    # Remix-aware equivalence (hyphen vs parentheses)
-    if _mm_remix_equivalent(file_title, db_title):
-        if _mm_artists_overlap(file_artist, db_artist):
+    if _remix_equivalent(file_title, db_title):
+        if _artists_overlap(file_artist, db_artist):
             return 0.95, "remix_equivalent+artist_overlap"
         return 0.88, "remix_equivalent_title_only"
 
-    # Fuzzy fallback (weighted)
-    title_sim = _mm_similar(file_title, db_title)      # handles punctuation differences
-    artist_sim = _mm_similar(file_artist, db_artist) if (file_artist and db_artist) else 0.0
+    title_sim = _similar(file_title, db_title)
+    artist_sim = _similar(file_artist, db_artist) if (file_artist and db_artist) else 0.0
 
-    # Blend title and artist; title is main signal
     score = max(
-        title_sim,                                      # pure title similarity
-        0.75 * title_sim + 0.25 * artist_sim            # weighted blend when artist present
+        title_sim,
+        0.75 * title_sim + 0.25 * artist_sim,
     )
 
-    # Boost a bit if any artist overlap exists
-    if _mm_artists_overlap(file_artist, db_artist):
-        score = max(score, min(1.0, title_sim * 0.85 + 0.15))  # light boost
+    if _artists_overlap(file_artist, db_artist):
+        score = max(score, min(1.0, title_sim * 0.85 + 0.15))
 
     reason = f"fuzzy(title={title_sim:.2f}, artist={artist_sim:.2f})"
     return score, reason
@@ -475,6 +413,29 @@ def _split_artists(artist_str: str) -> set:
 
 def _similar(a: str, b: str) -> float:
     return difflib.SequenceMatcher(a=_norm(a), b=_norm(b)).ratio()
+
+def _artists_overlap(a: str, b: str) -> bool:
+    A = _split_artists(a)
+    B = _split_artists(b)
+    if not A or not B:
+        return False
+    return bool(A.intersection(B))
+
+def _titles_token_equivalent(file_title: str, db_title: str) -> bool:
+    ft = _tokenize(file_title)
+    dt = _tokenize(db_title)
+    if not ft or not dt:
+        return False
+    shorter, longer = (ft, dt) if len(ft) <= len(dt) else (dt, ft)
+    return shorter.issubset(longer) or len(shorter.intersection(longer)) >= max(1, len(shorter) - 1)
+
+def _remix_equivalent(file_title: str, db_title: str) -> bool:
+    # Normalize "(Walker & Royce Remix)" vs "- Walker & Royce Remix"
+    f = re.sub(r"[()\[\]{}\-–—]", " ", file_title or "", flags=re.IGNORECASE)
+    d = re.sub(r"[()\[\]{}\-–—]", " ", db_title or "", flags=re.IGNORECASE)
+    f = re.sub(r"\s+remix\b", " remix", f, flags=re.IGNORECASE)
+    d = re.sub(r"\s+remix\b", " remix", d, flags=re.IGNORECASE)
+    return _titles_token_equivalent(f, d)
 
 def _read_audio_tags_safe(path: str):
     """Return (title, artist) using mutagen; fall back to filename for title."""
@@ -768,11 +729,7 @@ def tag_audio_file(file_path, title, artist, album):
     
 def wait_for_slskd_healthy(host, api_key, timeout=90, check_interval=1):
     logging.info(f"Waiting for slskd at {host} (timeout: {timeout}s)...")
-    client = slskd_api.SlskdClient(
-        host=os.getenv("SLSKD_HOST_URL", "http://slskd:5030"),
-        api_key=os.getenv("SLSKD_API_KEY"),
-        url_base=os.getenv("SLSKD_URL_BASE", "")
-    )
+    client = get_slskd_client()
 
     start = time.time()
     last_err = None
@@ -812,7 +769,7 @@ def process_playlist(sp, conn, playlist_id, ntfy_url, ntfy_topic):
             logging.info("Shutdown requested, stopping track processing")
             return
         logging.info(f"Downloading: {track.name} by {track.artist}")
-        search_results = perform_search(track.artist, track.name)
+        search_results = perform_search(track.artist, track.name, album=track.album)
 
         success = handle_track_download(
             track=track,
