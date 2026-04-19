@@ -1,9 +1,10 @@
+import os
 import sqlite3
 import logging
 import json
 from models import Track
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
@@ -42,10 +43,9 @@ def _ensure_schema_version(conn: sqlite3.Connection) -> None:
 
 
 def _ensure_playlists_meta_table(conn: sqlite3.Connection) -> None:
-    """Single catalogue table keyed by Spotify playlist id.
-
-    Holds the snapshot_id we last synced against, so cycles that find the
-    playlist unchanged can skip the paginated `playlist_tracks` fetch.
+    """Catalogue table keyed by Spotify playlist id — source of truth for
+    which playlists the daemon syncs. `enabled` and `added_at` arrived in
+    schema v3; the ALTER TABLE guards handle v2 DBs on upgrade.
     """
     try:
         with conn:
@@ -55,10 +55,34 @@ def _ensure_playlists_meta_table(conn: sqlite3.Connection) -> None:
                 "table_name TEXT NOT NULL, "
                 "name TEXT NOT NULL, "
                 "snapshot_id TEXT, "
-                "last_synced TIMESTAMP)"
+                "last_synced TIMESTAMP, "
+                "enabled INTEGER NOT NULL DEFAULT 1, "
+                "added_at TIMESTAMP)"
+            )
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(playlists_meta)")}
+        with conn:
+            if "enabled" not in cols:
+                conn.execute(
+                    "ALTER TABLE playlists_meta ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"
+                )
+            if "added_at" not in cols:
+                conn.execute("ALTER TABLE playlists_meta ADD COLUMN added_at TIMESTAMP")
+    except sqlite3.Error as e:
+        logging.error(f"Error ensuring playlists_meta: {e}")
+
+
+def _ensure_settings_table(conn: sqlite3.Connection) -> None:
+    """Key-value bag for UI-editable tunables. DB value overrides env default."""
+    try:
+        with conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS settings ("
+                "key TEXT PRIMARY KEY, "
+                "value TEXT, "
+                "updated_at TIMESTAMP)"
             )
     except sqlite3.Error as e:
-        logging.error(f"Error creating playlists_meta: {e}")
+        logging.error(f"Error ensuring settings: {e}")
 
 
 def create_connection(db_file):
@@ -66,6 +90,7 @@ def create_connection(db_file):
         conn = sqlite3.connect(db_file, timeout=30)
         _apply_pragmas(conn)
         _ensure_playlists_meta_table(conn)
+        _ensure_settings_table(conn)
         _ensure_schema_version(conn)
         logging.info(f"Connected to SQLite database: {db_file}")
         return conn
@@ -89,12 +114,19 @@ def get_playlist_meta(conn, playlist_id):
 
 
 def upsert_playlist_meta(conn, playlist_id, table_name, name, snapshot_id):
+    """Insert a playlist or update its syncable fields.
+
+    `added_at` is set only on first insert (via COALESCE below); subsequent
+    calls don't bump it so the dashboard can sort by insertion order.
+    `enabled` is left alone on update — the UI toggles it explicitly.
+    """
     try:
         with conn:
             conn.execute(
                 "INSERT INTO playlists_meta "
-                "(playlist_id, table_name, name, snapshot_id, last_synced) "
-                "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) "
+                "(playlist_id, table_name, name, snapshot_id, last_synced, "
+                "enabled, added_at) "
+                "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, 1, CURRENT_TIMESTAMP) "
                 "ON CONFLICT(playlist_id) DO UPDATE SET "
                 "table_name = excluded.table_name, "
                 "name = excluded.name, "
@@ -104,6 +136,129 @@ def upsert_playlist_meta(conn, playlist_id, table_name, name, snapshot_id):
             )
     except sqlite3.Error as e:
         logging.error(f"Error upserting playlists_meta for {playlist_id}: {e}")
+
+
+def list_playlists(conn, only_enabled: bool = False):
+    """Return a list of dicts describing every known playlist."""
+    try:
+        sql = (
+            "SELECT playlist_id, name, table_name, snapshot_id, last_synced, "
+            "enabled, added_at FROM playlists_meta"
+        )
+        if only_enabled:
+            sql += " WHERE enabled = 1"
+        sql += " ORDER BY added_at DESC NULLS LAST, name COLLATE NOCASE"
+        rows = conn.execute(sql).fetchall()
+        return [
+            {
+                "playlist_id": r[0],
+                "name": r[1],
+                "table_name": r[2],
+                "snapshot_id": r[3],
+                "last_synced": r[4],
+                "enabled": bool(r[5]) if r[5] is not None else True,
+                "added_at": r[6],
+            }
+            for r in rows
+        ]
+    except sqlite3.Error as e:
+        logging.error(f"Could not list playlists: {e}")
+        return []
+
+
+def set_playlist_enabled(conn, playlist_id: str, enabled: bool) -> None:
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE playlists_meta SET enabled = ? WHERE playlist_id = ?",
+                (1 if enabled else 0, playlist_id),
+            )
+    except sqlite3.Error as e:
+        logging.error(f"Could not toggle playlist {playlist_id}: {e}")
+
+
+def remove_playlist(conn, playlist_id: str) -> bool:
+    """Drop the playlist from the catalogue AND drop its per-playlist tables.
+
+    Returns True if a row was removed. Leaves files on disk — removing them
+    is the caller's choice (via the UI dialog) to avoid accidental mass
+    deletion.
+    """
+    try:
+        row = conn.execute(
+            "SELECT table_name FROM playlists_meta WHERE playlist_id = ?",
+            (playlist_id,),
+        ).fetchone()
+        if not row:
+            return False
+        table_name = row[0]
+        with conn:
+            conn.execute(f'DROP TABLE IF EXISTS "{table_name}"')
+            conn.execute(f'DROP TABLE IF EXISTS "{table_name}_tried"')
+            conn.execute(
+                "DELETE FROM playlists_meta WHERE playlist_id = ?",
+                (playlist_id,),
+            )
+        logging.info(f"Removed playlist {playlist_id} (dropped table {table_name})")
+        return True
+    except sqlite3.Error as e:
+        logging.error(f"Could not remove playlist {playlist_id}: {e}")
+        return False
+
+
+def get_setting(conn, key: str, default=None):
+    """Look up a setting: DB value wins, else env var by the same key,
+    else `default`. Always returns a str (or None if no value anywhere).
+    """
+    try:
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = ?", (key,)
+        ).fetchone()
+        if row and row[0] is not None:
+            return row[0]
+    except sqlite3.Error as e:
+        logging.warning(f"Could not read setting {key}: {e}")
+    env_value = os.getenv(key)
+    if env_value is not None:
+        return env_value
+    return default
+
+
+def set_setting(conn, key: str, value) -> None:
+    """Write a DB override for a setting. Pass None to delete the override."""
+    if value is None:
+        delete_setting(conn, key)
+        return
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO settings (key, value, updated_at) "
+                "VALUES (?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(key) DO UPDATE SET "
+                "value = excluded.value, updated_at = excluded.updated_at",
+                (key, str(value)),
+            )
+    except sqlite3.Error as e:
+        logging.error(f"Could not write setting {key}: {e}")
+
+
+def delete_setting(conn, key: str) -> None:
+    """Drop the DB override so env/code default takes over again."""
+    try:
+        with conn:
+            conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+    except sqlite3.Error as e:
+        logging.error(f"Could not delete setting {key}: {e}")
+
+
+def list_settings(conn) -> dict:
+    """Return all DB-stored settings as a plain dict."""
+    try:
+        rows = conn.execute("SELECT key, value FROM settings").fetchall()
+        return {k: v for k, v in rows}
+    except sqlite3.Error as e:
+        logging.warning(f"Could not list settings: {e}")
+        return {}
 
 def create_table(conn, playlist_name):
     """Create a table dynamically based on the sanitized playlist name"""
