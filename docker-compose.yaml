@@ -10,7 +10,7 @@ services:
       - ./playlists:/playlists
     depends_on:
       - slskd
-    #restart: unless-stopped
+    restart: unless-stopped
 
   slskd:
     image: slskd/slskd:0.23.1
@@ -21,6 +21,6 @@ services:
       - ./downloads/incomplete:/downloads/incomplete
       - ./slsk_app:/app
     ports:
-      - "5030:5030"
-  #   # restart: unless-stopped
+      - "127.0.0.1:5030:5030"
+    restart: unless-stopped
 

@@ -6,6 +6,8 @@ import logging
 import re
 import difflib
 import requests
+import signal
+import threading
 import time
 from db import (
     create_connection,
@@ -18,7 +20,6 @@ from db import (
     get_pending_tracks,
 )
 from log_config import setup_logging
-from utils import sleep_interval
 from mutagen import File
 from mutagen import File as MutagenFile
 from mutagen.id3 import ID3, TIT2, TPE1, TALB
@@ -32,6 +33,21 @@ from models import Track
 
 
 MIN_MATCH_SCORE = float(os.getenv("MIN_MATCH_SCORE", "0.62"))
+CYCLE_INTERVAL_SECONDS = int(os.getenv("CYCLE_INTERVAL_SECONDS", "300"))
+CYCLE_ERROR_BACKOFF_SECONDS = int(os.getenv("CYCLE_ERROR_BACKOFF_SECONDS", "60"))
+
+_shutdown = threading.Event()
+
+
+def _install_signal_handlers():
+    def _handle(signum, _frame):
+        logging.info(f"Received signal {signum}, initiating graceful shutdown")
+        _shutdown.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, _handle)
+
+
 PREFERRED_FORMATS = os.getenv("SLSKD_PREFERRED_FORMATS", "mp3,flac,aiff,wav,m4a,ogg")
 AUDIO_EXTS = tuple(f".{ext.strip().lower()}" for ext in PREFERRED_FORMATS.split(","))
 _STOP_PHRASES = [
@@ -778,14 +794,12 @@ def wait_for_slskd_healthy(host, api_key, timeout=90, check_interval=1):
 
 
 def process_playlist(sp, conn, playlist_id, ntfy_url, ntfy_topic):
-    logging.info(f"🎧 Processing playlist ID: {playlist_id}")
+    logging.info(f"Processing playlist ID: {playlist_id}")
 
     new_tracks, playlist_name = fetch_and_compare_tracks(conn, playlist_id, sp)
 
-    startup_check(conn, playlist_name)
-
     if new_tracks:
-        msg = f"🔄 Playlist updated: {len(new_tracks)} new track(s) added to {playlist_name}"
+        msg = f"Playlist updated: {len(new_tracks)} new track(s) added to {playlist_name}"
         send_ntfy_notification(ntfy_url, ntfy_topic, msg)
 
     tracks = get_pending_tracks(conn, playlist_name)
@@ -794,7 +808,10 @@ def process_playlist(sp, conn, playlist_id, ntfy_url, ntfy_topic):
         return
 
     for track in tracks:
-        logging.info(f"🎶 Downloading: {track.name} by {track.artist}")
+        if _shutdown.is_set():
+            logging.info("Shutdown requested, stopping track processing")
+            return
+        logging.info(f"Downloading: {track.name} by {track.artist}")
         search_results = perform_search(track.artist, track.name)
 
         success = handle_track_download(
@@ -802,15 +819,15 @@ def process_playlist(sp, conn, playlist_id, ntfy_url, ntfy_topic):
             playlist_name=playlist_name,
             conn=conn,
             search_results=search_results,
-            max_attempts=2
+            max_attempts=2,
         )
 
         if success:
-            logging.info(f"✅ Downloaded: {track.name} by {track.artist}")
+            logging.info(f"Downloaded: {track.name} by {track.artist}")
         else:
-            logging.warning(f"❌ Failed: {track.name} by {track.artist}")
+            logging.warning(f"Failed: {track.name} by {track.artist}")
 
-    send_ntfy_notification(ntfy_url, ntfy_topic, f"✅ Finished processing playlist: {playlist_name}")
+    send_ntfy_notification(ntfy_url, ntfy_topic, f"Finished processing playlist: {playlist_name}")
 
 
 def safe_get(tag):
@@ -843,39 +860,75 @@ def handle_track_download(track, playlist_name, conn, search_results, max_attemp
     return False
 
 
+def _run_startup_reconciliation(sp, conn, playlist_urls):
+    """Run the one-shot on-disk reconciliation once per daemon start."""
+    for playlist_url in playlist_urls:
+        if _shutdown.is_set():
+            return
+        playlist_id = get_playlist_id(playlist_url)
+        if not playlist_id:
+            continue
+        try:
+            _, playlist_name = fetch_and_compare_tracks(conn, playlist_id, sp)
+            startup_check(conn, playlist_name)
+        except Exception:
+            logging.exception(f"Startup reconciliation failed for {playlist_url}")
+
+
 def main():
     setup_logging()
+    _install_signal_handlers()
     logging.info("Starting main process")
 
-    SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
-    SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
-    SLSKD_API_KEY = os.getenv("SLSKD_API_KEY")
-    SLSKD_HOST_URL = os.getenv("SLSKD_HOST_URL", "http://slskd:5030")
-    NTFY_URL = os.getenv('NTFY_URL')
-    NTFY_TOPIC = os.getenv('NTFY_TOPIC')
-    DOWNLOAD_ROOT = os.getenv("DOWNLOAD_ROOT", "/downloads")
-    DATA_ROOT = os.getenv("DATA_ROOT", "/data") 
-    playlist_urls = os.getenv('SPOTIFY_PLAYLIST_URLS').split(',')
+    slskd_api_key = os.getenv("SLSKD_API_KEY")
+    slskd_host_url = os.getenv("SLSKD_HOST_URL", "http://slskd:5030")
+    ntfy_url = os.getenv("NTFY_URL")
+    ntfy_topic = os.getenv("NTFY_TOPIC")
+    playlist_urls = [
+        u.strip()
+        for u in os.getenv("SPOTIFY_PLAYLIST_URLS", "").split(",")
+        if u.strip()
+    ]
 
-    wait_for_slskd_healthy(SLSKD_HOST_URL, SLSKD_API_KEY)
+    if not playlist_urls:
+        logging.error("No playlist URLs configured (SPOTIFY_PLAYLIST_URLS)")
+        return
 
-    send_ntfy_notification(NTFY_URL, NTFY_TOPIC, "Starting Spotify Playlist Downloader 🚀")
+    wait_for_slskd_healthy(slskd_host_url, slskd_api_key)
+    send_ntfy_notification(ntfy_url, ntfy_topic, "Spotify Playlist Downloader starting")
     sp = setup_spotify_client()
 
-    database = "./data/playlist_tracks.db"
-    conn = create_connection(database)
-
-
+    conn = create_connection("./data/playlist_tracks.db")
     if not conn:
         logging.error("Failed to connect to the SQLite database.")
         return
 
-    while True:
-        logging.info("Starting new cycle of playlist checks")
-        for playlist_url in playlist_urls:
-            playlist_id = get_playlist_id(playlist_url)
-            process_playlist(sp, conn, playlist_id, NTFY_URL, NTFY_TOPIC)
-        sleep_interval(5)
+    try:
+        _run_startup_reconciliation(sp, conn, playlist_urls)
+
+        while not _shutdown.is_set():
+            logging.info("Starting new cycle of playlist checks")
+            try:
+                for playlist_url in playlist_urls:
+                    if _shutdown.is_set():
+                        break
+                    playlist_id = get_playlist_id(playlist_url)
+                    if not playlist_id:
+                        continue
+                    process_playlist(sp, conn, playlist_id, ntfy_url, ntfy_topic)
+            except Exception:
+                logging.exception("Cycle failed; backing off and retrying")
+                if _shutdown.wait(CYCLE_ERROR_BACKOFF_SECONDS):
+                    break
+                continue
+            if _shutdown.wait(CYCLE_INTERVAL_SECONDS):
+                break
+    finally:
+        logging.info("Shutting down, closing database connection")
+        try:
+            conn.close()
+        except Exception:
+            logging.debug("Error closing DB connection", exc_info=True)
 
 
 if __name__ == "__main__":
