@@ -167,9 +167,15 @@ def perform_search(artist, title, album=None, timeout=60):
         logging.info(f"Searching for: {query}")
         search_id = None
         try:
+            # `responseLimit` caps the search at N responses on the slskd
+            # side — slskd then marks the search Completed and the normal
+            # polling loop picks it up. Slskd does not expose in-flight
+            # responses, so server-side capping is the only sane way to
+            # cut per-search latency.
             search = client.searches.search_text(
                 searchText=query,
                 minimumPeerUploadSpeed=MIN_PEER_UPLOAD_SPEED,
+                responseLimit=EARLY_STOP_RESPONSES,
             )
             search_id = search.get("id")
             if not search_id:
@@ -178,23 +184,8 @@ def perform_search(artist, title, album=None, timeout=60):
             start = time.time()
             timed_out = True
             while time.time() - start < timeout:
-                state_info = client.searches.state(search_id)
-                state = state_info.get("state", "")
-                response_count = state_info.get("responseCount", 0) or 0
+                state = client.searches.state(search_id).get("state", "")
                 if state != "InProgress":
-                    timed_out = False
-                    break
-                if response_count >= EARLY_STOP_RESPONSES:
-                    logging.info(
-                        f"Early-stopping search after {response_count} responses "
-                        f"(threshold {EARLY_STOP_RESPONSES})"
-                    )
-                    try:
-                        client.searches.stop(search_id)
-                    except Exception:
-                        logging.debug(
-                            f"Could not stop search {search_id}", exc_info=True
-                        )
                     timed_out = False
                     break
                 if _interruptible_sleep(1):
