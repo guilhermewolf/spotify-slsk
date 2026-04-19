@@ -26,7 +26,7 @@ from mutagen.aiff import AIFF
 from mutagen.mp3 import MP3
 from utils import sanitize_table_name
 from spotipy.oauth2 import SpotifyClientCredentials
-from soulseek_api import perform_search, download_and_verify, get_client as get_slskd_client
+from soulseek_api import perform_search, download_and_verify, get_client as get_slskd_client, set_shutdown_event as _slsk_set_shutdown_event
 from models import Track
 
 
@@ -843,6 +843,7 @@ def _run_startup_reconciliation(sp, conn, playlist_urls):
 def main():
     setup_logging()
     _install_signal_handlers()
+    _slsk_set_shutdown_event(_shutdown)
     logging.info("Starting main process")
 
     slskd_api_key = os.getenv("SLSKD_API_KEY")

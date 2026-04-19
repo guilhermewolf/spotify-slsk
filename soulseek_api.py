@@ -40,6 +40,21 @@ MIN_PEER_UPLOAD_SPEED = int(os.getenv("SLSKD_MIN_PEER_UPLOAD_SPEED", "0"))
 MIN_EFFECTIVE_MP3_KBPS = int(os.getenv("SLSKD_MIN_EFFECTIVE_MP3_KBPS", "280"))
 
 _client = None
+_shutdown_event = None
+
+
+def set_shutdown_event(event) -> None:
+    """Wire the caller's shutdown Event so our polling loops can exit promptly."""
+    global _shutdown_event
+    _shutdown_event = event
+
+
+def _interruptible_sleep(seconds: float) -> bool:
+    """Return True if shutdown was requested during the sleep, False on timeout."""
+    if _shutdown_event is None:
+        time.sleep(seconds)
+        return False
+    return _shutdown_event.wait(seconds)
 
 
 def get_client():
@@ -134,7 +149,8 @@ def perform_search(artist, title, album=None, timeout=60):
                 if state != "InProgress":
                     timed_out = False
                     break
-                time.sleep(1)
+                if _interruptible_sleep(1):
+                    return []
             if timed_out:
                 logging.warning(f"Search timed out for: {query}")
                 continue
@@ -435,7 +451,8 @@ def wait_for_completion(candidate, timeout=300):
                 break
         if transfer_id:
             break
-        time.sleep(1)
+        if _interruptible_sleep(1):
+            return None
 
     if not transfer_id:
         logging.error(f"Transfer ID not found for {candidate['filename']}")
@@ -469,7 +486,8 @@ def wait_for_completion(candidate, timeout=300):
         if time.time() - start > timeout:
             logging.warning(f"Transfer timeout for {candidate['filename']}")
             return None
-        time.sleep(2)
+        if _interruptible_sleep(2):
+            return None
 
 
 def _wait_for_external_processing(file_path):
@@ -482,7 +500,8 @@ def _wait_for_external_processing(file_path):
         if os.path.exists(file_path):
             logging.info(f"File confirmed at: {file_path}")
             return True
-        time.sleep(2)
+        if _interruptible_sleep(2):
+            return False
 
     logging.warning(f"File did not appear within timeout: {file_path}")
     return False
