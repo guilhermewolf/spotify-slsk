@@ -60,29 +60,39 @@ def fetch_all_tracks(conn, playlist_name):
         logging.error(f"Error fetching tracks from {table_name}: {e}")
         return []
 
+MAX_ATTEMPTS_BEFORE_SUSPEND = 2
+
+
 def update_download_status(conn, track_id, table_name, success=False, file_path=None):
     cursor = conn.cursor()
-    if success:
-        sql = f'UPDATE "{table_name}" SET downloaded = 1, attempts = 0, suspended_until = NULL, path = ?, last_attempt = CURRENT_TIMESTAMP WHERE id = ?'
-        params = (file_path, track_id)
-        logging.info(f"Updating status of track ID: {track_id} to downloaded with path: {file_path}")
-    else:
-        cursor.execute(f'SELECT attempts FROM "{table_name}" WHERE id = ?', (track_id,))
-        row = cursor.fetchone()
-        attempts = row[0] if row else 0
-        params = (track_id,)
-        sql = f'UPDATE "{table_name}" SET attempts = attempts + 1, last_attempt = CURRENT_TIMESTAMP WHERE id = ?'
-        logging.info(f"Incrementing attempt count for track ID: {track_id}")
-        
-        if attempts >= 2:
-            suspend_sql = f'UPDATE "{table_name}" SET suspended_until = datetime("now", "+2 days") WHERE id = ?'
-            cursor.execute(suspend_sql, (track_id,))
-            logging.info(f"Track ID: {track_id} has reached max attempts, suspending for 2 days")
-
     try:
-        cursor.execute(sql, params)
+        if success:
+            cursor.execute(
+                f'UPDATE "{table_name}" SET downloaded = 1, attempts = 0, '
+                f'suspended_until = NULL, path = ?, last_attempt = CURRENT_TIMESTAMP '
+                f'WHERE id = ?',
+                (file_path, track_id),
+            )
+            logging.info(f"Marked track {track_id} downloaded: {file_path}")
+        else:
+            cursor.execute(
+                f'UPDATE "{table_name}" SET attempts = attempts + 1, '
+                f'last_attempt = CURRENT_TIMESTAMP WHERE id = ?',
+                (track_id,),
+            )
+            cursor.execute(f'SELECT attempts FROM "{table_name}" WHERE id = ?', (track_id,))
+            row = cursor.fetchone()
+            attempts = row[0] if row else 0
+            if attempts >= MAX_ATTEMPTS_BEFORE_SUSPEND:
+                cursor.execute(
+                    f'UPDATE "{table_name}" SET suspended_until = datetime("now", "+2 days") '
+                    f'WHERE id = ?',
+                    (track_id,),
+                )
+                logging.info(f"Track {track_id} hit {attempts} attempts, suspended for 2 days")
+            else:
+                logging.info(f"Track {track_id} attempts now {attempts}")
         conn.commit()
-        logging.info(f"Updated track {track_id} status in {table_name}.")
     except sqlite3.Error as e:
         conn.rollback()
         logging.error(f"Error updating track status for {track_id} in {table_name}: {e}")

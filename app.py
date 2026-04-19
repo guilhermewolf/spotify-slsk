@@ -5,10 +5,8 @@ import os
 import logging
 import re
 import difflib
-import random
 import requests
 import time
-import sqlite3
 from db import (
     create_connection,
     create_table,
@@ -308,30 +306,6 @@ def _reject_and_log(file_path, playlist_name, conn, track_id=None, reason="unkno
     else:
         logging.debug(f"Skipping add_tried_file() because track ID is unknown for: {filename}")
 
-def clean_up_untracked_files(conn, download_path, table_name, delete: bool = False):
-    """
-    Compare files on disk vs DB. By default, do NOT delete (safe).
-    If delete=True, remove files not present in DB.
-    """
-    logging.info(f"Cleaning up untracked files in {download_path} (delete={delete})")
-    cursor = conn.cursor()
-    cursor.execute(f'SELECT path FROM "{table_name}" WHERE downloaded = 1')
-    db_files = {row[0] for row in cursor.fetchall() if row[0]}
-
-    for root, _, files in os.walk(download_path):
-        for file in files:
-            if file.lower().endswith(('.mp3', '.flac', '.aiff', '.wav', '.m4a', '.ogg')):
-                file_path = os.path.join(root, file)
-                if file_path not in db_files:
-                    if delete:
-                        try:
-                            os.remove(file_path)
-                            logging.info(f"Deleted untracked file: {file_path}")
-                        except Exception as e:
-                            logging.error(f"Failed to delete {file_path}: {e}")
-                    else:
-                        logging.info(f"(dry-run) Would delete untracked file: {file_path}")
-
 def _normalize_ext_list_env(var_name: str, default_csv: str) -> tuple:
     """
     Normalize env formats into a tuple of extensions like ('.flac', '.mp3', ...),
@@ -497,8 +471,8 @@ def _read_audio_tags_safe(path: str):
             a = mf.get("artist", [])
             title = t[0] if t else ""
             artist = a[0] if a else ""
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug(f"Could not read tags from {path}: {e}")
     if not title:
         title = os.path.splitext(os.path.basename(path))[0]
     return title, artist
@@ -567,8 +541,11 @@ def _looks_like_match(track_name: str, track_artist: str, file_title: str, file_
         if ta_set and fa_set:
             if ta_set.intersection(fa_set) or any(a in " ".join(stem_tokens) for a in ta_set):
                 return True
-            # Title is multi-word or a long single word? Accept to avoid over-strict failures.
-            if len(tn_tokens) >= 2 or len(next(iter(tn_tokens))).__int__ if False else len(list(tn_tokens)[0]) >= 6:
+            # Accept strong title match even without artist overlap when the title is
+            # multi-word or a long single word — prevents over-strict failures.
+            if len(tn_tokens) >= 2 or (
+                len(tn_tokens) == 1 and len(next(iter(tn_tokens))) >= 6
+            ):
                 return True
         else:
             # Missing artist info on one/both sides → accept strong title match
@@ -637,26 +614,6 @@ def _file_matches_track(file_path: str, track_name: str, track_artist: str) -> b
 def extract_artists_string(track):
     return ', '.join(artist['name'] for artist in track['artists'])
 
-def apply_exponential_backoff(attempts, base=1.0, jitter=0.5):
-    delay = base * (2 ** attempts)
-    jittered_delay = delay * random.uniform(1.0, 1.0 + jitter)
-    logging.debug(f"Sleeping for {jittered_delay:.2f} seconds (attempts: {attempts})")
-    time.sleep(jittered_delay)
-
-def retry_suspended_downloads(conn, table_name):
-    logging.info(f"Retrying suspended downloads for table: {table_name}")
-    cursor = conn.cursor()
-    cursor.execute(f"SELECT id, name, artists, attempts FROM {table_name} WHERE downloaded = 0 AND (suspended_until IS NULL OR suspended_until < datetime('now'))")
-    tracks_to_retry = cursor.fetchall()
-
-    for track in tracks_to_retry:
-        track_id, name, artists, attempts = track
-        logging.info(f"Retrying track {name} by {artists}")
-        apply_exponential_backoff(attempts)
-
-    #return tracks_to_retry
-    return [Track(track[0], track[1], track[2], "") for track in tracks_to_retry]
-
 def extract_metadata_from_file(file_path):
     try:
         ext = os.path.splitext(file_path)[1].lower()
@@ -714,20 +671,6 @@ def send_ntfy_notification(url, topic, message):
             logging.error(f"Failed to send notification: {response.status_code} {response.text}")
     except Exception as e:
         logging.error(f"Error while sending notification: {e}")
-
-def all_tracks_downloaded(conn, table_name):
-    cursor = conn.cursor()
-    cursor.execute(f"SELECT COUNT(*) FROM {table_name} WHERE downloaded = 0")
-    remaining_tracks = cursor.fetchone()[0]
-    
-    if remaining_tracks == 0:
-        logging.info(f"All tracks in playlist {table_name} have been downloaded.")
-        return True
-    else:
-        logging.info(f"{remaining_tracks} tracks in playlist {table_name} are still not downloaded.")
-        return False
-    
-
 
 def move_track_to_playlist_folder(track_path: str, playlist_name: str) -> str:
     try:
@@ -816,17 +759,18 @@ def wait_for_slskd_healthy(host, api_key, timeout=90, check_interval=1):
     )
 
     start = time.time()
+    last_err = None
     while time.time() - start < timeout:
         try:
             state = client.application.state()
             if state['server'].get('isConnected') and state['server'].get('isLoggedIn'):
-                logging.info("✅ slskd is healthy and connected.")
+                logging.info("slskd is healthy and connected.")
                 return
         except Exception as e:
-            pass  # silence repeated logs
+            last_err = e
 
         if int(time.time() - start) % 5 == 0:
-            logging.debug("Still waiting for slskd...")
+            logging.debug(f"Still waiting for slskd... (last error: {last_err})")
 
         time.sleep(check_interval)
 
@@ -926,18 +870,10 @@ def main():
         logging.error("Failed to connect to the SQLite database.")
         return
 
-    
-
-    for playlist_url in playlist_urls:
-        playlist_id = get_playlist_id(playlist_url)
-        playlist_name = sanitize_table_name(playlist_id)
-        process_playlist(sp, conn, playlist_id, NTFY_URL, NTFY_TOPIC)
-
     while True:
         logging.info("Starting new cycle of playlist checks")
         for playlist_url in playlist_urls:
             playlist_id = get_playlist_id(playlist_url)
-            playlist_name = sanitize_table_name(playlist_id)
             process_playlist(sp, conn, playlist_id, NTFY_URL, NTFY_TOPIC)
         sleep_interval(5)
 

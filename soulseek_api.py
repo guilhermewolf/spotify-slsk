@@ -73,26 +73,6 @@ def perform_search(artist, title, timeout=300):
     except Exception as e:
         logging.error(f"Search failed for '{query}': {e}")
         return []
-def slskd_version_check(version, target="0.22.2"):
-    version_tuple = tuple(map(int, version.split(".")[:3]))
-    target_tuple = tuple(map(int, target.split(".")[:3]))
-    return version_tuple > target_tuple
-
-def cancel_and_delete(delete_dir, username, files):
-    for file in files:
-        try:
-            slskd.transfers.cancel_download(username=username, id=file["id"])
-        except Exception as e:
-            logging.warning(f"Failed to cancel transfer: {file['id']} from {username}: {e}")
-
-    if os.path.exists(delete_dir):
-        try:
-            shutil.rmtree(delete_dir)
-            logging.info(f"Deleted directory: {delete_dir}")
-            
-        except Exception as e:
-            logging.warning(f"Could not delete {delete_dir}: {e}")
-
 def clean_filename(filename):
     """
     Clean a filename by removing common tags, normalizing spaces, and removing the extension.
