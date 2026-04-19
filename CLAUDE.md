@@ -17,46 +17,77 @@ pip install -r requirements.txt
 python app.py
 ```
 
-There is no test suite. `test.py` is a manual scratchpad for poking at the `slskd` API with hardcoded credentials — do not treat it as tests and do not wire it into CI.
+## Tests and CI
 
-CI (`.github/workflows/release.yaml`) only builds and pushes the multi-arch Docker image on pushes to `main`; it does not lint or test.
+- `pytest -q` runs the unit test suite in `tests/`. Requires `pip install -r requirements-dev.txt` for pytest and ruff.
+- `ruff check --select=E,F,W --ignore=E501 .` mirrors the lint CI does.
+- `python -m compileall -q .` is the cheapest syntax-check.
+- `.github/workflows/ci.yaml` runs all three on every push and PR.
+- `.github/workflows/release.yaml` builds and pushes the multi-arch image on pushes to `main`.
+
+`test.py` at the repo root is a **manual scratchpad**, not a test — it's gitignored and takes credentials from env.
 
 ## Architecture
 
-The app is a single long-running process (`app.py::main`) that loops forever over the playlists listed in `SPOTIFY_PLAYLIST_URLS`. One pass per playlist does: fetch from Spotify → reconcile against local disk → download anything still pending → tag → move into the playlist folder. Then `sleep_interval(5)` and repeat.
+The app is a single long-running process (`app.py::main`) that loops forever over the playlists listed in `SPOTIFY_PLAYLIST_URLS`. Flow:
+
+1. Install SIGTERM/SIGINT handlers that set a `_shutdown` threading.Event.
+2. Wait for slskd to be healthy (blocking, ~90s timeout at boot).
+3. **One-shot reconciliation** across all playlists — matches on-disk files against DB rows so the daemon doesn't redownload tracks that are already present. This is the expensive disk walk and runs only once per daemon start.
+4. Enter the cycle loop: for each playlist, fetch new Spotify tracks and attempt to download anything still pending. On any unhandled exception, log and back off `CYCLE_ERROR_BACKOFF_SECONDS` (default 60s). Between cycles, `_shutdown.wait(CYCLE_INTERVAL_SECONDS)` (default 300s) — interruptible by SIGTERM so Docker stop unwinds cleanly.
+5. On shutdown, close the SQLite connection in a `finally` block.
+
+The loop also touches `HEARTBEAT_FILE` (default `/tmp/heartbeat`) at the top of each iteration. Docker's `HEALTHCHECK` marks the container unhealthy if the heartbeat is older than `HEARTBEAT_STALE_SECONDS` (default 900s) — catches wedged-but-not-crashed states that `restart: unless-stopped` alone doesn't cover.
 
 ### Module responsibilities
 
-- **`app.py`** — orchestrator. Spotify client setup, playlist diffing, startup reconciliation, metadata tagging (`mutagen`), file moves, ntfy notifications. Also owns the *local-file ↔ DB* matching logic (`difflib`-based, see `find_closest_db_match`, `_find_best_local_match`, `_looks_like_match`).
-- **`soulseek_api.py`** — everything that talks to `slskd`: search, candidate filtering, enqueue, transfer monitoring, post-download verification. Owns the *search-result ↔ expected track* matching logic (`rapidfuzz`-based, see `extract_candidates`). Note these two matchers live in different files because they run at different phases and use different scoring — don't unify them without understanding both call sites.
-- **`db.py`** — SQLite persistence. Each playlist gets its **own table** named `pl_<sanitized_playlist_name>` plus a sibling `pl_<…>_tried` table that records filenames we already rejected for a given track (so retries don't redownload the same bad file). Table names are interpolated directly into SQL; `sanitize_table_name` in `utils.py` is the only defense against injection and MUST be used for any new query that names a table dynamically.
+- **`app.py`** — orchestrator. Spotify client setup, playlist diffing, one-shot startup reconciliation, metadata tagging (`mutagen`), file moves, ntfy notifications. Owns the **local-file ↔ DB** matcher (`difflib`-based, in `_looks_like_match`, `_find_best_local_match`, `score_track_match`, `find_closest_db_match`) — one canonical set of `_`-prefixed helpers (`_tokenize`, `_split_artists`, `_artists_overlap`, `_titles_token_equivalent`, `_remix_equivalent`, `_similar`).
+- **`soulseek_api.py`** — slskd client factory (`get_client()` lazy singleton) plus the **search-result ↔ expected track** matcher (`rapidfuzz`-based `extract_candidates`). Also owns query construction (`_build_search_queries` — multi-query waterfall: `title+artist` → album-cleaned → `title` only; CJK titles bypass punctuation-stripping), candidate filtering (format allowlist + reported-bitrate floor + effective-bitrate floor via `_effective_mp3_kbps` + version-gate penalty via `_version_mismatch`), and `sort_candidates` (format > bitrate > peer upload speed). `perform_search` cleans up its slskd search row in a `finally`. The two matchers live in different files because they run at different phases and use different scoring — don't unify them without understanding both call sites.
+- **`db.py`** — SQLite persistence with WAL mode, `busy_timeout=5000`, and `PRAGMA user_version` bootstrapping for future migrations. Each playlist gets its **own table** named `pl_<sanitized_playlist_name>` plus a sibling `pl_<…>_tried` table. Table names are interpolated directly into SQL; `sanitize_table_name` in `utils.py` is the only defense against injection — use it for any new query that names a table dynamically. All mutations go through `with conn:` blocks for atomicity.
 - **`models.py`** — `Track` value object passed between layers.
 - **`log_config.py`** — timezone-aware logging, driven by `TIMEZONE` and `LOGLEVEL`.
 
 ### State machine per track
 
-Tracks live in the per-playlist DB table with columns `downloaded`, `attempts`, `suspended_until`, `path`, plus a `tried_files` JSON column. Flow:
+Tracks live in the per-playlist DB table with columns `downloaded`, `attempts`, `suspended_until`, `path`, plus a sibling `<table>_tried` table for rejected filenames. Flow:
 
 1. New Spotify track → row inserted with `downloaded=0`.
-2. `startup_check` tries to match the row against files already on disk under `SLSKD_PLAYLISTS_DIR/<table>/`. A successful local match sets `downloaded=1` and `path=<file>` without touching Soulseek.
+2. `startup_check` (one-shot) tries to match the row against files already on disk under `SLSKD_PLAYLISTS_DIR/<table>/`. A successful local match sets `downloaded=1` and `path=<file>` without touching Soulseek.
 3. `get_pending_tracks` returns rows where `downloaded=0` AND `suspended_until` has elapsed.
-4. On download failure, `update_download_status(success=False)` increments `attempts`; after 2 attempts the row is suspended for 2 days.
-5. On verified success, `clear_tried_entries` wipes the retry history for that track.
+4. On download failure, `update_download_status(success=False)` increments `attempts` first, then suspends the row for 2 days once `attempts >= MAX_ATTEMPTS_BEFORE_SUSPEND` (2).
+5. On verified success, `clear_tried_entries` wipes the retry history.
 
-Files enter the system via the `/downloads` volume (shared between the `slskd` container and this app), then get moved to `/playlists/<table>/` after tagging.
+Files enter the system via the `/downloads` volume (shared between the `slskd` container and this app), then move to `/playlists/<table>/` after tagging.
 
-### Key environment knobs (beyond the README table)
+### Environment knobs
 
-- `SLSKD_PLAYLISTS_DIR` (default `/playlists`) — final home for verified files.
-- `SLSKD_DOWNLOADS_DIR` (default `/downloads`) — where `slskd` drops completed downloads; must be a shared volume with the `slskd` service.
-- `MIN_MATCH_SCORE` (default `0.62`) — threshold in `process_downloaded_file` for accepting a downloaded file as matching a DB row.
-- `SLSKD_WAIT_TIMEOUT` (default `60`) — seconds to wait for a file to appear on disk after `slskd` reports the transfer completed.
-- `SLSKD_MAX_RETRIES` (default `2`) — per-track download attempts before giving up on a search.
-- `LOGLEVEL`, `TIMEZONE` — consumed by `log_config.setup_logging`.
+Runtime / loop
+- `CYCLE_INTERVAL_SECONDS` (300) — between cycles. Interruptible by SIGTERM.
+- `CYCLE_ERROR_BACKOFF_SECONDS` (60) — backoff after a cycle raises.
+- `HEARTBEAT_FILE` (`/tmp/heartbeat`), `HEARTBEAT_STALE_SECONDS` (900) — healthcheck.
+
+Spotify / playlists
+- `SPOTIPY_CLIENT_ID`, `SPOTIPY_CLIENT_SECRET`, `SPOTIFY_PLAYLIST_URLS` (comma-separated).
+
+slskd
+- `SLSKD_HOST_URL`, `SLSKD_API_KEY`, `SLSKD_URL_BASE`.
+- `SLSKD_PLAYLISTS_DIR` (`/playlists`), `SLSKD_DOWNLOADS_DIR` (`/downloads`).
+- `SLSKD_PREFERRED_FORMATS` — ordered allowlist, e.g. `flac,mp3,aiff,wav`.
+- `SLSKD_WAIT_TIMEOUT` (60), `SLSKD_MAX_RETRIES` (2).
+- `SLSKD_MIN_PEER_UPLOAD_SPEED` (0) — passed to slskd's search endpoint.
+- `SLSKD_MIN_EFFECTIVE_MP3_KBPS` (280) — rejects MP3s whose size/duration proves they're sub-280 kbps even when tagged 320.
+
+Matching / logging
+- `MIN_MATCH_SCORE` (0.62) — `process_downloaded_file` accept threshold.
+- `LOGLEVEL`, `TIMEZONE`.
+
+Container
+- `PUID`, `PGID` — UID/GID the container runs as (default 1000:1000). Must match the host user that owns `./data`, `./downloads`, `./playlists`.
 
 ### Gotchas
 
-- Table names come from Spotify playlist titles, so `sanitize_table_name` must stay lossy-but-stable; changing its output format orphans existing rows.
-- `startup_check` and the reconcile path in `process_downloaded_file` pass `reconcile=True`/`destructive=False` to avoid deleting files that don't match — regular downloads delete on mismatch. Preserve this distinction when editing `_reject_and_log`.
-- The two matching subsystems (`extract_candidates` for Soulseek results, `_looks_like_match`/`find_closest_db_match` for local files) have overlapping but not identical token-cleaning logic (`_STOP_PHRASES`, bracket stripping, artist splitters). Fixing a mismatch in one does not fix the other.
-- `slskd_api==0.1.5` is pinned; its transfer-state strings (`"completed, succeeded"`, `"failed"`, etc.) are matched as substrings in `wait_for_completion` — bumping the library may break that check.
+- **Table names come from Spotify playlist titles.** `sanitize_table_name` is lossy-but-stable; changing its output format orphans existing rows. Playlists with colliding sanitized names will share a table.
+- **Matchers are not unified by design.** `extract_candidates` (rapidfuzz, soulseek_api.py) and `_looks_like_match` / `score_track_match` (difflib, app.py) have overlapping token-cleaning logic but serve different phases. Fixing a false match in one does not fix it in the other.
+- **`startup_check` and the reconcile path in `process_downloaded_file`** pass `reconcile=True`/`destructive=False` to avoid deleting files that don't match — regular downloads *do* delete on mismatch. Preserve this distinction when editing `_reject_and_log`.
+- **`slskd_api==0.1.5` is pinned.** Its transfer-state strings (`"completed, succeeded"`, `"failed"`, etc.) are matched as substrings in `wait_for_completion` — bumping the library may break that check. It also does not have a `stop(id)` method in older versions, but it does have `delete(id)` which we use in `perform_search`'s `finally`.
+- **SQLite WAL mode** means the DB file is always accompanied by `-wal` and `-shm` files. Backups must capture all three or run `PRAGMA wal_checkpoint(TRUNCATE)` first.

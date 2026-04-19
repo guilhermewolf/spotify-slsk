@@ -4,7 +4,6 @@ Using a file is necessary because WAL mode on :memory: is silently demoted.
 """
 import os
 import tempfile
-import time
 
 os.environ.setdefault("SLSKD_HOST_URL", "http://localhost")
 os.environ.setdefault("SLSKD_API_KEY", "x")
