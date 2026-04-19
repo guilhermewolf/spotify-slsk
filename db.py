@@ -3,7 +3,7 @@ import logging
 import json
 from models import Track
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
@@ -24,11 +24,16 @@ def _ensure_schema_version(conn: sqlite3.Connection) -> None:
     """Bootstrap PRAGMA user_version so future migrations can diff cleanly."""
     try:
         current = conn.execute("PRAGMA user_version").fetchone()[0]
-        if current == 0:
+        if current < SCHEMA_VERSION:
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.commit()
-            logging.info(f"Initialized schema user_version to {SCHEMA_VERSION}")
-        elif current != SCHEMA_VERSION:
+            if current == 0:
+                logging.info(f"Initialized schema user_version to {SCHEMA_VERSION}")
+            else:
+                logging.info(
+                    f"Migrated schema user_version {current} -> {SCHEMA_VERSION}"
+                )
+        elif current > SCHEMA_VERSION:
             logging.info(
                 f"DB user_version is {current}; code expects {SCHEMA_VERSION}"
             )
@@ -36,16 +41,69 @@ def _ensure_schema_version(conn: sqlite3.Connection) -> None:
         logging.warning(f"Failed to read/set schema user_version: {e}")
 
 
+def _ensure_playlists_meta_table(conn: sqlite3.Connection) -> None:
+    """Single catalogue table keyed by Spotify playlist id.
+
+    Holds the snapshot_id we last synced against, so cycles that find the
+    playlist unchanged can skip the paginated `playlist_tracks` fetch.
+    """
+    try:
+        with conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS playlists_meta ("
+                "playlist_id TEXT PRIMARY KEY, "
+                "table_name TEXT NOT NULL, "
+                "name TEXT NOT NULL, "
+                "snapshot_id TEXT, "
+                "last_synced TIMESTAMP)"
+            )
+    except sqlite3.Error as e:
+        logging.error(f"Error creating playlists_meta: {e}")
+
+
 def create_connection(db_file):
     try:
         conn = sqlite3.connect(db_file, timeout=30)
         _apply_pragmas(conn)
+        _ensure_playlists_meta_table(conn)
         _ensure_schema_version(conn)
         logging.info(f"Connected to SQLite database: {db_file}")
         return conn
     except sqlite3.Error as e:
         logging.error(f"Error connecting to SQLite: {e}")
         return None
+
+
+def get_playlist_meta(conn, playlist_id):
+    """Return (snapshot_id, table_name, name, last_synced) or a 4-tuple of None."""
+    try:
+        row = conn.execute(
+            "SELECT snapshot_id, table_name, name, last_synced "
+            "FROM playlists_meta WHERE playlist_id = ?",
+            (playlist_id,),
+        ).fetchone()
+        return row if row else (None, None, None, None)
+    except sqlite3.Error as e:
+        logging.error(f"Error reading playlists_meta for {playlist_id}: {e}")
+        return (None, None, None, None)
+
+
+def upsert_playlist_meta(conn, playlist_id, table_name, name, snapshot_id):
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO playlists_meta "
+                "(playlist_id, table_name, name, snapshot_id, last_synced) "
+                "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(playlist_id) DO UPDATE SET "
+                "table_name = excluded.table_name, "
+                "name = excluded.name, "
+                "snapshot_id = excluded.snapshot_id, "
+                "last_synced = excluded.last_synced",
+                (playlist_id, table_name, name, snapshot_id),
+            )
+    except sqlite3.Error as e:
+        logging.error(f"Error upserting playlists_meta for {playlist_id}: {e}")
 
 def create_table(conn, playlist_name):
     """Create a table dynamically based on the sanitized playlist name"""

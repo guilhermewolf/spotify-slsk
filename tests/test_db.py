@@ -35,6 +35,25 @@ class TestConnectionPragmas:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
 
 
+class TestPlaylistsMeta:
+    def test_initial_read_returns_none_tuple(self, conn):
+        assert db.get_playlist_meta(conn, "nope") == (None, None, None, None)
+
+    def test_upsert_then_read(self, conn):
+        db.upsert_playlist_meta(conn, "pid1", "pl_my_list", "My List", "snap-abc")
+        snap, table, name, last = db.get_playlist_meta(conn, "pid1")
+        assert snap == "snap-abc"
+        assert table == "pl_my_list"
+        assert name == "My List"
+        assert last is not None
+
+    def test_upsert_updates_existing(self, conn):
+        db.upsert_playlist_meta(conn, "pid1", "pl_my_list", "My List", "snap-v1")
+        db.upsert_playlist_meta(conn, "pid1", "pl_my_list", "My List", "snap-v2")
+        snap, _, _, _ = db.get_playlist_meta(conn, "pid1")
+        assert snap == "snap-v2"
+
+
 class TestTrackLifecycle:
     def test_insert_fetch_roundtrip(self, conn):
         db.create_table(conn, "pl_test")

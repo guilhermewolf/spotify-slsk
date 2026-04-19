@@ -17,6 +17,8 @@ from db import (
     clear_tried_entries,
     add_tried_file,
     get_pending_tracks,
+    get_playlist_meta,
+    upsert_playlist_meta,
 )
 from log_config import setup_logging
 from mutagen import File as MutagenFile
@@ -95,13 +97,26 @@ def fetch_all_playlist_tracks(sp, playlist_id):
     return tracks
 
 def fetch_and_compare_tracks(conn, playlist_id, sp):
-    playlist_info = sp.playlist(playlist_id)
-    playlist_title = playlist_info['name']
-    table_name = f"{sanitize_table_name(playlist_title)}"
+    # Pull the playlist root (cheap one-page call). snapshot_id lets us skip
+    # the expensive paginated track fetch when nothing has changed.
+    playlist_info = sp.playlist(playlist_id, fields="name,snapshot_id")
+    playlist_title = playlist_info["name"]
+    snapshot_id = playlist_info.get("snapshot_id")
+    table_name = sanitize_table_name(playlist_title)
 
     create_table(conn, table_name)
 
-    logging.info(f"Fetching tracks for playlist ID: {playlist_id} into table: {table_name}")
+    stored_snapshot, _, _, _ = get_playlist_meta(conn, playlist_id)
+    if stored_snapshot and snapshot_id and stored_snapshot == snapshot_id:
+        logging.info(
+            f"Playlist {playlist_title} unchanged (snapshot {snapshot_id[:8]}); "
+            f"skipping Spotify track fetch"
+        )
+        return [], table_name
+
+    logging.info(
+        f"Fetching tracks for playlist ID: {playlist_id} into table: {table_name}"
+    )
     items = fetch_all_playlist_tracks(sp, playlist_id)
     logging.info(f"Fetched {len(items)} tracks from Spotify for playlist {table_name}")
 
@@ -109,25 +124,36 @@ def fetch_and_compare_tracks(conn, playlist_id, sp):
     new_tracks = []
 
     for item in items:
-        track = item['track']
+        track = item.get("track")
+        if not track or not track.get("id"):
+            continue
         artists_str = extract_artists_string(track)
 
-        logging.debug(f"Fetched track: {track['name']} by {artists_str}")
-
-        if track['id'] not in db_tracks:
+        if track["id"] not in db_tracks:
             track_data = (
-                track['id'],
-                track['name'],
+                track["id"],
+                track["name"],
                 artists_str,
-                track['album']['name']
+                track["album"]["name"],
             )
             insert_track(conn, table_name, track_data)
             logging.info(
-                f"New Song found in {table_name}: {track['name']} by {artists_str} from album {track['album']['name']}"
+                f"New Song found in {table_name}: {track['name']} by {artists_str} "
+                f"from album {track['album']['name']}"
             )
             new_tracks.append(
-                Track(track['id'], track['name'], artists_str, track['album']['name'], playlist_id)
+                Track(
+                    track["id"],
+                    track["name"],
+                    artists_str,
+                    track["album"]["name"],
+                    playlist_id,
+                )
             )
+
+    # Only stamp the new snapshot after we've successfully inserted the diff,
+    # so a crash mid-sync retries next cycle.
+    upsert_playlist_meta(conn, playlist_id, table_name, playlist_title, snapshot_id)
 
     logging.info(f"Found {len(new_tracks)} new tracks to download in playlist {table_name}")
     return new_tracks, table_name
