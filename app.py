@@ -895,11 +895,12 @@ def _migrate_env_playlists(conn, sp):
         if not pid:
             continue
         try:
-            info = sp.playlist(pid, fields="name,snapshot_id")
+            info = sp.playlist(pid, fields="name")
             table_name = sanitize_table_name(info["name"])
-            upsert_playlist_meta(
-                conn, pid, table_name, info["name"], info.get("snapshot_id")
-            )
+            # Intentionally leave snapshot_id NULL — the first cycle's
+            # fetch_and_compare_tracks will populate tracks and stamp
+            # the snapshot itself.
+            upsert_playlist_meta(conn, pid, table_name, info["name"], None)
             logging.info(f"Imported: {info['name']} ({pid})")
         except Exception as e:
             logging.error(f"Could not import env playlist {url}: {e}")

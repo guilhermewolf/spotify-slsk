@@ -119,21 +119,20 @@ def create_app(db_path: str, spotify_client=None) -> Flask:
         sp = app.config.get("SPOTIFY")
         if sp is not None:
             try:
-                info = sp.playlist(pid, fields="name,snapshot_id")
+                info = sp.playlist(pid, fields="name")
                 name = info["name"]
-                snapshot = info.get("snapshot_id")
             except Exception as e:
                 logging.warning(f"Spotify validation failed for {pid}: {e}")
                 flash(f"Spotify rejected that playlist: {e}", "error")
                 return redirect(url_for("dashboard"))
         else:
-            # Daemon's Spotify client isn't wired in yet — store the id and let
-            # the first sync fill in the real name.
+            # Daemon's Spotify client isn't wired in — store the id as
+            # placeholder name; the first sync fills in the real name.
             name = pid
-            snapshot = None
 
+        # snapshot_id intentionally NULL so the first cycle fetches tracks.
         table = sanitize_table_name(name)
-        db.upsert_playlist_meta(g.conn, pid, table, name, snapshot)
+        db.upsert_playlist_meta(g.conn, pid, table, name, None)
         db.create_table(g.conn, table)
         flash(f'Added "{name}".', "success")
         return redirect(url_for("dashboard"))
