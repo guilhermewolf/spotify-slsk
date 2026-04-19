@@ -68,12 +68,12 @@ _ARTIST_SPLIT_RE = re.compile(r"\s*(?:,|&| and | feat\.? | ft\.? | featuring )\s
 
 def get_playlist_id(playlist_url):
     try:
-        if "playlist/" in playlist_url:
-            return playlist_url.split("playlist/")[1].split("?")[0]
-        else:
-            raise ValueError(f"Invalid playlist URL: {playlist_url}")
-    except IndexError:
-        logging.error(f"Failed to extract playlist ID from URL: {playlist_url}")
+        if "playlist/" not in (playlist_url or ""):
+            logging.error(f"Invalid playlist URL (no 'playlist/' segment): {playlist_url}")
+            return None
+        return playlist_url.split("playlist/")[1].split("?")[0] or None
+    except Exception as e:
+        logging.error(f"Failed to extract playlist ID from URL {playlist_url!r}: {e}")
         return None
 
 def sanitize_input(text):
