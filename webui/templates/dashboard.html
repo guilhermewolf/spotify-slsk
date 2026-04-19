@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Playlists</h2>
+
+<article>
+  <header><strong>Add a Spotify playlist</strong></header>
+  <form method="POST" action="{{ url_for('add_playlist') }}">
+    <label for="playlist_url">Spotify URL</label>
+    <div style="display: flex; gap: 0.5em;">
+      <input type="url" id="playlist_url" name="playlist_url"
+             placeholder="https://open.spotify.com/playlist/…" required style="flex: 1;">
+      <button type="submit" style="width: auto; margin-top: 0;">Add</button>
+    </div>
+  </form>
+</article>
+
+{% if playlists %}
+<div hx-get="{{ url_for('dashboard') }}" hx-trigger="every 15s" hx-swap="outerHTML" hx-select="#playlist-list">
+<div id="playlist-list">
+  {% for pl in playlists %}
+  <article>
+    <header>
+      <strong><a href="{{ url_for('playlist_detail', playlist_id=pl.playlist_id) }}">{{ pl.name }}</a></strong>
+      {% if not pl.enabled %}<span class="badge badge-disabled">disabled</span>{% endif %}
+      <span class="muted">
+        · last synced {{ pl.last_synced or 'never' }}
+        {% if pl.snapshot_id %}· snapshot {{ pl.snapshot_id[:8] }}{% endif %}
+      </span>
+    </header>
+    {% set total = pl.stats.total %}
+    {% set pct = (pl.stats.downloaded / total * 100) if total else 0 %}
+    <div class="progress"><div class="progress-bar" style="width: {{ pct }}%"></div></div>
+    <div>
+      <span class="stat">Total <strong>{{ total }}</strong></span>
+      <span class="stat">Downloaded <strong>{{ pl.stats.downloaded }}</strong></span>
+      <span class="stat">Pending <strong>{{ pl.stats.pending }}</strong></span>
+      <span class="stat">Suspended <strong>{{ pl.stats.suspended }}</strong></span>
+    </div>
+    <footer>
+      <form class="inline-form" method="POST" action="{{ url_for('toggle_playlist', playlist_id=pl.playlist_id) }}">
+        <button type="submit" class="secondary outline">{{ 'Disable' if pl.enabled else 'Enable' }}</button>
+      </form>
+      <form class="inline-form" method="POST" action="{{ url_for('delete_playlist', playlist_id=pl.playlist_id) }}"
+            onsubmit="return confirm('Remove this playlist from the daemon? Files on disk are kept.')">
+        <button type="submit" class="contrast outline">Remove</button>
+      </form>
+    </footer>
+  </article>
+  {% endfor %}
+</div>
+</div>
+{% else %}
+<p class="muted">No playlists yet — paste a Spotify URL above to get started.</p>
+{% endif %}
+{% endblock %}

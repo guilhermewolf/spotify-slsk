@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Settings · spotify-slsk{% endblock %}
+{% block content %}
+
+<h2>Settings</h2>
+<p class="muted">Leave a field blank to fall back to the env default / built-in default. Changes take effect on the next cycle.</p>
+
+<form method="POST">
+  {% for key, default, help_text in spec %}
+  <label for="{{ key }}">
+    <strong>{{ key }}</strong>
+    <small class="muted">· {{ help_text }}</small>
+  </label>
+  <input type="text" id="{{ key }}" name="{{ key }}"
+         value="{{ overrides.get(key, '') }}"
+         placeholder="effective: {{ effective[key] }}">
+  {% endfor %}
+  <button type="submit">Save</button>
+</form>
+
+{% endblock %}

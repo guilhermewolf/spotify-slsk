@@ -28,7 +28,7 @@ from mutagen.id3 import ID3, TIT2, TPE1, TALB
 from mutagen.flac import FLAC
 from mutagen.aiff import AIFF
 from mutagen.mp3 import MP3
-from utils import sanitize_table_name
+from utils import sanitize_table_name, get_playlist_id
 from spotipy.oauth2 import SpotifyClientCredentials
 from soulseek_api import (
     perform_search,
@@ -85,16 +85,6 @@ _STOP_PHRASES = [
 ]
 # Splitters for artists like "Disclosure, AlunaGeorge", "Artist A & B", "feat.", "ft."
 _ARTIST_SPLIT_RE = re.compile(r"\s*(?:,|&| and | feat\.? | ft\.? | featuring )\s*", re.IGNORECASE)
-
-def get_playlist_id(playlist_url):
-    try:
-        if "playlist/" not in (playlist_url or ""):
-            logging.error(f"Invalid playlist URL (no 'playlist/' segment): {playlist_url}")
-            return None
-        return playlist_url.split("playlist/")[1].split("?")[0] or None
-    except Exception as e:
-        logging.error(f"Failed to extract playlist ID from URL {playlist_url!r}: {e}")
-        return None
 
 def sanitize_input(text):
     return re.sub(r'[^A-Za-z0-9 ]+', '', text)
@@ -943,6 +933,16 @@ def main():
     try:
         _migrate_env_playlists(conn, sp)
         _reload_settings(conn)
+
+        if os.getenv("UI_ENABLED", "1") == "1":
+            from webui import run_in_thread as _run_webui
+            _run_webui(
+                db_path="./data/playlist_tracks.db",
+                spotify_client=sp,
+                host=os.getenv("UI_BIND_ADDR", "0.0.0.0"),
+                port=int(os.getenv("UI_PORT", "8000")),
+            )
+
         _run_startup_reconciliation(sp, conn)
 
         while not _shutdown.is_set():

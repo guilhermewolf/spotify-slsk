@@ -13,10 +13,9 @@ from app import (
     _split_artists,
     _titles_token_equivalent,
     _tokenize,
-    get_playlist_id,
     score_track_match,
 )
-from utils import sanitize_table_name
+from utils import sanitize_table_name, get_playlist_id
 
 
 class TestTokenize:

@@ -3,3 +3,4 @@ mutagen==1.45.1
 pytz
 slskd-api==0.1.5
 rapidfuzz==3.6.2
+Flask==3.0.3

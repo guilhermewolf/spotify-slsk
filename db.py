@@ -260,6 +260,121 @@ def list_settings(conn) -> dict:
         logging.warning(f"Could not list settings: {e}")
         return {}
 
+
+def playlist_stats(conn, table_name: str) -> dict:
+    """Return counts the dashboard needs for one playlist.
+
+    Missing tables (deleted playlist still listed in an older in-flight page)
+    yield zeros rather than an exception.
+    """
+    try:
+        row = conn.execute(
+            f'SELECT '
+            f'  COUNT(*), '
+            f'  COALESCE(SUM(CASE WHEN downloaded = 1 THEN 1 ELSE 0 END), 0), '
+            f'  COALESCE(SUM(CASE WHEN downloaded = 0 AND '
+            f'    (suspended_until IS NULL OR suspended_until < CURRENT_TIMESTAMP) '
+            f'    THEN 1 ELSE 0 END), 0), '
+            f'  COALESCE(SUM(CASE WHEN downloaded = 0 AND suspended_until IS NOT NULL '
+            f'    AND suspended_until >= CURRENT_TIMESTAMP THEN 1 ELSE 0 END), 0) '
+            f'FROM "{table_name}"'
+        ).fetchone()
+        return {
+            "total": row[0],
+            "downloaded": row[1],
+            "pending": row[2],
+            "suspended": row[3],
+        }
+    except sqlite3.Error as e:
+        logging.warning(f"Could not get stats for {table_name}: {e}")
+        return {"total": 0, "downloaded": 0, "pending": 0, "suspended": 0}
+
+
+def _track_status(downloaded, attempts, suspended_until, now):
+    if downloaded:
+        return "downloaded"
+    if suspended_until and suspended_until >= now:
+        return "suspended"
+    if attempts and attempts > 0:
+        return "retrying"
+    return "pending"
+
+
+def list_tracks(conn, table_name: str) -> list:
+    """Return one dict per track in the playlist, with a derived status."""
+    try:
+        rows = conn.execute(
+            f'SELECT id, name, artists, album, downloaded, path, attempts, '
+            f'last_attempt, suspended_until, CURRENT_TIMESTAMP '
+            f'FROM "{table_name}" ORDER BY name COLLATE NOCASE'
+        ).fetchall()
+        result = []
+        for r in rows:
+            d = {
+                "id": r[0],
+                "name": r[1],
+                "artists": r[2],
+                "album": r[3],
+                "downloaded": bool(r[4]),
+                "path": r[5],
+                "attempts": r[6] or 0,
+                "last_attempt": r[7],
+                "suspended_until": r[8],
+            }
+            d["status"] = _track_status(d["downloaded"], d["attempts"], r[8], r[9])
+            result.append(d)
+        return result
+    except sqlite3.Error as e:
+        logging.error(f"Could not list tracks for {table_name}: {e}")
+        return []
+
+
+def get_track(conn, table_name: str, track_id: str):
+    """Return one track dict or None."""
+    try:
+        r = conn.execute(
+            f'SELECT id, name, artists, album, downloaded, path, attempts, '
+            f'last_attempt, suspended_until, CURRENT_TIMESTAMP '
+            f'FROM "{table_name}" WHERE id = ?',
+            (track_id,),
+        ).fetchone()
+        if not r:
+            return None
+        d = {
+            "id": r[0],
+            "name": r[1],
+            "artists": r[2],
+            "album": r[3],
+            "downloaded": bool(r[4]),
+            "path": r[5],
+            "attempts": r[6] or 0,
+            "last_attempt": r[7],
+            "suspended_until": r[8],
+        }
+        d["status"] = _track_status(d["downloaded"], d["attempts"], r[8], r[9])
+        return d
+    except sqlite3.Error as e:
+        logging.error(f"Could not read track {track_id} from {table_name}: {e}")
+        return None
+
+
+def retry_track(conn, table_name: str, track_id: str) -> None:
+    """Clear suspended_until + attempts and wipe the tried-files history so
+    the track is picked up fresh on the next cycle."""
+    try:
+        with conn:
+            conn.execute(
+                f'UPDATE "{table_name}" SET suspended_until = NULL, attempts = 0 '
+                f'WHERE id = ?',
+                (track_id,),
+            )
+            conn.execute(
+                f'DELETE FROM "{table_name}_tried" WHERE track_id = ?',
+                (track_id,),
+            )
+    except sqlite3.Error as e:
+        logging.error(f"Could not retry track {track_id} in {table_name}: {e}")
+
 def create_table(conn, playlist_name):
     """Create a table dynamically based on the sanitized playlist name"""
     table_name = playlist_name
