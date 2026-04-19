@@ -19,6 +19,8 @@ from db import (
     get_pending_tracks,
     get_playlist_meta,
     upsert_playlist_meta,
+    list_playlists,
+    get_setting,
 )
 from log_config import setup_logging
 from mutagen import File as MutagenFile
@@ -28,7 +30,13 @@ from mutagen.aiff import AIFF
 from mutagen.mp3 import MP3
 from utils import sanitize_table_name
 from spotipy.oauth2 import SpotifyClientCredentials
-from soulseek_api import perform_search, download_and_verify, get_client as get_slskd_client, set_shutdown_event as _slsk_set_shutdown_event
+from soulseek_api import (
+    perform_search,
+    download_and_verify,
+    get_client as get_slskd_client,
+    set_shutdown_event as _slsk_set_shutdown_event,
+    refresh_from_db as _slsk_refresh_from_db,
+)
 from models import Track
 
 
@@ -36,6 +44,16 @@ MIN_MATCH_SCORE = float(os.getenv("MIN_MATCH_SCORE", "0.62"))
 CYCLE_INTERVAL_SECONDS = int(os.getenv("CYCLE_INTERVAL_SECONDS", "300"))
 CYCLE_ERROR_BACKOFF_SECONDS = int(os.getenv("CYCLE_ERROR_BACKOFF_SECONDS", "60"))
 HEARTBEAT_FILE = os.getenv("HEARTBEAT_FILE", "/tmp/heartbeat")
+
+
+def _reload_settings(conn):
+    """Pull live tunables from the DB so UI changes take effect next cycle."""
+    global MIN_MATCH_SCORE
+    try:
+        MIN_MATCH_SCORE = float(get_setting(conn, "MIN_MATCH_SCORE", "0.62"))
+    except (TypeError, ValueError) as e:
+        logging.warning(f"Bad MIN_MATCH_SCORE in DB; keeping previous: {e}")
+    _slsk_refresh_from_db(conn)
 
 _shutdown = threading.Event()
 
@@ -853,19 +871,48 @@ def handle_track_download(track, playlist_name, conn, search_results, max_attemp
     return False
 
 
-def _run_startup_reconciliation(sp, conn, playlist_urls):
+def _run_startup_reconciliation(sp, conn):
     """Run the one-shot on-disk reconciliation once per daemon start."""
-    for playlist_url in playlist_urls:
+    for pl in list_playlists(conn, only_enabled=True):
         if _shutdown.is_set():
             return
-        playlist_id = get_playlist_id(playlist_url)
-        if not playlist_id:
-            continue
         try:
-            _, playlist_name = fetch_and_compare_tracks(conn, playlist_id, sp)
+            _, playlist_name = fetch_and_compare_tracks(conn, pl["playlist_id"], sp)
             startup_check(conn, playlist_name)
         except Exception:
-            logging.exception(f"Startup reconciliation failed for {playlist_url}")
+            logging.exception(
+                f"Startup reconciliation failed for {pl['playlist_id']} ({pl['name']})"
+            )
+
+
+def _migrate_env_playlists(conn, sp):
+    """First-boot import: seed the empty catalogue from SPOTIFY_PLAYLIST_URLS env.
+
+    Runs only when `playlists_meta` has no rows AND the env var is set.
+    After this, the DB is the source of truth; the UI manages add/remove.
+    """
+    if list_playlists(conn):
+        return
+    env_urls = os.getenv("SPOTIFY_PLAYLIST_URLS", "")
+    urls = [u.strip() for u in env_urls.split(",") if u.strip()]
+    if not urls:
+        return
+    logging.info(
+        f"First-boot: importing {len(urls)} playlist(s) from SPOTIFY_PLAYLIST_URLS"
+    )
+    for url in urls:
+        pid = get_playlist_id(url)
+        if not pid:
+            continue
+        try:
+            info = sp.playlist(pid, fields="name,snapshot_id")
+            table_name = sanitize_table_name(info["name"])
+            upsert_playlist_meta(
+                conn, pid, table_name, info["name"], info.get("snapshot_id")
+            )
+            logging.info(f"Imported: {info['name']} ({pid})")
+        except Exception as e:
+            logging.error(f"Could not import env playlist {url}: {e}")
 
 
 def main():
@@ -883,15 +930,6 @@ def main():
     slskd_host_url = os.getenv("SLSKD_HOST_URL", "http://slskd:5030")
     ntfy_url = os.getenv("NTFY_URL")
     ntfy_topic = os.getenv("NTFY_TOPIC")
-    playlist_urls = [
-        u.strip()
-        for u in os.getenv("SPOTIFY_PLAYLIST_URLS", "").split(",")
-        if u.strip()
-    ]
-
-    if not playlist_urls:
-        logging.error("No playlist URLs configured (SPOTIFY_PLAYLIST_URLS)")
-        return
 
     wait_for_slskd_healthy(slskd_host_url, slskd_api_key)
     send_ntfy_notification(ntfy_url, ntfy_topic, "Spotify Playlist Downloader starting")
@@ -903,19 +941,29 @@ def main():
         return
 
     try:
-        _run_startup_reconciliation(sp, conn, playlist_urls)
+        _migrate_env_playlists(conn, sp)
+        _reload_settings(conn)
+        _run_startup_reconciliation(sp, conn)
 
         while not _shutdown.is_set():
             _touch_heartbeat()
-            logging.info("Starting new cycle of playlist checks")
+            _reload_settings(conn)
+            playlists = list_playlists(conn, only_enabled=True)
+            if not playlists:
+                logging.info(
+                    "No enabled playlists; waiting for the UI to add some"
+                )
+            else:
+                logging.info(
+                    f"Starting new cycle ({len(playlists)} enabled playlist(s))"
+                )
             try:
-                for playlist_url in playlist_urls:
+                for pl in playlists:
                     if _shutdown.is_set():
                         break
-                    playlist_id = get_playlist_id(playlist_url)
-                    if not playlist_id:
-                        continue
-                    process_playlist(sp, conn, playlist_id, ntfy_url, ntfy_topic)
+                    process_playlist(
+                        sp, conn, pl["playlist_id"], ntfy_url, ntfy_topic
+                    )
             except Exception:
                 logging.exception("Cycle failed; backing off and retrying")
                 if _shutdown.wait(CYCLE_ERROR_BACKOFF_SECONDS):

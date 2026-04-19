@@ -6,7 +6,7 @@ import re
 import slskd_api
 from rapidfuzz import fuzz
 
-from db import get_tried_files, add_tried_file
+from db import get_tried_files, add_tried_file, get_setting
 
 DEFAULT_FORMATS = "flac,mp3,aiff,wav"
 
@@ -44,6 +44,36 @@ EARLY_STOP_RESPONSES = int(os.getenv("SLSKD_EARLY_STOP_RESPONSES", "20"))
 
 _client = None
 _shutdown_event = None
+
+
+def refresh_from_db(conn) -> None:
+    """Reload UI-editable tunables from the DB. Called at each cycle start.
+
+    Infrastructure values (SLSKD_HOST_URL, DOWNLOAD_DIR, SLSKD_URL_BASE)
+    stay env-only because they're deploy-time concerns.
+    """
+    global PREFERRED_FORMATS, MIN_PEER_UPLOAD_SPEED, MIN_EFFECTIVE_MP3_KBPS
+    global EARLY_STOP_RESPONSES, MAX_RETRIES, EXTERNAL_PROCESS_WAIT_TIMEOUT
+
+    PREFERRED_FORMATS = _normalize_ext_list(
+        get_setting(conn, "SLSKD_PREFERRED_FORMATS", DEFAULT_FORMATS)
+    )
+    try:
+        MIN_PEER_UPLOAD_SPEED = int(
+            get_setting(conn, "SLSKD_MIN_PEER_UPLOAD_SPEED", "0")
+        )
+        MIN_EFFECTIVE_MP3_KBPS = int(
+            get_setting(conn, "SLSKD_MIN_EFFECTIVE_MP3_KBPS", "280")
+        )
+        EARLY_STOP_RESPONSES = int(
+            get_setting(conn, "SLSKD_EARLY_STOP_RESPONSES", "20")
+        )
+        MAX_RETRIES = int(get_setting(conn, "SLSKD_MAX_RETRIES", "2"))
+        EXTERNAL_PROCESS_WAIT_TIMEOUT = int(
+            get_setting(conn, "SLSKD_WAIT_TIMEOUT", "60")
+        )
+    except (TypeError, ValueError) as e:
+        logging.warning(f"Bad numeric setting during refresh; using previous values: {e}")
 
 
 def set_shutdown_event(event) -> None:
