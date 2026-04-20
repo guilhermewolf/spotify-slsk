@@ -1,14 +1,13 @@
 import spotipy
-import slskd_api
 import shutil
 import os
 import logging
 import re
 import difflib
-import random
 import requests
+import signal
+import threading
 import time
-import sqlite3
 from db import (
     create_connection,
     create_table,
@@ -18,22 +17,65 @@ from db import (
     clear_tried_entries,
     add_tried_file,
     get_pending_tracks,
+    get_playlist_meta,
+    upsert_playlist_meta,
+    list_playlists,
+    get_setting,
 )
 from log_config import setup_logging
-from utils import sleep_interval
-from mutagen import File
 from mutagen import File as MutagenFile
 from mutagen.id3 import ID3, TIT2, TPE1, TALB
 from mutagen.flac import FLAC
 from mutagen.aiff import AIFF
 from mutagen.mp3 import MP3
-from utils import sanitize_table_name
+from utils import sanitize_table_name, get_playlist_id
 from spotipy.oauth2 import SpotifyClientCredentials
-from soulseek_api import perform_search, download_and_verify
+from soulseek_api import (
+    perform_search,
+    download_and_verify,
+    get_client as get_slskd_client,
+    set_shutdown_event as _slsk_set_shutdown_event,
+    refresh_from_db as _slsk_refresh_from_db,
+)
 from models import Track
 
 
 MIN_MATCH_SCORE = float(os.getenv("MIN_MATCH_SCORE", "0.62"))
+CYCLE_INTERVAL_SECONDS = int(os.getenv("CYCLE_INTERVAL_SECONDS", "300"))
+CYCLE_ERROR_BACKOFF_SECONDS = int(os.getenv("CYCLE_ERROR_BACKOFF_SECONDS", "60"))
+HEARTBEAT_FILE = os.getenv("HEARTBEAT_FILE", "/tmp/heartbeat")
+
+
+def _reload_settings(conn):
+    """Pull live tunables from the DB so UI changes take effect next cycle."""
+    global MIN_MATCH_SCORE
+    try:
+        MIN_MATCH_SCORE = float(get_setting(conn, "MIN_MATCH_SCORE", "0.62"))
+    except (TypeError, ValueError) as e:
+        logging.warning(f"Bad MIN_MATCH_SCORE in DB; keeping previous: {e}")
+    _slsk_refresh_from_db(conn)
+
+_shutdown = threading.Event()
+
+
+def _touch_heartbeat():
+    """Update the heartbeat file so Docker HEALTHCHECK can detect a wedged loop."""
+    try:
+        with open(HEARTBEAT_FILE, "w") as f:
+            f.write(str(time.time()))
+    except Exception:
+        logging.debug("Could not write heartbeat file", exc_info=True)
+
+
+def _install_signal_handlers():
+    def _handle(signum, _frame):
+        logging.info(f"Received signal {signum}, initiating graceful shutdown")
+        _shutdown.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, _handle)
+
+
 PREFERRED_FORMATS = os.getenv("SLSKD_PREFERRED_FORMATS", "mp3,flac,aiff,wav,m4a,ogg")
 AUDIO_EXTS = tuple(f".{ext.strip().lower()}" for ext in PREFERRED_FORMATS.split(","))
 _STOP_PHRASES = [
@@ -43,16 +85,6 @@ _STOP_PHRASES = [
 ]
 # Splitters for artists like "Disclosure, AlunaGeorge", "Artist A & B", "feat.", "ft."
 _ARTIST_SPLIT_RE = re.compile(r"\s*(?:,|&| and | feat\.? | ft\.? | featuring )\s*", re.IGNORECASE)
-
-def get_playlist_id(playlist_url):
-    try:
-        if "playlist/" in playlist_url:
-            return playlist_url.split("playlist/")[1].split("?")[0]
-        else:
-            raise ValueError(f"Invalid playlist URL: {playlist_url}")
-    except IndexError:
-        logging.error(f"Failed to extract playlist ID from URL: {playlist_url}")
-        return None
 
 def sanitize_input(text):
     return re.sub(r'[^A-Za-z0-9 ]+', '', text)
@@ -73,13 +105,26 @@ def fetch_all_playlist_tracks(sp, playlist_id):
     return tracks
 
 def fetch_and_compare_tracks(conn, playlist_id, sp):
-    playlist_info = sp.playlist(playlist_id)
-    playlist_title = playlist_info['name']
-    table_name = f"{sanitize_table_name(playlist_title)}"
+    # Pull the playlist root (cheap one-page call). snapshot_id lets us skip
+    # the expensive paginated track fetch when nothing has changed.
+    playlist_info = sp.playlist(playlist_id, fields="name,snapshot_id")
+    playlist_title = playlist_info["name"]
+    snapshot_id = playlist_info.get("snapshot_id")
+    table_name = sanitize_table_name(playlist_title)
 
     create_table(conn, table_name)
 
-    logging.info(f"Fetching tracks for playlist ID: {playlist_id} into table: {table_name}")
+    stored_snapshot, _, _, _ = get_playlist_meta(conn, playlist_id)
+    if stored_snapshot and snapshot_id and stored_snapshot == snapshot_id:
+        logging.info(
+            f"Playlist {playlist_title} unchanged (snapshot {snapshot_id[:8]}); "
+            f"skipping Spotify track fetch"
+        )
+        return [], table_name
+
+    logging.info(
+        f"Fetching tracks for playlist ID: {playlist_id} into table: {table_name}"
+    )
     items = fetch_all_playlist_tracks(sp, playlist_id)
     logging.info(f"Fetched {len(items)} tracks from Spotify for playlist {table_name}")
 
@@ -87,96 +132,52 @@ def fetch_and_compare_tracks(conn, playlist_id, sp):
     new_tracks = []
 
     for item in items:
-        track = item['track']
+        track = item.get("track")
+        if not track or not track.get("id"):
+            continue
         artists_str = extract_artists_string(track)
 
-        logging.debug(f"Fetched track: {track['name']} by {artists_str}")
-
-        if track['id'] not in db_tracks:
+        if track["id"] not in db_tracks:
             track_data = (
-                track['id'],
-                track['name'],
+                track["id"],
+                track["name"],
                 artists_str,
-                track['album']['name']
+                track["album"]["name"],
             )
             insert_track(conn, table_name, track_data)
             logging.info(
-                f"New Song found in {table_name}: {track['name']} by {artists_str} from album {track['album']['name']}"
+                f"New Song found in {table_name}: {track['name']} by {artists_str} "
+                f"from album {track['album']['name']}"
             )
             new_tracks.append(
-                Track(track['id'], track['name'], artists_str, track['album']['name'], playlist_id)
+                Track(
+                    track["id"],
+                    track["name"],
+                    artists_str,
+                    track["album"]["name"],
+                    playlist_id,
+                )
             )
+
+    # Only stamp the new snapshot after we've successfully inserted the diff,
+    # so a crash mid-sync retries next cycle.
+    upsert_playlist_meta(conn, playlist_id, table_name, playlist_title, snapshot_id)
 
     logging.info(f"Found {len(new_tracks)} new tracks to download in playlist {table_name}")
     return new_tracks, table_name
 
-def _mm_strip_brackets(s: str) -> str:
-    return re.sub(r"[\[\(\{].*?[\]\)\}]", " ", s or "")
-
-def _mm_clean_title(s: str) -> str:
-    s = _mm_strip_brackets(s).lower()
-    s = re.sub(r"\b\d{3,4}\s?k?bps\b", " ", s)  # 320 kbps, etc.
-    s = re.sub(r"[-_\.]+", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    for phrase in _STOP_PHRASES:
-        s = re.sub(rf"\b{re.escape(phrase)}\b", " ", s)
-    return re.sub(r"\s+", " ", s).strip()
-
-
-def _mm_norm(s: str) -> str:
-    s = (s or "").lower().strip()
-    s = re.sub(r"[-_\.]+", " ", s)
-    return re.sub(r"\s+", " ", s).strip()
-
-def _mm_tokenize_title(s: str) -> set:
-    return {t for t in re.split(r"\W+", _mm_clean_title(s)) if t}
-
-def _mm_split_artists(s: str) -> set:
-    if not s:
-        return set()
-    parts = _ARTIST_SPLIT_RE.split(s)
-    return {p.strip().lower() for p in parts if p.strip()}
-
-def _mm_similar(a: str, b: str) -> float:
-    return difflib.SequenceMatcher(a=_mm_norm(a), b=_mm_norm(b)).ratio()
-
-def _mm_artists_overlap(a: str, b: str) -> bool:
-    A = _mm_split_artists(a)
-    B = _mm_split_artists(b)
-    if not A or not B:
-        return False
-    return bool(A.intersection(B))
-
-def _mm_titles_token_equivalent(file_title: str, db_title: str) -> bool:
-    ft = _mm_tokenize_title(file_title)
-    dt = _mm_tokenize_title(db_title)
-    if not ft or not dt:
-        return False
-    # Accept if all tokens from the shorter set are present in the longer one
-    shorter, longer = (ft, dt) if len(ft) <= len(dt) else (dt, ft)
-    return shorter.issubset(longer) or len(shorter.intersection(longer)) >= max(1, len(shorter) - 1)
-
-def _mm_remix_equivalent(file_title: str, db_title: str) -> bool:
-    # Normalize "(Walker & Royce Remix)" vs "- Walker & Royce Remix"
-    f = re.sub(r"[()\[\]{}\-–—]", " ", file_title or "", flags=re.IGNORECASE)
-    d = re.sub(r"[()\[\]{}\-–—]", " ", db_title or "", flags=re.IGNORECASE)
-    f = re.sub(r"\s+remix\b", " remix", f, flags=re.IGNORECASE)
-    d = re.sub(r"\s+remix\b", " remix", d, flags=re.IGNORECASE)
-    return _mm_titles_token_equivalent(f, d)
-
-
 def find_closest_match(conn, table_name, title, artist):
     """
     Compatibility wrapper that delegates to the robust scorer.
-    Returns (best_row, score) where best_row is (id, name, artists).
+    Returns (best_row, score) where best_row is (id, name, artists, album).
     """
-    track_id, db_title, db_artist, score, reason = find_closest_db_match(
+    track_id, db_title, db_artist, db_album, score, reason = find_closest_db_match(
         conn, table_name, file_title=title, file_artist=artist
     )
 
     if track_id:
         logging.info(f"Best match: {db_title} by {db_artist} (score={score:.2f}, reason={reason})")
-        return (track_id, db_title, db_artist), score
+        return (track_id, db_title, db_artist, db_album), score
 
     logging.warning(f"No suitable match for: '{title}' by '{artist}'")
     return None, 0.0
@@ -185,54 +186,47 @@ def score_track_match(file_title: str, file_artist: str, db_title: str, db_artis
     """
     Returns (score, reason). Score in [0..1]. Reason is a short string for debugging.
     """
-    # Fast path: token equivalence (ignores mix labels/brackets)
-    if _mm_titles_token_equivalent(file_title, db_title):
-        if _mm_artists_overlap(file_artist, db_artist):
+    if _titles_token_equivalent(file_title, db_title):
+        if _artists_overlap(file_artist, db_artist):
             return 0.97, "title_tokens+artist_overlap"
-        # title tokens match but artist missing/mismatched — still very strong
         return 0.90, "title_tokens_only"
 
-    # Remix-aware equivalence (hyphen vs parentheses)
-    if _mm_remix_equivalent(file_title, db_title):
-        if _mm_artists_overlap(file_artist, db_artist):
+    if _remix_equivalent(file_title, db_title):
+        if _artists_overlap(file_artist, db_artist):
             return 0.95, "remix_equivalent+artist_overlap"
         return 0.88, "remix_equivalent_title_only"
 
-    # Fuzzy fallback (weighted)
-    title_sim = _mm_similar(file_title, db_title)      # handles punctuation differences
-    artist_sim = _mm_similar(file_artist, db_artist) if (file_artist and db_artist) else 0.0
+    title_sim = _similar(file_title, db_title)
+    artist_sim = _similar(file_artist, db_artist) if (file_artist and db_artist) else 0.0
 
-    # Blend title and artist; title is main signal
     score = max(
-        title_sim,                                      # pure title similarity
-        0.75 * title_sim + 0.25 * artist_sim            # weighted blend when artist present
+        title_sim,
+        0.75 * title_sim + 0.25 * artist_sim,
     )
 
-    # Boost a bit if any artist overlap exists
-    if _mm_artists_overlap(file_artist, db_artist):
-        score = max(score, min(1.0, title_sim * 0.85 + 0.15))  # light boost
+    if _artists_overlap(file_artist, db_artist):
+        score = max(score, min(1.0, title_sim * 0.85 + 0.15))
 
     reason = f"fuzzy(title={title_sim:.2f}, artist={artist_sim:.2f})"
     return score, reason
 
 def find_closest_db_match(conn, table_name: str, file_title: str, file_artist: str):
     """
-    Scan the table and return (track_id, db_title, db_artist, score, reason).
+    Scan the table and return (track_id, db_title, db_artist, db_album, score, reason).
     """
     cur = conn.cursor()
-    cur.execute(f'SELECT id, name, artists FROM "{table_name}"')
-    best = None
+    cur.execute(f'SELECT id, name, artists, album FROM "{table_name}"')
     best_score = -1.0
     best_reason = ""
-    best_row = (None, "", "")
+    best_row = (None, "", "", "")
 
-    for track_id, db_title, db_artist in cur.fetchall():
+    for track_id, db_title, db_artist, db_album in cur.fetchall():
         score, reason = score_track_match(file_title, file_artist, db_title, db_artist)
         logging.debug(f"[match] candidate: file='{file_title}'/{file_artist} vs db='{db_title}'/{db_artist} -> {score:.2f} ({reason})")
         if score > best_score:
             best_score = score
             best_reason = reason
-            best_row = (track_id, db_title, db_artist)
+            best_row = (track_id, db_title, db_artist, db_album)
 
     return (*best_row, best_score, best_reason)
 
@@ -257,14 +251,16 @@ def process_downloaded_file(file_path, playlist_name, conn, reconcile: bool = Fa
         _reject_and_log(file_path, playlist_name, conn, reason="no match", destructive=not reconcile)
         return False, None
 
-    track_id, db_title, db_artist = match
+    track_id, db_title, db_artist, db_album = match
     if score < MIN_MATCH_SCORE:
         logging.warning(f"⚠️ Low match score ({score:.2f}) for {title} by {artist}. Skipping update.")
         _reject_and_log(file_path, playlist_name, conn, track_id=track_id, reason="low score", destructive=not reconcile)
         return False, None
 
-    # Tag before placement
-    tag_audio_file(file_path, title, artist, album)
+    # Fall back to the Spotify-known album when the downloaded file has no
+    # album tag (observed during Phase B testing: downloaded MP3 had no TALB).
+    effective_album = album or db_album
+    tag_audio_file(file_path, title, artist, effective_album)
 
     # If the file is already inside the playlists dir, don't move it.
     playlists_root = os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists")
@@ -307,30 +303,6 @@ def _reject_and_log(file_path, playlist_name, conn, track_id=None, reason="unkno
         add_tried_file(conn, playlist_name, track_id, filename)
     else:
         logging.debug(f"Skipping add_tried_file() because track ID is unknown for: {filename}")
-
-def clean_up_untracked_files(conn, download_path, table_name, delete: bool = False):
-    """
-    Compare files on disk vs DB. By default, do NOT delete (safe).
-    If delete=True, remove files not present in DB.
-    """
-    logging.info(f"Cleaning up untracked files in {download_path} (delete={delete})")
-    cursor = conn.cursor()
-    cursor.execute(f'SELECT path FROM "{table_name}" WHERE downloaded = 1')
-    db_files = {row[0] for row in cursor.fetchall() if row[0]}
-
-    for root, _, files in os.walk(download_path):
-        for file in files:
-            if file.lower().endswith(('.mp3', '.flac', '.aiff', '.wav', '.m4a', '.ogg')):
-                file_path = os.path.join(root, file)
-                if file_path not in db_files:
-                    if delete:
-                        try:
-                            os.remove(file_path)
-                            logging.info(f"Deleted untracked file: {file_path}")
-                        except Exception as e:
-                            logging.error(f"Failed to delete {file_path}: {e}")
-                    else:
-                        logging.info(f"(dry-run) Would delete untracked file: {file_path}")
 
 def _normalize_ext_list_env(var_name: str, default_csv: str) -> tuple:
     """
@@ -486,6 +458,29 @@ def _split_artists(artist_str: str) -> set:
 def _similar(a: str, b: str) -> float:
     return difflib.SequenceMatcher(a=_norm(a), b=_norm(b)).ratio()
 
+def _artists_overlap(a: str, b: str) -> bool:
+    A = _split_artists(a)
+    B = _split_artists(b)
+    if not A or not B:
+        return False
+    return bool(A.intersection(B))
+
+def _titles_token_equivalent(file_title: str, db_title: str) -> bool:
+    ft = _tokenize(file_title)
+    dt = _tokenize(db_title)
+    if not ft or not dt:
+        return False
+    shorter, longer = (ft, dt) if len(ft) <= len(dt) else (dt, ft)
+    return shorter.issubset(longer) or len(shorter.intersection(longer)) >= max(1, len(shorter) - 1)
+
+def _remix_equivalent(file_title: str, db_title: str) -> bool:
+    # Normalize "(Walker & Royce Remix)" vs "- Walker & Royce Remix"
+    f = re.sub(r"[()\[\]{}\-–—]", " ", file_title or "", flags=re.IGNORECASE)
+    d = re.sub(r"[()\[\]{}\-–—]", " ", db_title or "", flags=re.IGNORECASE)
+    f = re.sub(r"\s+remix\b", " remix", f, flags=re.IGNORECASE)
+    d = re.sub(r"\s+remix\b", " remix", d, flags=re.IGNORECASE)
+    return _titles_token_equivalent(f, d)
+
 def _read_audio_tags_safe(path: str):
     """Return (title, artist) using mutagen; fall back to filename for title."""
     title = ""
@@ -497,8 +492,8 @@ def _read_audio_tags_safe(path: str):
             a = mf.get("artist", [])
             title = t[0] if t else ""
             artist = a[0] if a else ""
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug(f"Could not read tags from {path}: {e}")
     if not title:
         title = os.path.splitext(os.path.basename(path))[0]
     return title, artist
@@ -567,8 +562,11 @@ def _looks_like_match(track_name: str, track_artist: str, file_title: str, file_
         if ta_set and fa_set:
             if ta_set.intersection(fa_set) or any(a in " ".join(stem_tokens) for a in ta_set):
                 return True
-            # Title is multi-word or a long single word? Accept to avoid over-strict failures.
-            if len(tn_tokens) >= 2 or len(next(iter(tn_tokens))).__int__ if False else len(list(tn_tokens)[0]) >= 6:
+            # Accept strong title match even without artist overlap when the title is
+            # multi-word or a long single word — prevents over-strict failures.
+            if len(tn_tokens) >= 2 or (
+                len(tn_tokens) == 1 and len(next(iter(tn_tokens))) >= 6
+            ):
                 return True
         else:
             # Missing artist info on one/both sides → accept strong title match
@@ -597,7 +595,7 @@ def _find_best_local_match(file_index, track_name: str, track_artist: str):
     """
     best = None
     best_score = 0.0
-    tn_norm = _norm(track_name)
+    _norm(track_name)
     ta_set = _split_artists(track_artist)
 
     for item in file_index:
@@ -637,30 +635,10 @@ def _file_matches_track(file_path: str, track_name: str, track_artist: str) -> b
 def extract_artists_string(track):
     return ', '.join(artist['name'] for artist in track['artists'])
 
-def apply_exponential_backoff(attempts, base=1.0, jitter=0.5):
-    delay = base * (2 ** attempts)
-    jittered_delay = delay * random.uniform(1.0, 1.0 + jitter)
-    logging.debug(f"Sleeping for {jittered_delay:.2f} seconds (attempts: {attempts})")
-    time.sleep(jittered_delay)
-
-def retry_suspended_downloads(conn, table_name):
-    logging.info(f"Retrying suspended downloads for table: {table_name}")
-    cursor = conn.cursor()
-    cursor.execute(f"SELECT id, name, artists, attempts FROM {table_name} WHERE downloaded = 0 AND (suspended_until IS NULL OR suspended_until < datetime('now'))")
-    tracks_to_retry = cursor.fetchall()
-
-    for track in tracks_to_retry:
-        track_id, name, artists, attempts = track
-        logging.info(f"Retrying track {name} by {artists}")
-        apply_exponential_backoff(attempts)
-
-    #return tracks_to_retry
-    return [Track(track[0], track[1], track[2], "") for track in tracks_to_retry]
-
 def extract_metadata_from_file(file_path):
     try:
         ext = os.path.splitext(file_path)[1].lower()
-        
+
         if ext == ".mp3":
             audio = MP3(file_path, ID3=ID3)
             title = audio.tags.get("TIT2")
@@ -697,7 +675,7 @@ def extract_metadata_from_file(file_path):
     except Exception as e:
         logging.error(f"Error reading metadata from {file_path}: {e}")
         return None, None, None
-    
+
 def setup_spotify_client():
     logging.info("Setting up Spotify client")
     auth_manager = SpotifyClientCredentials()
@@ -714,20 +692,6 @@ def send_ntfy_notification(url, topic, message):
             logging.error(f"Failed to send notification: {response.status_code} {response.text}")
     except Exception as e:
         logging.error(f"Error while sending notification: {e}")
-
-def all_tracks_downloaded(conn, table_name):
-    cursor = conn.cursor()
-    cursor.execute(f"SELECT COUNT(*) FROM {table_name} WHERE downloaded = 0")
-    remaining_tracks = cursor.fetchone()[0]
-    
-    if remaining_tracks == 0:
-        logging.info(f"All tracks in playlist {table_name} have been downloaded.")
-        return True
-    else:
-        logging.info(f"{remaining_tracks} tracks in playlist {table_name} are still not downloaded.")
-        return False
-    
-
 
 def move_track_to_playlist_folder(track_path: str, playlist_name: str) -> str:
     try:
@@ -806,27 +770,24 @@ def tag_audio_file(file_path, title, artist, album):
         logging.error(f"Failed to tag {file_path}: {e}")
         return False
 
-    
+
 def wait_for_slskd_healthy(host, api_key, timeout=90, check_interval=1):
     logging.info(f"Waiting for slskd at {host} (timeout: {timeout}s)...")
-    client = slskd_api.SlskdClient(
-        host=os.getenv("SLSKD_HOST_URL", "http://slskd:5030"),
-        api_key=os.getenv("SLSKD_API_KEY"),
-        url_base=os.getenv("SLSKD_URL_BASE", "")
-    )
+    client = get_slskd_client()
 
     start = time.time()
+    last_err = None
     while time.time() - start < timeout:
         try:
             state = client.application.state()
             if state['server'].get('isConnected') and state['server'].get('isLoggedIn'):
-                logging.info("✅ slskd is healthy and connected.")
+                logging.info("slskd is healthy and connected.")
                 return
         except Exception as e:
-            pass  # silence repeated logs
+            last_err = e
 
         if int(time.time() - start) % 5 == 0:
-            logging.debug("Still waiting for slskd...")
+            logging.debug(f"Still waiting for slskd... (last error: {last_err})")
 
         time.sleep(check_interval)
 
@@ -834,14 +795,12 @@ def wait_for_slskd_healthy(host, api_key, timeout=90, check_interval=1):
 
 
 def process_playlist(sp, conn, playlist_id, ntfy_url, ntfy_topic):
-    logging.info(f"🎧 Processing playlist ID: {playlist_id}")
+    logging.info(f"Processing playlist ID: {playlist_id}")
 
     new_tracks, playlist_name = fetch_and_compare_tracks(conn, playlist_id, sp)
 
-    startup_check(conn, playlist_name)
-
     if new_tracks:
-        msg = f"🔄 Playlist updated: {len(new_tracks)} new track(s) added to {playlist_name}"
+        msg = f"Playlist updated: {len(new_tracks)} new track(s) added to {playlist_name}"
         send_ntfy_notification(ntfy_url, ntfy_topic, msg)
 
     tracks = get_pending_tracks(conn, playlist_name)
@@ -850,23 +809,26 @@ def process_playlist(sp, conn, playlist_id, ntfy_url, ntfy_topic):
         return
 
     for track in tracks:
-        logging.info(f"🎶 Downloading: {track.name} by {track.artist}")
-        search_results = perform_search(track.artist, track.name)
+        if _shutdown.is_set():
+            logging.info("Shutdown requested, stopping track processing")
+            return
+        logging.info(f"Downloading: {track.name} by {track.artist}")
+        search_results = perform_search(track.artist, track.name, album=track.album)
 
         success = handle_track_download(
             track=track,
             playlist_name=playlist_name,
             conn=conn,
             search_results=search_results,
-            max_attempts=2
+            max_attempts=2,
         )
 
         if success:
-            logging.info(f"✅ Downloaded: {track.name} by {track.artist}")
+            logging.info(f"Downloaded: {track.name} by {track.artist}")
         else:
-            logging.warning(f"❌ Failed: {track.name} by {track.artist}")
+            logging.warning(f"Failed: {track.name} by {track.artist}")
 
-    send_ntfy_notification(ntfy_url, ntfy_topic, f"✅ Finished processing playlist: {playlist_name}")
+    send_ntfy_notification(ntfy_url, ntfy_topic, f"Finished processing playlist: {playlist_name}")
 
 
 def safe_get(tag):
@@ -899,47 +861,123 @@ def handle_track_download(track, playlist_name, conn, search_results, max_attemp
     return False
 
 
+def _run_startup_reconciliation(sp, conn):
+    """Run the one-shot on-disk reconciliation once per daemon start."""
+    for pl in list_playlists(conn, only_enabled=True):
+        if _shutdown.is_set():
+            return
+        try:
+            _, playlist_name = fetch_and_compare_tracks(conn, pl["playlist_id"], sp)
+            startup_check(conn, playlist_name)
+        except Exception:
+            logging.exception(
+                f"Startup reconciliation failed for {pl['playlist_id']} ({pl['name']})"
+            )
+
+
+def _migrate_env_playlists(conn, sp):
+    """First-boot import: seed the empty catalogue from SPOTIFY_PLAYLIST_URLS env.
+
+    Runs only when `playlists_meta` has no rows AND the env var is set.
+    After this, the DB is the source of truth; the UI manages add/remove.
+    """
+    if list_playlists(conn):
+        return
+    env_urls = os.getenv("SPOTIFY_PLAYLIST_URLS", "")
+    urls = [u.strip() for u in env_urls.split(",") if u.strip()]
+    if not urls:
+        return
+    logging.info(
+        f"First-boot: importing {len(urls)} playlist(s) from SPOTIFY_PLAYLIST_URLS"
+    )
+    for url in urls:
+        pid = get_playlist_id(url)
+        if not pid:
+            continue
+        try:
+            info = sp.playlist(pid, fields="name")
+            table_name = sanitize_table_name(info["name"])
+            # Intentionally leave snapshot_id NULL — the first cycle's
+            # fetch_and_compare_tracks will populate tracks and stamp
+            # the snapshot itself.
+            upsert_playlist_meta(conn, pid, table_name, info["name"], None)
+            logging.info(f"Imported: {info['name']} ({pid})")
+        except Exception as e:
+            logging.error(f"Could not import env playlist {url}: {e}")
+
+
 def main():
+    # Persist the Spotipy auth token across restarts on the data volume, and
+    # silence the "Couldn't write token to cache at: .cache" warning that
+    # spams otherwise (WORKDIR isn't writable by the non-root container user).
+    os.environ.setdefault("SPOTIPY_CACHE_PATH", "/app/data/.spotipy-cache")
+
     setup_logging()
+    _install_signal_handlers()
+    _slsk_set_shutdown_event(_shutdown)
     logging.info("Starting main process")
 
-    SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
-    SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
-    SLSKD_API_KEY = os.getenv("SLSKD_API_KEY")
-    SLSKD_HOST_URL = os.getenv("SLSKD_HOST_URL", "http://slskd:5030")
-    NTFY_URL = os.getenv('NTFY_URL')
-    NTFY_TOPIC = os.getenv('NTFY_TOPIC')
-    DOWNLOAD_ROOT = os.getenv("DOWNLOAD_ROOT", "/downloads")
-    DATA_ROOT = os.getenv("DATA_ROOT", "/data") 
-    playlist_urls = os.getenv('SPOTIFY_PLAYLIST_URLS').split(',')
+    slskd_api_key = os.getenv("SLSKD_API_KEY")
+    slskd_host_url = os.getenv("SLSKD_HOST_URL", "http://slskd:5030")
+    ntfy_url = os.getenv("NTFY_URL")
+    ntfy_topic = os.getenv("NTFY_TOPIC")
 
-    wait_for_slskd_healthy(SLSKD_HOST_URL, SLSKD_API_KEY)
-
-    send_ntfy_notification(NTFY_URL, NTFY_TOPIC, "Starting Spotify Playlist Downloader 🚀")
+    wait_for_slskd_healthy(slskd_host_url, slskd_api_key)
+    send_ntfy_notification(ntfy_url, ntfy_topic, "Spotify Playlist Downloader starting")
     sp = setup_spotify_client()
 
-    database = "./data/playlist_tracks.db"
-    conn = create_connection(database)
-
-
+    conn = create_connection("./data/playlist_tracks.db")
     if not conn:
         logging.error("Failed to connect to the SQLite database.")
         return
 
-    
+    try:
+        _migrate_env_playlists(conn, sp)
+        _reload_settings(conn)
 
-    for playlist_url in playlist_urls:
-        playlist_id = get_playlist_id(playlist_url)
-        playlist_name = sanitize_table_name(playlist_id)
-        process_playlist(sp, conn, playlist_id, NTFY_URL, NTFY_TOPIC)
+        if os.getenv("UI_ENABLED", "1") == "1":
+            from webui import run_in_thread as _run_webui
+            _run_webui(
+                db_path="./data/playlist_tracks.db",
+                spotify_client=sp,
+                host=os.getenv("UI_BIND_ADDR", "0.0.0.0"),
+                port=int(os.getenv("UI_PORT", "8000")),
+            )
 
-    while True:
-        logging.info("Starting new cycle of playlist checks")
-        for playlist_url in playlist_urls:
-            playlist_id = get_playlist_id(playlist_url)
-            playlist_name = sanitize_table_name(playlist_id)
-            process_playlist(sp, conn, playlist_id, NTFY_URL, NTFY_TOPIC)
-        sleep_interval(5)
+        _run_startup_reconciliation(sp, conn)
+
+        while not _shutdown.is_set():
+            _touch_heartbeat()
+            _reload_settings(conn)
+            playlists = list_playlists(conn, only_enabled=True)
+            if not playlists:
+                logging.info(
+                    "No enabled playlists; waiting for the UI to add some"
+                )
+            else:
+                logging.info(
+                    f"Starting new cycle ({len(playlists)} enabled playlist(s))"
+                )
+            try:
+                for pl in playlists:
+                    if _shutdown.is_set():
+                        break
+                    process_playlist(
+                        sp, conn, pl["playlist_id"], ntfy_url, ntfy_topic
+                    )
+            except Exception:
+                logging.exception("Cycle failed; backing off and retrying")
+                if _shutdown.wait(CYCLE_ERROR_BACKOFF_SECONDS):
+                    break
+                continue
+            if _shutdown.wait(CYCLE_INTERVAL_SECONDS):
+                break
+    finally:
+        logging.info("Shutting down, closing database connection")
+        try:
+            conn.close()
+        except Exception:
+            logging.debug("Error closing DB connection", exc_info=True)
 
 
 if __name__ == "__main__":

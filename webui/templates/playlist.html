@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}{{ name }} · spotify-slsk{% endblock %}
+{% block content %}
+
+<p class="muted"><a href="{{ url_for('dashboard') }}">« Dashboard</a></p>
+<h2>{{ name }}</h2>
+<p class="muted">Last synced: {{ last_synced or 'never' }}</p>
+
+<form class="inline-form" method="POST" action="{{ url_for('refresh_playlist', playlist_id=playlist_id) }}">
+  <button type="submit" class="secondary outline">Force re-sync</button>
+</form>
+
+<nav class="nav-filters" style="margin-top: 1em;">
+  <a href="{{ url_for('playlist_detail', playlist_id=playlist_id) }}"
+     class="{{ 'active' if not status_filter }}">All ({{ tracks|length }})</a>
+  <a href="{{ url_for('playlist_detail', playlist_id=playlist_id, status='downloaded') }}"
+     class="{{ 'active' if status_filter == 'downloaded' }}">Downloaded</a>
+  <a href="{{ url_for('playlist_detail', playlist_id=playlist_id, status='pending') }}"
+     class="{{ 'active' if status_filter == 'pending' }}">Pending</a>
+  <a href="{{ url_for('playlist_detail', playlist_id=playlist_id, status='retrying') }}"
+     class="{{ 'active' if status_filter == 'retrying' }}">Retrying</a>
+  <a href="{{ url_for('playlist_detail', playlist_id=playlist_id, status='suspended') }}"
+     class="{{ 'active' if status_filter == 'suspended' }}">Suspended</a>
+</nav>
+
+<table>
+  <thead>
+    <tr>
+      <th>Title</th><th>Artist</th><th>Album</th>
+      <th>Status</th><th class="tight">Attempts</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for t in tracks %}
+    <tr>
+      <td><a href="{{ url_for('track_detail', playlist_id=playlist_id, track_id=t.id) }}">{{ t.name }}</a></td>
+      <td>{{ t.artists }}</td>
+      <td>{{ t.album }}</td>
+      <td>
+        {% if t.status == 'downloaded' %}<span class="badge badge-ok">downloaded</span>
+        {% elif t.status == 'suspended' %}<span class="badge badge-suspended">suspended</span>
+        {% elif t.status == 'retrying' %}<span class="badge badge-retrying">retrying</span>
+        {% else %}<span class="badge badge-pending">pending</span>
+        {% endif %}
+      </td>
+      <td class="tight">{{ t.attempts }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="5" class="muted">No tracks match this filter.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+{% endblock %}

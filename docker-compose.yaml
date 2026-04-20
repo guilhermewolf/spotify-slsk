@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   spotify-slsk:
     build: .
@@ -10,9 +8,22 @@ services:
       - ./data:/app/data
       - ./downloads:/downloads
       - ./playlists:/playlists
+    ports:
+      # Webui — loopback by default. Change to "0.0.0.0:8000:8000" or a
+      # specific LAN IP if you want remote access, and put auth in front.
+      - "127.0.0.1:8000:8000"
     depends_on:
-      - slskd
-    #restart: unless-stopped
+      slskd:
+        condition: service_started
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Override UID/GID via PUID/PGID in .env to match the host user that owns
+    # ./data, ./downloads, ./playlists. Defaults to 1000:1000.
+    user: "${PUID:-1000}:${PGID:-1000}"
 
   slskd:
     image: slskd/slskd:0.23.1
@@ -23,6 +34,10 @@ services:
       - ./downloads/incomplete:/downloads/incomplete
       - ./slsk_app:/app
     ports:
-      - "5030:5030"
-  #   # restart: unless-stopped
-
+      - "127.0.0.1:5030:5030"
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

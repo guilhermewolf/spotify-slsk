@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install runtime + dev dependencies
+        run: |
+          pip install --quiet -r requirements.txt
+          pip install --quiet -r requirements-dev.txt
+      - name: Syntax-check all Python sources
+        run: python -m compileall -q .
+      - name: Ruff (errors only)
+        run: ruff check --select=E,F,W --ignore=E501 .
+      - name: Pytest
+        run: pytest -q
