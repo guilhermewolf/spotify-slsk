@@ -25,7 +25,15 @@ python app.py
 - `ruff check --select=E,F,W --ignore=E501 .` — mirrors what CI runs.
 - `python -m compileall -q .` — cheapest syntax-check.
 - `.github/workflows/ci.yaml` runs all three on every push and PR.
-- `.github/workflows/release.yaml` builds and pushes the multi-arch image on pushes to `main`.
+- `.github/workflows/release.yaml` builds and pushes the multi-arch image. Tag matrix:
+    - Push to `main` → `:main`, `:sha-<short>`, `:latest`.
+    - Push a git tag `vX.Y.Z` → `:vX.Y.Z`, `:X.Y.Z`, `:X.Y`, `:X`, `:sha-<short>` (no `:latest` bump — that's intentional so prod deployments pinned to `:latest` follow `main`, not the most recent tag).
+    - `workflow_dispatch` on any branch → the branch's normal tag set.
+  To release:
+  ```bash
+  git tag v1.0.0
+  git push origin v1.0.0
+  ```
 
 `test.py` at the repo root is a gitignored scratchpad.
 

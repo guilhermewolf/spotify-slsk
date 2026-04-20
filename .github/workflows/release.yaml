@@ -4,13 +4,16 @@ on:
   push:
     branches:
       - main
-  pull_request:
-    types: [closed]
+    tags:
+      - 'v*.*.*'
   workflow_dispatch:
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
 
     steps:
       - name: Checkout repository
@@ -31,13 +34,40 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Produces this tag set:
+      #   push to main:            :main, :sha-<short>, :latest
+      #   push tag v1.2.3:         :v1.2.3, :1.2.3, :1.2, :1, :sha-<short>
+      #   workflow_dispatch on main: same as push-to-main
+      - name: Extract Docker image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/guilhermewolf/spotify-slsk/spotify-slsk
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=spotify-slsk
+            org.opencontainers.image.description=Spotify playlist → Soulseek downloader with a Flask dashboard
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.licenses=MIT
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ghcr.io/guilhermewolf/spotify-slsk/spotify-slsk:latest
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Cache layers across runs so tag-only pushes rebuild in seconds.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Log out from GitHub Container Registry
+        if: always()
         run: docker logout ghcr.io
