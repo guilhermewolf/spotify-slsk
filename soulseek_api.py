@@ -106,6 +106,22 @@ def _is_ascii(s: str) -> bool:
     return s.isascii() if isinstance(s, str) else True
 
 
+def _normalize_query_text(text: str) -> str:
+    """Lowercase the text, replace separators with spaces, drop other
+    punctuation, collapse runs of whitespace.
+
+    Hyphens, underscores, and slashes need to become *spaces* (not be
+    deleted) so titles like "Mind Twister - Radio-Edit" produce
+    "mind twister radio edit" — slskd peers tag those files as
+    "(Radio Edit)" and nothing matches "radioedit".
+    """
+    if not text:
+        return ""
+    text = re.sub(r"[-_/]+", " ", text)
+    text = re.sub(r"[^\w\s]", "", text)
+    return " ".join(text.lower().split())
+
+
 def _build_search_queries(artist: str, title: str, album: str | None = None) -> list:
     """
     Return a waterfall of slskd queries, most- to least-specific. Non-ASCII
@@ -129,9 +145,9 @@ def _build_search_queries(artist: str, title: str, album: str | None = None) -> 
         add(f"{raw_title} {raw_artist}")
         add(raw_title)
 
-    clean_title = re.sub(r"[^\w\s]", "", raw_title).lower().strip()
-    clean_artist = re.sub(r"[^\w\s]", "", raw_artist).lower().strip()
-    clean_album = re.sub(r"[^\w\s]", "", raw_album).lower().strip()
+    clean_title = _normalize_query_text(raw_title)
+    clean_artist = _normalize_query_text(raw_artist)
+    clean_album = _normalize_query_text(raw_album)
 
     if clean_title and clean_artist:
         add(f"{clean_title} {clean_artist}")
@@ -148,7 +164,7 @@ def _build_search_queries(artist: str, title: str, album: str | None = None) -> 
         add(clean_title)
 
     if not queries and raw_title:
-        add(raw_title)
+        add(_normalize_query_text(raw_title) or raw_title)
 
     return queries
 
@@ -499,10 +515,16 @@ def download_and_verify(
             logging.warning(f"Download failed or was not confirmed: {basename}")
             add_tried_file(conn, playlist_name, track_id, basename)
         except Exception as e:
+            # Don't blacklist on this path: an exception here is usually a
+            # transient slskd-API hiccup (JSON decode against an empty body,
+            # connection reset, etc.), not a "this peer rejected the file"
+            # signal. add_tried_file is permanent until the track succeeds,
+            # so a single bad response would permanently ban a perfectly
+            # good candidate. Let the next cycle retry naturally — bounded
+            # by MAX_ATTEMPTS_BEFORE_SUSPEND on the track itself.
             logging.error(
                 f"Error downloading {basename} from {candidate['user']}: {e}"
             )
-            add_tried_file(conn, playlist_name, track_id, basename)
 
     logging.warning("Exhausted all download attempts.")
     return None
