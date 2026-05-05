@@ -1,10 +1,13 @@
 .env
+.venv/
 data/
 downloads/
 playlists/
 slsk_app/
 .DS_Store
 __pycache__/
+.pytest_cache/
+.ruff_cache/
 .cache
 test.py
 docker-compose.test.yaml

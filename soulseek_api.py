@@ -153,72 +153,83 @@ def _build_search_queries(artist: str, title: str, album: str | None = None) -> 
     return queries
 
 
+def _run_one_search(query: str, timeout: int = 60) -> list:
+    """Run a single slskd search to completion and return its responses.
+
+    Returns [] on timeout, error, or shutdown. Always cleans up the slskd-side
+    search record in the finally block so we don't leak ids on the daemon.
+    """
+    client = get_client()
+    logging.info(f"Searching for: {query}")
+    search_id = None
+    try:
+        # `responseLimit` caps the search at N responses on the slskd side —
+        # slskd then marks the search Completed and the polling loop picks it
+        # up. Slskd does not expose in-flight responses, so server-side
+        # capping is the only sane way to cut per-search latency.
+        search = client.searches.search_text(
+            searchText=query,
+            minimumPeerUploadSpeed=MIN_PEER_UPLOAD_SPEED,
+            responseLimit=EARLY_STOP_RESPONSES,
+        )
+        search_id = search.get("id")
+        if not search_id:
+            return []
+
+        start = time.time()
+        while time.time() - start < timeout:
+            state = client.searches.state(search_id).get("state", "")
+            if state != "InProgress":
+                results = client.searches.search_responses(search_id)
+                logging.info(f"Search returned {len(results)} results for: {query}")
+                return results or []
+            if _interruptible_sleep(1):
+                return []
+        logging.warning(f"Search timed out for: {query}")
+        return []
+    except Exception as e:
+        logging.error(f"Search failed for '{query}': {e}")
+        return []
+    finally:
+        if search_id:
+            try:
+                client.searches.delete(search_id)
+            except Exception:
+                logging.debug(
+                    f"Could not delete slskd search {search_id}",
+                    exc_info=True,
+                )
+
+
 def perform_search(artist, title, album=None, timeout=60):
     """
     Run a waterfall of slskd searches for one track. Returns the first query's
     responses that yields at least one result, else an empty list.
+
+    Kept for backward compatibility with tests and external callers; the daemon
+    itself now uses `search_and_download`, which falls through on empty *usable*
+    candidates rather than just empty *responses*.
     """
-    client = get_client()
     queries = _build_search_queries(artist, title, album)
-    if not queries:
-        return []
-
     for query in queries:
-        logging.info(f"Searching for: {query}")
-        search_id = None
-        try:
-            # `responseLimit` caps the search at N responses on the slskd
-            # side — slskd then marks the search Completed and the normal
-            # polling loop picks it up. Slskd does not expose in-flight
-            # responses, so server-side capping is the only sane way to
-            # cut per-search latency.
-            search = client.searches.search_text(
-                searchText=query,
-                minimumPeerUploadSpeed=MIN_PEER_UPLOAD_SPEED,
-                responseLimit=EARLY_STOP_RESPONSES,
-            )
-            search_id = search.get("id")
-            if not search_id:
-                continue
-
-            start = time.time()
-            timed_out = True
-            while time.time() - start < timeout:
-                state = client.searches.state(search_id).get("state", "")
-                if state != "InProgress":
-                    timed_out = False
-                    break
-                if _interruptible_sleep(1):
-                    return []
-            if timed_out:
-                logging.warning(f"Search timed out for: {query}")
-                continue
-
-            results = client.searches.search_responses(search_id)
-            logging.info(f"Search returned {len(results)} results for: {query}")
-            if results:
-                return results
-        except Exception as e:
-            logging.error(f"Search failed for '{query}': {e}")
-        finally:
-            if search_id:
-                try:
-                    client.searches.delete(search_id)
-                except Exception:
-                    logging.debug(
-                        f"Could not delete slskd search {search_id}",
-                        exc_info=True,
-                    )
+        results = _run_one_search(query, timeout)
+        if results:
+            return results
     return []
 
 
 def clean_filename(filename):
     """
-    Clean a filename by removing common tags, normalizing spaces, and removing
-    the extension.
+    Clean a filename for fuzzy matching: replace brackets/parens with spaces
+    (keep their content), normalize separators, drop the extension and
+    obvious tag noise.
+
+    We *don't* strip parenthesized content because real filenames embed
+    version info there ("(Walker & Royce Remix)", "(Extended Mix)") that the
+    title scorer needs to see. token_set_ratio is robust to extra tokens
+    like a leftover "[FLAC]", so leaving them in costs us nothing.
     """
-    filename = re.sub(r"\[.*?\]", "", filename)
-    filename = re.sub(r"\(.*?\)", "", filename)
+    filename = re.sub(r"[\[\]\(\)\{\}]", " ", filename)
     filename = re.sub(
         r"\b\d{1,2}bit\b|\b\d{1,3}\.\d{1,2}kHz\b|\b\d{4}\b",
         "",
@@ -270,6 +281,20 @@ def _version_mismatch(expected_title: str, file_title: str) -> bool:
     if e is None and f is None:
         return False
     return e != f
+
+
+# DJ-oriented version preference. Lower = more preferred. Extended Mix is the
+# DJ-friendly long cut; Original Mix is the producer's studio version; everything
+# else (radio edits, plain titles) is the fallback. Note: this is intentionally
+# orthogonal to `_VERSION_MARKERS` / `_version_mismatch` — those reject *wrong*
+# versions (e.g. Live when expecting Studio); this only ranks compatible ones.
+def _version_tier(text: str) -> int:
+    t = (text or "").lower()
+    if re.search(r"\bextended\s+(mix|version|edit)\b", t):
+        return 0
+    if re.search(r"\boriginal\s+(mix|version)\b", t):
+        return 1
+    return 2
 
 
 def _effective_mp3_kbps(size_bytes, length_sec):
@@ -368,6 +393,7 @@ def extract_candidates(
                         "ext": ext,
                         "title_score": title_score,
                         "artist_score": max_artist_score,
+                        "version_tier": _version_tier(base),
                     }
                 )
 
@@ -376,8 +402,9 @@ def extract_candidates(
 
 def sort_candidates(candidates):
     """
-    Sort by preferred extension first, then by bitrate desc (unknown last),
-    then by peer upload speed desc.
+    Sort by DJ-version tier (Extended Mix > Original Mix > other), then by
+    preferred extension, then bitrate desc (unknown last), then peer upload
+    speed desc.
     """
     def fmt_rank(ext: str) -> int:
         return (
@@ -392,6 +419,7 @@ def sort_candidates(candidates):
     return sorted(
         candidates,
         key=lambda c: (
+            c.get("version_tier", 2),
             fmt_rank(c["ext"]),
             -bitrate_rank(c.get("bitrate")),
             -(c.get("user_upload_speed") or 0),
@@ -416,9 +444,20 @@ def download_and_verify(
     playlist_name,
     track_id,
     max_attempts=2,
+    max_version_tier=None,
 ):
+    """Filter, sort, and try to download the best candidate from one search.
+
+    `max_version_tier`, when set, restricts candidates to *strictly better*
+    version tiers (used by the upgrade pass — Original Mix already on disk
+    means we'll only consider tier 0 = Extended Mix).
+    """
     client = get_client()
     candidates = extract_candidates(search_results, expected_title, expected_artist)
+    if max_version_tier is not None:
+        candidates = [
+            c for c in candidates if c.get("version_tier", 2) < max_version_tier
+        ]
     if not candidates:
         logging.warning("No valid candidates found.")
         return None
@@ -466,6 +505,46 @@ def download_and_verify(
             add_tried_file(conn, playlist_name, track_id, basename)
 
     logging.warning("Exhausted all download attempts.")
+    return None
+
+
+def search_and_download(
+    artist,
+    title,
+    conn,
+    playlist_name,
+    track_id,
+    album=None,
+    max_attempts=2,
+    max_version_tier=None,
+    timeout=60,
+):
+    """Run the full query waterfall, attempting download from each.
+
+    Falls through to the next query when a query yields no *usable* candidates
+    (after format/quality/version filtering), not just zero raw responses. This
+    fixes the case where slskd returns N junk responses for a long
+    artist+title query but a shorter query would have surfaced good matches.
+    """
+    queries = _build_search_queries(artist, title, album)
+    if not queries:
+        return None
+    for query in queries:
+        results = _run_one_search(query, timeout)
+        if not results:
+            continue
+        file_path = download_and_verify(
+            search_results=results,
+            expected_title=title,
+            expected_artist=artist,
+            conn=conn,
+            playlist_name=playlist_name,
+            track_id=track_id,
+            max_attempts=max_attempts,
+            max_version_tier=max_version_tier,
+        )
+        if file_path:
+            return file_path
     return None
 
 

@@ -389,11 +389,20 @@ def create_table(conn, playlist_name):
                                         attempts INTEGER DEFAULT 0,
                                         last_attempt TIMESTAMP,
                                         suspended_until TIMESTAMP,
+                                        last_upgrade_check TIMESTAMP,
                                         tried_files TEXT DEFAULT ''
                                     );"""
         cursor = conn.cursor()
         cursor.execute(sql_create_tracks_table)
         logging.info(f"Table {table_name} created or already exists.")
+        # Migrate older per-playlist tables that pre-date the upgrade-pass column.
+        cols = {row[1] for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()}
+        if "last_upgrade_check" not in cols:
+            with conn:
+                conn.execute(
+                    f'ALTER TABLE "{table_name}" ADD COLUMN last_upgrade_check TIMESTAMP'
+                )
+            logging.info(f"Migrated {table_name}: added last_upgrade_check column")
         create_tried_table(conn, playlist_name)
         cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_id ON {table_name} (id);")
         logging.info(f"Index on {table_name}(id) created or already exists.")
@@ -527,3 +536,50 @@ def get_pending_tracks(conn, playlist_name: str) -> list:
     except sqlite3.Error as e:
         logging.error(f"Failed to fetch pending tracks from {playlist_name}: {e}")
         return []
+
+
+def get_upgrade_candidates(conn, playlist_name: str, interval_hours: int) -> list:
+    """Return downloaded tracks whose last upgrade-check is stale or absent.
+
+    Throttling lives at the row level so a 200-track library doesn't fire
+    200 slskd searches every cycle. Returns (Track, current_path) tuples.
+    `interval_hours <= 0` disables the feature entirely.
+    """
+    if interval_hours <= 0:
+        return []
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            f'SELECT id, name, artists, album, path FROM "{playlist_name}" '
+            f'WHERE downloaded = 1 '
+            f"AND (last_upgrade_check IS NULL "
+            f"     OR last_upgrade_check < datetime('now', ?))",
+            (f"-{interval_hours} hours",),
+        )
+        rows = cursor.fetchall()
+        return [
+            (Track(r[0], r[1], r[2], r[3], playlist_name), r[4])
+            for r in rows
+        ]
+    except sqlite3.Error as e:
+        logging.error(f"Failed to fetch upgrade candidates from {playlist_name}: {e}")
+        return []
+
+
+def mark_upgrade_checked(conn, playlist_name: str, track_id: str) -> None:
+    """Stamp last_upgrade_check so the throttle window starts now.
+
+    Called whether or not an upgrade was found — a fruitless check still
+    consumed a search, so it counts toward the interval.
+    """
+    try:
+        with conn:
+            conn.execute(
+                f'UPDATE "{playlist_name}" SET last_upgrade_check = CURRENT_TIMESTAMP '
+                f'WHERE id = ?',
+                (track_id,),
+            )
+    except sqlite3.Error as e:
+        logging.error(
+            f"Failed to update last_upgrade_check for {track_id} in {playlist_name}: {e}"
+        )
