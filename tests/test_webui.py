@@ -148,3 +148,87 @@ class TestTrackDetail:
             assert row == (0, None)
             assert db.get_tried_files(conn, "pl_x", "t1") == []
             conn.close()
+
+
+class TestWakeCallback:
+    """The webui invokes wake_callback after state-changing requests so the
+    daemon's cycle sleep is interrupted and the change is observable in
+    seconds rather than after the full cycle interval."""
+
+    def _setup(self, tmpdir, calls):
+        db_path = os.path.join(tmpdir, "test.db")
+        conn = db.create_connection(db_path)
+        conn.close()
+        app = create_app(db_path, spotify_client=None, wake_callback=lambda: calls.append(1))
+        app.config.update(TESTING=True)
+        return app
+
+    def test_retry_invokes_wake(self):
+        tmpdir = tempfile.mkdtemp()
+        calls = []
+        app = self._setup(tmpdir, calls)
+        with app.app_context():
+            conn = db.create_connection(app.config["DB_PATH"])
+            db.upsert_playlist_meta(conn, "pid1", "pl_x", "X", "s")
+            db.create_table(conn, "pl_x")
+            db.insert_track(conn, "pl_x", ("t1", "Song", "Artist", "Album"))
+            conn.close()
+        client = app.test_client()
+        client.post("/track/pid1/t1/retry", follow_redirects=True)
+        assert calls == [1]
+
+    def test_refresh_invokes_wake(self):
+        tmpdir = tempfile.mkdtemp()
+        calls = []
+        app = self._setup(tmpdir, calls)
+        with app.app_context():
+            conn = db.create_connection(app.config["DB_PATH"])
+            db.upsert_playlist_meta(conn, "pid1", "pl_x", "X", "s")
+            db.create_table(conn, "pl_x")
+            conn.close()
+        client = app.test_client()
+        client.post("/playlist/pid1/refresh", follow_redirects=True)
+        assert calls == [1]
+
+    def test_toggle_disable_does_not_wake(self):
+        # Disabling a playlist shouldn't wake — there's nothing new to do.
+        tmpdir = tempfile.mkdtemp()
+        calls = []
+        app = self._setup(tmpdir, calls)
+        with app.app_context():
+            conn = db.create_connection(app.config["DB_PATH"])
+            db.upsert_playlist_meta(conn, "pid1", "pl_x", "X", "s")  # enabled=1 by default
+            conn.close()
+        client = app.test_client()
+        client.post("/playlist/pid1/toggle", follow_redirects=True)  # disables it
+        assert calls == []
+
+    def test_toggle_enable_wakes(self):
+        tmpdir = tempfile.mkdtemp()
+        calls = []
+        app = self._setup(tmpdir, calls)
+        with app.app_context():
+            conn = db.create_connection(app.config["DB_PATH"])
+            db.upsert_playlist_meta(conn, "pid1", "pl_x", "X", "s")
+            db.set_playlist_enabled(conn, "pid1", False)  # start disabled
+            conn.close()
+        client = app.test_client()
+        client.post("/playlist/pid1/toggle", follow_redirects=True)  # re-enables
+        assert calls == [1]
+
+    def test_missing_callback_is_noop(self):
+        # Daemon may run with wake_callback=None (e.g. in tests) — must not crash.
+        tmpdir = tempfile.mkdtemp()
+        db_path = os.path.join(tmpdir, "test.db")
+        db.create_connection(db_path).close()
+        app = create_app(db_path, spotify_client=None, wake_callback=None)
+        app.config.update(TESTING=True)
+        with app.app_context():
+            conn = db.create_connection(db_path)
+            db.upsert_playlist_meta(conn, "pid1", "pl_x", "X", "s")
+            db.create_table(conn, "pl_x")
+            db.insert_track(conn, "pl_x", ("t1", "Song", "Artist", "Album"))
+            conn.close()
+        client = app.test_client()
+        r = client.post("/track/pid1/t1/retry", follow_redirects=True)
+        assert r.status_code == 200

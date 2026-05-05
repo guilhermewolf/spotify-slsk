@@ -58,6 +58,9 @@ def _reload_settings(conn):
     _slsk_refresh_from_db(conn)
 
 _shutdown = threading.Event()
+# Set by wake_now() to break the inter-cycle sleep early. Cleared at the
+# top of each cycle loop iteration after the wait returns.
+_wake_event = threading.Event()
 
 
 def _touch_heartbeat():
@@ -73,9 +76,22 @@ def _install_signal_handlers():
     def _handle(signum, _frame):
         logging.info(f"Received signal {signum}, initiating graceful shutdown")
         _shutdown.set()
+        # Also break the cycle waiter so shutdown is prompt.
+        _wake_event.set()
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, _handle)
+
+
+def wake_now() -> None:
+    """Break the cycle sleep early so the next cycle starts immediately.
+
+    Called by the webui after state-changing actions (retry, refresh,
+    enable/add) so the user doesn't wait up to CYCLE_INTERVAL_SECONDS for
+    the change to be observable. Idempotent — repeated calls within the
+    same sleep window collapse to one wake-up.
+    """
+    _wake_event.set()
 
 
 PREFERRED_FORMATS = os.getenv("SLSKD_PREFERRED_FORMATS", "mp3,flac,aiff,wav,m4a,ogg")
@@ -1021,6 +1037,7 @@ def main():
             _run_webui(
                 db_path="./data/playlist_tracks.db",
                 spotify_client=sp,
+                wake_callback=wake_now,
                 host=os.getenv("UI_BIND_ADDR", "0.0.0.0"),
                 port=int(os.getenv("UI_PORT", "8000")),
             )
@@ -1051,8 +1068,15 @@ def main():
                 if _shutdown.wait(CYCLE_ERROR_BACKOFF_SECONDS):
                     break
                 continue
-            if _shutdown.wait(CYCLE_INTERVAL_SECONDS):
-                break
+            # Sleep until the next cycle, but allow the webui (or a signal
+            # handler) to interrupt us via _wake_event.set(). Clearing
+            # *after* the wait means a wake_now() that arrives during the
+            # cycle is preserved and shortcuts the next sleep.
+            if _wake_event.wait(CYCLE_INTERVAL_SECONDS):
+                _wake_event.clear()
+                if _shutdown.is_set():
+                    break
+                logging.info("Cycle interrupted by wake request; starting next cycle")
     finally:
         logging.info("Shutting down, closing database connection")
         try:

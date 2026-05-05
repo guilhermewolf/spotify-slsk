@@ -38,7 +38,7 @@ SETTINGS_SPEC = [
 ]
 
 
-def create_app(db_path: str, spotify_client=None) -> Flask:
+def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
     app = Flask(
         __name__,
         template_folder="templates",
@@ -47,7 +47,19 @@ def create_app(db_path: str, spotify_client=None) -> Flask:
     )
     app.config["DB_PATH"] = db_path
     app.config["SPOTIFY"] = spotify_client
+    # Optional callable invoked after state-changing requests so the daemon's
+    # cycle sleep is interrupted and the change is observable in seconds
+    # rather than after the full CYCLE_INTERVAL_SECONDS window.
+    app.config["WAKE_DAEMON"] = wake_callback
     app.secret_key = os.getenv("UI_SECRET_KEY", os.urandom(32).hex())
+
+    def _wake():
+        cb = app.config.get("WAKE_DAEMON")
+        if cb is not None:
+            try:
+                cb()
+            except Exception:
+                logging.debug("wake_callback raised", exc_info=True)
 
     @app.before_request
     def _open_conn():
@@ -135,7 +147,8 @@ def create_app(db_path: str, spotify_client=None) -> Flask:
         table = sanitize_table_name(name)
         db.upsert_playlist_meta(g.conn, pid, table, name, None)
         db.create_table(g.conn, table)
-        flash(f'Added "{name}".', "success")
+        _wake()
+        flash(f'Added "{name}". Cycle starting now.', "success")
         return redirect(url_for("dashboard"))
 
     @app.route("/playlist/<playlist_id>/toggle", methods=["POST"])
@@ -146,7 +159,10 @@ def create_app(db_path: str, spotify_client=None) -> Flask:
         ).fetchone()
         if not row:
             abort(404)
-        db.set_playlist_enabled(g.conn, playlist_id, not bool(row[0]))
+        new_enabled = not bool(row[0])
+        db.set_playlist_enabled(g.conn, playlist_id, new_enabled)
+        if new_enabled:
+            _wake()
         return redirect(url_for("dashboard"))
 
     @app.route("/playlist/<playlist_id>/delete", methods=["POST"])
@@ -167,7 +183,8 @@ def create_app(db_path: str, spotify_client=None) -> Flask:
                     "UPDATE playlists_meta SET snapshot_id = NULL WHERE playlist_id = ?",
                     (playlist_id,),
                 )
-            flash("Will re-fetch on the next cycle.", "success")
+            _wake()
+            flash("Re-fetching from Spotify now.", "success")
         except Exception as e:
             flash(f"Could not queue refresh: {e}", "error")
         return redirect(url_for("playlist_detail", playlist_id=playlist_id))
@@ -180,7 +197,11 @@ def create_app(db_path: str, spotify_client=None) -> Flask:
         if not table_name:
             abort(404)
         db.retry_track(g.conn, table_name, track_id)
-        flash("Cleared attempts and rejected-file history.", "success")
+        _wake()
+        flash(
+            "Cleared attempts and rejected-file history. Cycle starting now.",
+            "success",
+        )
         return redirect(
             url_for("track_detail", playlist_id=playlist_id, track_id=track_id)
         )
@@ -244,12 +265,13 @@ def create_app(db_path: str, spotify_client=None) -> Flask:
 def run_in_thread(
     db_path: str,
     spotify_client=None,
+    wake_callback=None,
     host: str = "0.0.0.0",
     port: int = 8000,
 ) -> threading.Thread:
     """Start the Flask app on a daemon thread. Uses the stdlib WSGI server;
     fine for a single-user dashboard — no need for gunicorn here."""
-    app = create_app(db_path, spotify_client=spotify_client)
+    app = create_app(db_path, spotify_client=spotify_client, wake_callback=wake_callback)
 
     def _run():
         try:
