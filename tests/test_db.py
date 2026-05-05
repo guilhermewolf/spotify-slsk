@@ -210,3 +210,50 @@ class TestTriedFiles:
         db.add_tried_file(conn, "pl_test", "abc", "bad.mp3")
         db.add_tried_file(conn, "pl_test", "abc", "bad.mp3")
         assert db.get_tried_files(conn, "pl_test", "abc") == ["bad.mp3"]
+
+
+class TestUpgradeChecks:
+    def _seed(self, conn, table="pl_up"):
+        db.create_table(conn, table)
+        db.insert_track(conn, table, ("a", "Sa", "Art", "Alb"))
+        db.insert_track(conn, table, ("b", "Sb", "Art", "Alb"))
+        db.update_download_status(conn, "a", table, success=True, file_path="/p/a.flac")
+        db.update_download_status(conn, "b", table, success=True, file_path="/p/b.flac")
+        return table
+
+    def test_disabled_with_zero_interval(self, conn):
+        table = self._seed(conn)
+        assert db.get_upgrade_candidates(conn, table, 0) == []
+
+    def test_returns_only_downloaded(self, conn):
+        table = self._seed(conn)
+        # Add an undownloaded row that must NOT show up.
+        db.insert_track(conn, table, ("c", "Sc", "Art", "Alb"))
+        out = db.get_upgrade_candidates(conn, table, 168)
+        assert sorted(t.id for t, _ in out) == ["a", "b"]
+
+    def test_path_returned(self, conn):
+        table = self._seed(conn)
+        out = dict((t.id, p) for t, p in db.get_upgrade_candidates(conn, table, 168))
+        assert out == {"a": "/p/a.flac", "b": "/p/b.flac"}
+
+    def test_mark_checked_excludes_from_window(self, conn):
+        table = self._seed(conn)
+        db.mark_upgrade_checked(conn, table, "a")
+        out = db.get_upgrade_candidates(conn, table, 168)
+        assert [t.id for t, _ in out] == ["b"]
+
+    def test_short_interval_re_includes_recently_checked(self, conn):
+        table = self._seed(conn)
+        db.mark_upgrade_checked(conn, table, "a")
+        # interval=0 hours selects everything regardless of last check (the
+        # row's last_upgrade_check is "now", and "now < now" is false — so
+        # we use a tiny positive interval that still catches it).
+        # Force the timestamp to the past:
+        with conn:
+            conn.execute(
+                f'UPDATE "{table}" SET last_upgrade_check = datetime("now", "-200 hours") '
+                f'WHERE id = ?', ("a",),
+            )
+        out = db.get_upgrade_candidates(conn, table, 168)
+        assert sorted(t.id for t, _ in out) == ["a", "b"]

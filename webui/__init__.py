@@ -34,6 +34,7 @@ SETTINGS_SPEC = [
     ("SLSKD_EARLY_STOP_RESPONSES", "20", "Stop the slskd search once this many peers replied"),
     ("SLSKD_MAX_RETRIES", "2", "Per-search download attempt cap"),
     ("SLSKD_WAIT_TIMEOUT", "60", "Seconds to wait for a downloaded file to appear on disk"),
+    ("UPGRADE_CHECK_INTERVAL_HOURS", "168", "Re-search downloaded tracks for a better version_tier (Extended Mix > Original Mix); 0 disables"),
 ]
 
 

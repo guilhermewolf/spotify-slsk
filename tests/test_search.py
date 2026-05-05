@@ -12,10 +12,12 @@ from soulseek_api import (
     _is_ascii,
     _normalize_ext_list,
     _version_mismatch,
+    _version_tier,
     clean_filename,
     extract_candidates,
     sort_candidates,
 )
+import soulseek_api
 
 
 class TestNormalizeExtList:
@@ -120,8 +122,22 @@ class TestInferBitrateFromName:
 
 
 class TestCleanFilename:
-    def test_strips_brackets_and_metadata(self):
-        assert "flac" not in clean_filename("Song Name [FLAC] (2013).flac")
+    def test_year_dropped_from_brackets(self):
+        # Year-like 4-digit number is dropped, but the [FLAC] tag is kept
+        # as an extra token. token_set_ratio tolerates extra tokens, and
+        # *not* keeping parens means we'd lose remix/version info elsewhere.
+        out = clean_filename("Song Name [FLAC] (2013).flac")
+        assert "2013" not in out
+        assert "song" in out
+        assert "name" in out
+
+    def test_keeps_remix_info_in_parens(self):
+        # The original bug: paren-stripping erased "(Walker & Royce Remix)"
+        # so fuzzy matching never saw the remix tokens.
+        out = clean_filename("Channel Tres - Controller (Walker & Royce Remix).flac")
+        assert "walker" in out
+        assert "royce" in out
+        assert "remix" in out
 
     def test_normalizes_separators(self):
         out = clean_filename("Artist_Song-Name.mp3")
@@ -196,3 +212,220 @@ class TestSortCandidates:
             {"ext": ".flac", "bitrate": 1411, "user_upload_speed": 50000},
         ]
         assert sort_candidates(cands)[0]["user_upload_speed"] == 50000
+
+
+class TestVersionTier:
+    def test_extended_mix(self):
+        assert _version_tier("Heart To Find (Extended Mix).flac") == 0
+
+    def test_extended_version(self):
+        assert _version_tier("Track - Extended Version.mp3") == 0
+
+    def test_original_mix(self):
+        assert _version_tier("Heart To Find - Original Mix.flac") == 1
+
+    def test_original_version(self):
+        assert _version_tier("Track (Original Version).flac") == 1
+
+    def test_plain_title(self):
+        assert _version_tier("Heart To Find.flac") == 2
+
+    def test_remix_is_not_extended(self):
+        # A remix is a different track rewrite, not the DJ extended cut.
+        assert _version_tier("Track (Walker Remix).flac") == 2
+
+
+class TestSortCandidatesVersionTier:
+    def test_extended_beats_original(self):
+        cands = [
+            {"ext": ".flac", "bitrate": 1411, "user_upload_speed": 0, "version_tier": 1},
+            {"ext": ".flac", "bitrate": 1411, "user_upload_speed": 0, "version_tier": 0},
+        ]
+        assert sort_candidates(cands)[0]["version_tier"] == 0
+
+    def test_original_beats_normal(self):
+        cands = [
+            {"ext": ".flac", "bitrate": 1411, "user_upload_speed": 0, "version_tier": 2},
+            {"ext": ".flac", "bitrate": 1411, "user_upload_speed": 0, "version_tier": 1},
+        ]
+        assert sort_candidates(cands)[0]["version_tier"] == 1
+
+    def test_extended_outranks_format(self):
+        # An MP3 Extended Mix beats a FLAC plain version — version tier wins.
+        cands = [
+            {"ext": ".flac", "bitrate": 1411, "user_upload_speed": 0, "version_tier": 2},
+            {"ext": ".mp3", "bitrate": 320, "user_upload_speed": 0, "version_tier": 0},
+        ]
+        out = sort_candidates(cands)
+        assert out[0]["version_tier"] == 0
+        assert out[0]["ext"] == ".mp3"
+
+    def test_format_tiebreaks_within_same_tier(self):
+        cands = [
+            {"ext": ".mp3", "bitrate": 320, "user_upload_speed": 0, "version_tier": 0},
+            {"ext": ".flac", "bitrate": 1411, "user_upload_speed": 0, "version_tier": 0},
+        ]
+        assert sort_candidates(cands)[0]["ext"] == ".flac"
+
+    def test_extract_stamps_version_tier(self):
+        results = [{
+            "username": "u",
+            "uploadSpeed": 1000,
+            "files": [{
+                "filename": "Mat Joe - Heart To Find (Extended Mix).flac",
+                "size": 30_000_000,
+                "bitrate": 1411,
+                "length": 360,
+            }],
+        }]
+        out = extract_candidates(results, "Heart To Find", "Mat Joe")
+        assert len(out) == 1
+        assert out[0]["version_tier"] == 0
+
+
+class TestMaxVersionTierFilter:
+    """Upgrade-pass uses max_version_tier to demand strictly better versions."""
+
+    def _two_versions_search_result(self):
+        """Returns search results containing both an Original Mix and Extended Mix."""
+        return [{
+            "username": "u",
+            "uploadSpeed": 1000,
+            "files": [
+                {
+                    "filename": "Mat Joe - Heart To Find (Original Mix).flac",
+                    "size": 30_000_000,
+                    "bitrate": 1411,
+                    "length": 360,
+                },
+                {
+                    "filename": "Mat Joe - Heart To Find (Extended Mix).flac",
+                    "size": 50_000_000,
+                    "bitrate": 1411,
+                    "length": 480,
+                },
+            ],
+        }]
+
+    def test_filter_keeps_strictly_better_only(self):
+        # Simulate "I currently have Original Mix (tier 1); only consider
+        # tier 0 = Extended Mix".
+        results = self._two_versions_search_result()
+        cands = extract_candidates(results, "Heart To Find", "Mat Joe")
+        assert {c["version_tier"] for c in cands} == {0, 1}
+
+        # The download_and_verify body filters; replicate the predicate:
+        max_tier = 1
+        kept = [c for c in cands if c.get("version_tier", 2) < max_tier]
+        assert len(kept) == 1
+        assert kept[0]["version_tier"] == 0
+
+    def test_filter_excludes_equal_tier(self):
+        # Already on Extended Mix (tier 0) means nothing is strictly better.
+        results = self._two_versions_search_result()
+        cands = extract_candidates(results, "Heart To Find", "Mat Joe")
+        max_tier = 0
+        kept = [c for c in cands if c.get("version_tier", 2) < max_tier]
+        assert kept == []
+
+
+class TestRunOneSearch:
+    """_run_one_search is the per-query primitive used by the waterfall."""
+
+    def test_returns_responses_when_search_completes(self, monkeypatch):
+        fake = type("F", (), {})()
+        fake.searches = type("S", (), {})()
+        fake.searches.search_text = lambda **kw: {"id": "sid"}
+        fake.searches.state = lambda sid: {"state": "Completed"}
+        fake.searches.search_responses = lambda sid: [{"username": "u", "files": []}]
+        fake.searches.delete = lambda sid: None
+        monkeypatch.setattr(soulseek_api, "get_client", lambda: fake)
+        out = soulseek_api._run_one_search("hello", timeout=2)
+        assert out and out[0]["username"] == "u"
+
+    def test_returns_empty_on_no_search_id(self, monkeypatch):
+        fake = type("F", (), {})()
+        fake.searches = type("S", (), {})()
+        fake.searches.search_text = lambda **kw: {}
+        fake.searches.delete = lambda sid: None
+        monkeypatch.setattr(soulseek_api, "get_client", lambda: fake)
+        assert soulseek_api._run_one_search("hello", timeout=2) == []
+
+    def test_returns_empty_on_timeout(self, monkeypatch):
+        fake = type("F", (), {})()
+        fake.searches = type("S", (), {})()
+        fake.searches.search_text = lambda **kw: {"id": "sid"}
+        fake.searches.state = lambda sid: {"state": "InProgress"}
+        fake.searches.delete = lambda sid: None
+        monkeypatch.setattr(soulseek_api, "get_client", lambda: fake)
+        # Skip the real sleep so the test runs fast.
+        monkeypatch.setattr(soulseek_api, "_interruptible_sleep", lambda s: False)
+        assert soulseek_api._run_one_search("hello", timeout=0) == []
+
+
+class TestSearchAndDownloadFallthrough:
+    """search_and_download falls through to the next query when extract_candidates
+    yields zero usable candidates — not just on zero raw responses."""
+
+    def test_falls_through_to_simpler_query_when_filtering_empty(self, monkeypatch):
+        # First query: 1 raw response, but the candidate is unsupported (.wma) so
+        # extract_candidates returns []. Must fall through to next query.
+        # Second query: a clean .flac match.
+        calls = []
+
+        def fake_run_one_search(query, timeout=60):
+            calls.append(query)
+            if len(calls) == 1:
+                return [{
+                    "username": "u1",
+                    "uploadSpeed": 1000,
+                    "files": [{
+                        "filename": "junk.wma",
+                        "size": 1_000_000,
+                        "bitrate": 320,
+                        "length": 180,
+                    }],
+                }]
+            return [{
+                "username": "u2",
+                "uploadSpeed": 1000,
+                "files": [{
+                    "filename": "Mat Joe - Heart To Find.flac",
+                    "size": 30_000_000,
+                    "bitrate": 1411,
+                    "length": 360,
+                }],
+            }]
+
+        captured = {}
+
+        def fake_download_and_verify(**kw):
+            captured.update(kw)
+            cands = extract_candidates(
+                kw["search_results"], kw["expected_title"], kw["expected_artist"]
+            )
+            return "/downloads/Mat Joe - Heart To Find.flac" if cands else None
+
+        monkeypatch.setattr(soulseek_api, "_run_one_search", fake_run_one_search)
+        monkeypatch.setattr(soulseek_api, "download_and_verify", fake_download_and_verify)
+
+        out = soulseek_api.search_and_download(
+            artist="Mat Joe",
+            title="Heart To Find",
+            conn=None,
+            playlist_name="pl_x",
+            track_id="t1",
+        )
+        assert out == "/downloads/Mat Joe - Heart To Find.flac"
+        # Confirm the waterfall actually advanced past the first query.
+        assert len(calls) >= 2
+
+    def test_returns_none_when_all_queries_exhausted(self, monkeypatch):
+        monkeypatch.setattr(soulseek_api, "_run_one_search", lambda q, timeout=60: [])
+        monkeypatch.setattr(
+            soulseek_api, "download_and_verify", lambda **kw: None
+        )
+        out = soulseek_api.search_and_download(
+            artist="X", title="Y", conn=None, playlist_name="pl", track_id="t",
+        )
+        assert out is None

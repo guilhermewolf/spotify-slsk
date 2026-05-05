@@ -21,6 +21,8 @@ from db import (
     upsert_playlist_meta,
     list_playlists,
     get_setting,
+    get_upgrade_candidates,
+    mark_upgrade_checked,
 )
 from log_config import setup_logging
 from mutagen import File as MutagenFile
@@ -31,11 +33,11 @@ from mutagen.mp3 import MP3
 from utils import sanitize_table_name, get_playlist_id
 from spotipy.oauth2 import SpotifyClientCredentials
 from soulseek_api import (
-    perform_search,
-    download_and_verify,
+    search_and_download,
     get_client as get_slskd_client,
     set_shutdown_event as _slsk_set_shutdown_event,
     refresh_from_db as _slsk_refresh_from_db,
+    _version_tier,
 )
 from models import Track
 
@@ -804,29 +806,21 @@ def process_playlist(sp, conn, playlist_id, ntfy_url, ntfy_topic):
         send_ntfy_notification(ntfy_url, ntfy_topic, msg)
 
     tracks = get_pending_tracks(conn, playlist_name)
-    if not tracks:
+    if tracks:
+        for track in tracks:
+            if _shutdown.is_set():
+                logging.info("Shutdown requested, stopping track processing")
+                return
+            logging.info(f"Downloading: {track.name} by {track.artist}")
+            success = handle_track_download(track, playlist_name, conn, max_attempts=2)
+            if success:
+                logging.info(f"Downloaded: {track.name} by {track.artist}")
+            else:
+                logging.warning(f"Failed: {track.name} by {track.artist}")
+    else:
         logging.info(f"No pending tracks for {playlist_name}")
-        return
 
-    for track in tracks:
-        if _shutdown.is_set():
-            logging.info("Shutdown requested, stopping track processing")
-            return
-        logging.info(f"Downloading: {track.name} by {track.artist}")
-        search_results = perform_search(track.artist, track.name, album=track.album)
-
-        success = handle_track_download(
-            track=track,
-            playlist_name=playlist_name,
-            conn=conn,
-            search_results=search_results,
-            max_attempts=2,
-        )
-
-        if success:
-            logging.info(f"Downloaded: {track.name} by {track.artist}")
-        else:
-            logging.warning(f"Failed: {track.name} by {track.artist}")
+    _run_upgrade_pass(conn, playlist_name)
 
     send_ntfy_notification(ntfy_url, ntfy_topic, f"Finished processing playlist: {playlist_name}")
 
@@ -836,29 +830,116 @@ def safe_get(tag):
         return tag[0]
     return tag
 
-def handle_track_download(track, playlist_name, conn, search_results, max_attempts=2):
-    if not search_results:
-        logging.warning(f"No search results for: {track.name} by {track.artist}")
-        return False
-
-    file_path = download_and_verify(
-        search_results=search_results,
-        expected_title=track.name,
-        expected_artist=track.artist,
+def handle_track_download(track, playlist_name, conn, max_attempts=2):
+    """Search slskd (with query fall-through) and download the best match."""
+    file_path = search_and_download(
+        artist=track.artist,
+        title=track.name,
         conn=conn,
         playlist_name=playlist_name,
         track_id=track.id,
+        album=track.album,
         max_attempts=max_attempts,
     )
 
     if file_path:
-        verified, final_path = process_downloaded_file(file_path, playlist_name, conn)
+        verified, _final_path = process_downloaded_file(file_path, playlist_name, conn)
         if verified:
             clear_tried_entries(conn, playlist_name, track.id)
             return True
 
     update_download_status(conn, track.id, playlist_name, success=False)
     return False
+
+
+def try_upgrade_track(track, playlist_name, conn, current_path):
+    """If slskd has a *strictly better* version_tier, swap the file in place.
+
+    Failure semantics differ from a fresh download: we never call
+    update_download_status(success=False) here because the track is already
+    downloaded — incrementing attempts would eventually suspend a row that
+    has nothing wrong with it.
+    """
+    current_basename = os.path.basename(current_path) if current_path else ""
+    current_tier = _version_tier(current_basename)
+    if current_tier == 0:
+        logging.info(
+            f"[upgrade] '{track.name}' already at top tier (Extended Mix); skipping"
+        )
+        return False
+
+    logging.info(
+        f"[upgrade] Checking '{track.name}' by '{track.artist}' "
+        f"(current tier={current_tier}, file={current_basename or '∅'})"
+    )
+
+    new_file = search_and_download(
+        artist=track.artist,
+        title=track.name,
+        conn=conn,
+        playlist_name=playlist_name,
+        track_id=track.id,
+        album=track.album,
+        max_attempts=2,
+        max_version_tier=current_tier,
+    )
+    if not new_file:
+        logging.info(f"[upgrade] No better-tier candidate for '{track.name}'")
+        return False
+
+    verified, final_path = process_downloaded_file(new_file, playlist_name, conn)
+    if not verified or not final_path:
+        return False
+
+    # Delete the old file iff it differs from the new one. Same-basename is
+    # possible when the upgrade winner happens to share a filename — in that
+    # case shutil.move already overwrote it.
+    try:
+        if (
+            current_path
+            and os.path.isfile(current_path)
+            and os.path.abspath(current_path) != os.path.abspath(final_path)
+        ):
+            os.remove(current_path)
+            logging.info(f"[upgrade] Replaced {current_path} -> {final_path}")
+        else:
+            logging.info(f"[upgrade] Wrote upgraded file: {final_path}")
+    except OSError as e:
+        logging.warning(f"[upgrade] Could not delete old file {current_path}: {e}")
+
+    clear_tried_entries(conn, playlist_name, track.id)
+    return True
+
+
+def _run_upgrade_pass(conn, playlist_name):
+    """Per-playlist upgrade pass. Throttled by UPGRADE_CHECK_INTERVAL_HOURS."""
+    try:
+        interval = int(get_setting(conn, "UPGRADE_CHECK_INTERVAL_HOURS", "168"))
+    except (TypeError, ValueError):
+        interval = 168
+    if interval <= 0:
+        return
+
+    candidates = get_upgrade_candidates(conn, playlist_name, interval)
+    if not candidates:
+        return
+
+    logging.info(
+        f"[upgrade] {playlist_name}: {len(candidates)} track(s) eligible for upgrade check "
+        f"(interval={interval}h)"
+    )
+    for track, current_path in candidates:
+        if _shutdown.is_set():
+            logging.info("[upgrade] Shutdown requested, stopping upgrade pass")
+            return
+        try:
+            try_upgrade_track(track, playlist_name, conn, current_path)
+        except Exception:
+            logging.exception(
+                f"[upgrade] Failed to check track {track.id} in {playlist_name}"
+            )
+        finally:
+            mark_upgrade_checked(conn, playlist_name, track.id)
 
 
 def _run_startup_reconciliation(sp, conn):
