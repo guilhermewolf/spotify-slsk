@@ -23,6 +23,7 @@ from flask import (
 )
 
 import db
+import runtime_state
 from utils import get_playlist_id, sanitize_table_name
 
 
@@ -83,7 +84,10 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
         playlists = db.list_playlists(g.conn)
         for pl in playlists:
             pl["stats"] = db.playlist_stats(g.conn, pl["table_name"])
-        return render_template("dashboard.html", playlists=playlists)
+        activity = runtime_state.get_activity()
+        return render_template(
+            "dashboard.html", playlists=playlists, activity=activity
+        )
 
     @app.route("/playlist/<playlist_id>")
     def playlist_detail(playlist_id):
@@ -101,6 +105,7 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
             last_synced=last_synced,
             tracks=tracks,
             status_filter=status_filter,
+            activity=runtime_state.get_activity(),
         )
 
     @app.route("/track/<playlist_id>/<track_id>")
@@ -231,6 +236,33 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
             overrides=overrides,
             effective=effective,
         )
+
+    # ---- live observability ------------------------------------------
+
+    @app.route("/logs")
+    def logs_page():
+        snapshot = runtime_state.get_logs(since=0, limit=500)
+        return render_template(
+            "logs.html",
+            entries=snapshot["entries"],
+            last_seq=snapshot["last_seq"],
+        )
+
+    @app.route("/logs.json")
+    def logs_json():
+        try:
+            since = int(request.args.get("since", "0"))
+        except (TypeError, ValueError):
+            since = 0
+        try:
+            limit = max(1, min(2000, int(request.args.get("limit", "500"))))
+        except (TypeError, ValueError):
+            limit = 500
+        return jsonify(runtime_state.get_logs(since=since, limit=limit))
+
+    @app.route("/activity.json")
+    def activity_json():
+        return jsonify(runtime_state.get_activity())
 
     # ---- ops ----------------------------------------------------------
 

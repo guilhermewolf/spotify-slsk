@@ -63,7 +63,8 @@ Docker `HEALTHCHECK` compares `HEARTBEAT_FILE` mtime against `HEARTBEAT_STALE_SE
 - **`db.py`** — SQLite persistence. WAL mode + `busy_timeout=5000` + `PRAGMA user_version` migrations. Per-playlist dynamic tables (`pl_<sanitized_name>` + `pl_<…>_tried`) plus a global `playlists_meta` catalogue keyed by Spotify id (with `snapshot_id`, `enabled`, `added_at`) and a global `settings` key-value bag for UI-editable tunables. `get_setting(conn, key, default)` prefers DB, falls back to env, then default — so any env var becomes a mutable setting for free.
 - **`webui/`** — Flask dashboard (see next section).
 - **`utils.py`** — `sanitize_table_name`, `get_playlist_id` (shared by app and webui).
-- **`log_config.py`** — timezone-aware logging; `LIB_LOGLEVEL` (default WARNING) silences noisy third-party loggers (urllib3, spotipy, requests) independently of app `LOGLEVEL`.
+- **`log_config.py`** — timezone-aware logging; `LIB_LOGLEVEL` (default WARNING) silences noisy third-party loggers (urllib3, spotipy, requests) independently of app `LOGLEVEL`. Installs a `RingBufferHandler` from `runtime_state` alongside the stdout handler so the web UI can tail logs.
+- **`runtime_state.py`** — in-process state shared between the daemon thread and the web UI: thread-safe activity tracker (current phase + playlist + track) and a bounded log ring buffer (`LOG_BUFFER_MAX=2000`). Daemon writes; UI reads.
 
 ### Web UI
 
@@ -75,6 +76,9 @@ Routes:
 - `GET /track/<pid>/<tid>` — per-track history (path, attempts, rejected filenames)
 - `GET /settings` — form for UI-editable tunables; blank fields fall back to env/default
 - `GET /healthz` — JSON health (schema version, heartbeat age)
+- `GET /logs` — live log tail (polls `/logs.json` every 2s)
+- `GET /logs.json?since=<seq>&limit=<n>` — incremental log delta from `runtime_state`
+- `GET /activity.json` — current daemon activity (phase / playlist / track)
 - `POST /playlists` — add a playlist by Spotify URL (validates via the shared daemon Spotify client)
 - `POST /playlist/<id>/toggle` — enable/disable
 - `POST /playlist/<id>/delete` — drop from catalogue + drop `pl_*` tables; files kept on disk

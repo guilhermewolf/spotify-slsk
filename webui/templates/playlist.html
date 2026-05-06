@@ -2,6 +2,8 @@
 {% block title %}{{ name }} · spotify-slsk{% endblock %}
 {% block content %}
 
+{% include "_activity.html" %}
+
 <p class="muted"><a href="{{ url_for('dashboard') }}">« Dashboard</a></p>
 <h2>{{ name }}</h2>
 <p class="muted">Last synced: {{ last_synced or 'never' }}</p>
@@ -32,8 +34,12 @@
   </thead>
   <tbody>
   {% for t in tracks %}
-    <tr>
-      <td><a href="{{ url_for('track_detail', playlist_id=playlist_id, track_id=t.id) }}">{{ t.name }}</a></td>
+    {% set is_active = activity and activity.track_id == t.id and activity.playlist_id == playlist_id %}
+    <tr style="{{ 'outline: 2px solid #2ecc71;' if is_active }}">
+      <td>
+        <a href="{{ url_for('track_detail', playlist_id=playlist_id, track_id=t.id) }}">{{ t.name }}</a>
+        {% if is_active %} <span class="badge badge-retrying">downloading now</span>{% endif %}
+      </td>
       <td>{{ t.artists }}</td>
       <td>{{ t.album }}</td>
       <td>

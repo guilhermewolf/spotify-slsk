@@ -1,5 +1,8 @@
 {% extends "base.html" %}
 {% block content %}
+
+{% include "_activity.html" %}
+
 <h2>Playlists</h2>
 
 <article>
@@ -18,15 +21,22 @@
 <div hx-get="{{ url_for('dashboard') }}" hx-trigger="every 15s" hx-swap="outerHTML" hx-select="#playlist-list">
 <div id="playlist-list">
   {% for pl in playlists %}
-  <article>
+  {% set is_active = activity and activity.playlist_id == pl.playlist_id and activity.phase in ('syncing', 'downloading', 'upgrading') %}
+  <article class="{{ 'row-active' if is_active }}">
     <header>
       <strong><a href="{{ url_for('playlist_detail', playlist_id=pl.playlist_id) }}">{{ pl.name }}</a></strong>
+      {% if is_active %}<span class="badge badge-retrying">working now</span>{% endif %}
       {% if not pl.enabled %}<span class="badge badge-disabled">disabled</span>{% endif %}
       <span class="muted">
         · last synced {{ pl.last_synced or 'never' }}
         {% if pl.snapshot_id %}· snapshot {{ pl.snapshot_id[:8] }}{% endif %}
       </span>
     </header>
+    {% if is_active and activity.track_name %}
+      <p class="muted" style="margin: 0.25em 0;">
+        ▶ {{ activity.track_name }} — {{ activity.track_artist or '' }}
+      </p>
+    {% endif %}
     {% set total = pl.stats.total %}
     {% set pct = (pl.stats.downloaded / total * 100) if total else 0 %}
     <div class="progress"><div class="progress-bar" style="width: {{ pct }}%"></div></div>

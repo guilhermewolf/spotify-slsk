@@ -1,0 +1,14 @@
+{# Reusable current-activity banner. Polled every 5s via htmx so the
+   dashboard reflects the daemon's hot phase without a full reload. #}
+<div hx-get="{{ url_for('dashboard') }}" hx-trigger="every 5s" hx-swap="outerHTML" hx-select="#activity-banner">
+<div id="activity-banner" class="activity {{ activity.phase }}">
+  <span class="phase">{{ activity.phase|replace('_', ' ') }}</span>
+  {% if activity.playlist_name %}
+    <a href="{{ url_for('playlist_detail', playlist_id=activity.playlist_id) }}"><strong>{{ activity.playlist_name }}</strong></a>
+  {% endif %}
+  {% if activity.detail %}
+    — {{ activity.detail }}
+  {% endif %}
+  <span class="ago">({{ '%.0f'|format(activity.age_seconds) }}s ago)</span>
+</div>
+</div>

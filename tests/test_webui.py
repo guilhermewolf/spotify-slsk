@@ -232,3 +232,48 @@ class TestWakeCallback:
         client = app.test_client()
         r = client.post("/track/pid1/t1/retry", follow_redirects=True)
         assert r.status_code == 200
+
+
+class TestLiveObservability:
+    def test_activity_json_returns_snapshot(self, client):
+        import runtime_state
+        runtime_state.set_activity("idle", detail="from test")
+        r = client.get("/activity.json")
+        assert r.status_code == 200
+        data = r.get_json()
+        assert data["phase"] == "idle"
+        assert data["detail"] == "from test"
+        assert "age_seconds" in data
+
+    def test_logs_json_increments_seq(self, client):
+        import logging
+        import runtime_state
+        runtime_state._log_buffer.clear()
+        runtime_state._log_seq = 0
+        # Install handler so log calls land in the buffer regardless of root config.
+        handler = runtime_state.RingBufferHandler()
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logging.getLogger().addHandler(handler)
+        try:
+            logging.getLogger().warning("from test_logs_json")
+            r = client.get("/logs.json?since=0")
+            assert r.status_code == 200
+            data = r.get_json()
+            assert data["last_seq"] >= 1
+            assert any("from test_logs_json" in e["message"] for e in data["entries"])
+        finally:
+            logging.getLogger().removeHandler(handler)
+
+    def test_logs_page_renders(self, client):
+        r = client.get("/logs")
+        assert r.status_code == 200
+        assert b"log-viewer" in r.data
+
+    def test_dashboard_renders_activity_banner(self, client):
+        import runtime_state
+        runtime_state.set_activity("syncing", detail="testing")
+        r = client.get("/")
+        assert r.status_code == 200
+        assert b"activity-banner" in r.data
+        assert b"testing" in r.data
+
