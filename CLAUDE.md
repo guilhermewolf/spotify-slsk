@@ -79,6 +79,9 @@ Routes:
 - `GET /logs` — live log tail (polls `/logs.json` every 2s)
 - `GET /logs.json?since=<seq>&limit=<n>` — incremental log delta from `runtime_state`
 - `GET /activity.json` — current daemon activity (phase / playlist / track)
+- `GET /file?rel=<path-relative-to-playlists-root>` — serves a downloaded audio file with HTTP Range support, behind a traversal-guarded path check; powers the in-browser `<audio>` preview on the track-detail page
+- `POST /track/<pid>/<tid>/retag` — rewrites mutagen tags using the DB-stored title/artist/album (no re-download)
+- `POST /settings/test-ntfy` — fires one ntfy probe using NTFY_URL + NTFY_TOPIC env
 - `POST /playlists` — add a playlist by Spotify URL (validates via the shared daemon Spotify client)
 - `POST /playlist/<id>/toggle` — enable/disable
 - `POST /playlist/<id>/delete` — drop from catalogue + drop `pl_*` tables; files kept on disk
@@ -125,4 +128,4 @@ UI-editable (env is a default; DB override wins):
 - **`slskd_api==0.1.5`** is pinned. Transfer-state substrings (`"completed, succeeded"`, `"failed"`) are matched; bumping may break `wait_for_completion`.
 - **SQLite WAL mode** means the DB file is always accompanied by `-wal` and `-shm` files. Backups must capture all three or run `PRAGMA wal_checkpoint(TRUNCATE)` first.
 - **Web UI has no auth by default.** Compose binds to loopback; if you expose to LAN, put a reverse proxy with auth in front.
-- **Schema version is 3.** Upgrading from an older DB is automatic — the ALTER TABLE guards in `_ensure_playlists_meta_table` handle v2 DBs, and `CREATE TABLE IF NOT EXISTS` handles settings.
+- **Schema version is 4.** Upgrading from an older DB is automatic — the ALTER TABLE guards in `_ensure_playlists_meta_table` handle v2 DBs, `CREATE TABLE IF NOT EXISTS` handles settings, and v4 added `cycle_history` (one row per completed daemon cycle, capped to ~200 rows by `db.record_cycle`).

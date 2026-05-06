@@ -45,6 +45,7 @@
       <span class="stat">Downloaded <strong>{{ pl.stats.downloaded }}</strong></span>
       <span class="stat">Pending <strong>{{ pl.stats.pending }}</strong></span>
       <span class="stat">Suspended <strong>{{ pl.stats.suspended }}</strong></span>
+      <span class="stat muted">{{ pl.disk_bytes|human_bytes }}</span>
     </div>
     <footer>
       <form class="inline-form" method="POST" action="{{ url_for('toggle_playlist', playlist_id=pl.playlist_id) }}">
@@ -61,5 +62,35 @@
 </div>
 {% else %}
 <p class="muted">No playlists yet — paste a Spotify URL above to get started.</p>
+{% endif %}
+
+{% if cycles %}
+<details>
+  <summary><strong>Recent cycles</strong> <span class="muted">(last {{ cycles|length }})</span></summary>
+  <table>
+    <thead>
+      <tr>
+        <th>Started</th>
+        <th class="tight">Duration</th>
+        <th class="tight">Playlists</th>
+        <th class="tight">Added</th>
+        <th class="tight">Downloaded</th>
+        <th class="tight">Failed</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in cycles %}
+      <tr>
+        <td class="tight">{{ c.started_at }}</td>
+        <td class="tight">{{ '%.1f'|format(c.duration_seconds) }}s</td>
+        <td class="tight">{{ c.playlists_synced }}</td>
+        <td class="tight">{{ c.tracks_added }}</td>
+        <td class="tight">{{ c.tracks_downloaded }}</td>
+        <td class="tight">{{ c.tracks_failed }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</details>
 {% endif %}
 {% endblock %}

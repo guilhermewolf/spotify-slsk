@@ -86,6 +86,33 @@ class TestRingBufferHandler:
         msgs = [e["message"] for e in delta["entries"]]
         assert msgs == ["c"]
 
+    def test_search_history_round_trip(self):
+        runtime_state._search_history.clear()
+        runtime_state.record_search("t1", "foo bar", result_count=5)
+        runtime_state.record_search("t1", "foo", result_count=20)
+        runtime_state.record_search("t2", "other", result_count=0)
+
+        h1 = runtime_state.get_search_history("t1")
+        assert [e["query"] for e in h1] == ["foo bar", "foo"]
+        assert h1[0]["result_count"] == 5
+
+        assert runtime_state.get_search_history("t2")[0]["query"] == "other"
+        assert runtime_state.get_search_history("missing") == []
+
+    def test_search_history_no_op_on_falsy_id(self):
+        runtime_state._search_history.clear()
+        runtime_state.record_search(None, "ignored")
+        runtime_state.record_search("", "ignored")
+        assert runtime_state._search_history == {}
+
+    def test_search_history_caps_per_track(self):
+        runtime_state._search_history.clear()
+        for i in range(runtime_state.SEARCH_HISTORY_PER_TRACK + 5):
+            runtime_state.record_search("t1", f"q{i}", result_count=i)
+        h = runtime_state.get_search_history("t1")
+        assert len(h) == runtime_state.SEARCH_HISTORY_PER_TRACK
+        assert h[-1]["query"] == f"q{runtime_state.SEARCH_HISTORY_PER_TRACK + 4}"
+
     def test_buffer_is_bounded(self):
         handler = runtime_state.RingBufferHandler()
         handler.setFormatter(logging.Formatter("%(message)s"))

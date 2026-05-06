@@ -115,3 +115,58 @@ def get_logs(since: int = 0, limit: int = 500) -> dict:
             entries = [e for e in _log_buffer if e["seq"] > since][-limit:]
         last = _log_seq
     return {"last_seq": last, "entries": entries}
+
+
+# --- per-track search history (debug aid for the track-detail page) -------
+#
+# Each entry is one slskd search the daemon performed for a given Spotify
+# track id. Ephemeral — never written to the DB. Trades memory for the
+# ability to ask "what queries did the daemon try for this track and how
+# many results came back?" without diving into stdout logs.
+
+SEARCH_HISTORY_PER_TRACK = 20
+SEARCH_HISTORY_MAX_TRACKS = 500
+
+_search_lock = threading.Lock()
+_search_history: "dict[str, deque]" = {}
+
+
+def record_search(
+    track_id: Optional[str],
+    query: str,
+    *,
+    result_count: int = 0,
+    candidate_count: Optional[int] = None,
+) -> None:
+    """Record one query attempt for a track. No-op if ``track_id`` is falsy."""
+    if not track_id:
+        return
+    entry = {
+        "time": time.time(),
+        "query": query,
+        "result_count": int(result_count),
+        "candidate_count": (
+            None if candidate_count is None else int(candidate_count)
+        ),
+    }
+    with _search_lock:
+        bucket = _search_history.get(track_id)
+        if bucket is None:
+            # When we'd exceed the global cap, drop the oldest tracked id
+            # before allocating a new bucket. Insertion order is reliable
+            # in Python 3.7+ dicts.
+            if len(_search_history) >= SEARCH_HISTORY_MAX_TRACKS:
+                oldest = next(iter(_search_history))
+                _search_history.pop(oldest, None)
+            bucket = deque(maxlen=SEARCH_HISTORY_PER_TRACK)
+            _search_history[track_id] = bucket
+        bucket.append(entry)
+
+
+def get_search_history(track_id: str) -> list:
+    """Return the recorded query attempts for one track (oldest first)."""
+    if not track_id:
+        return []
+    with _search_lock:
+        bucket = _search_history.get(track_id)
+        return list(bucket) if bucket else []

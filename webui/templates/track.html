@@ -16,16 +16,31 @@
         {% endif %}
       </td></tr>
   <tr><th>Path</th><td>{% if track.path %}<code>{{ track.path }}</code>{% else %}—{% endif %}</td></tr>
+  {% if track.rel_path %}
+  <tr><th>Preview</th><td>
+    <audio controls preload="none" style="width: 100%; max-width: 480px;">
+      <source src="{{ url_for('serve_file', rel=track.rel_path) }}">
+      Your browser doesn't support the audio element.
+    </audio>
+  </td></tr>
+  {% endif %}
   <tr><th>Attempts</th><td>{{ track.attempts }}</td></tr>
   <tr><th>Last attempt</th><td>{{ track.last_attempt or '—' }}</td></tr>
   <tr><th>Suspended until</th><td>{{ track.suspended_until or '—' }}</td></tr>
 </table>
 
 {% if not track.downloaded %}
-<form method="POST" action="{{ url_for('retry_track', playlist_id=playlist_id, track_id=track.id) }}">
+<form class="inline-form" method="POST" action="{{ url_for('retry_track', playlist_id=playlist_id, track_id=track.id) }}">
   <button type="submit">Retry now</button>
-  <small class="muted">Clears attempts, suspension, and the rejected-filename history.</small>
 </form>
+<small class="muted">Clears attempts, suspension, and the rejected-filename history.</small>
+{% endif %}
+
+{% if track.downloaded and track.path %}
+<form class="inline-form" method="POST" action="{{ url_for('retag_track', playlist_id=playlist_id, track_id=track.id) }}">
+  <button type="submit" class="secondary outline">Re-tag from DB</button>
+</form>
+<small class="muted">Re-writes title/artist/album tags using the Spotify metadata, no re-download.</small>
 {% endif %}
 
 {% if track.tried %}
@@ -33,6 +48,22 @@
 <ul>
   {% for f in track.tried %}<li><code>{{ f }}</code></li>{% endfor %}
 </ul>
+{% endif %}
+
+{% if search_history %}
+<h4>Recent slskd searches</h4>
+<p class="muted">Per-process ring buffer of the last {{ search_history|length }} queries the daemon ran for this track. Resets on container restart.</p>
+<table>
+  <thead><tr><th>Query</th><th class="tight">Results</th></tr></thead>
+  <tbody>
+    {% for s in search_history|reverse %}
+    <tr>
+      <td><code>{{ s.query }}</code></td>
+      <td class="tight">{{ s.result_count }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
 {% endif %}
 
 {% endblock %}
