@@ -1,7 +1,7 @@
 import os
 import sqlite3
 import logging
-from models import Track
+from .models import Track
 
 SCHEMA_VERSION = 3
 

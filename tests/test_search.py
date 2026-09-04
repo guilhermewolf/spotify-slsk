@@ -4,7 +4,7 @@ import os
 os.environ.setdefault("SLSKD_HOST_URL", "http://localhost")
 os.environ.setdefault("SLSKD_API_KEY", "x")
 
-from soulseek_api import (
+from spotify_slsk.soulseek_api import (
     _build_search_queries,
     _effective_mp3_kbps,
     _has_version_marker,
@@ -17,7 +17,7 @@ from soulseek_api import (
     extract_candidates,
     sort_candidates,
 )
-import soulseek_api
+from spotify_slsk import soulseek_api
 
 
 class TestNormalizeExtList:
@@ -314,7 +314,7 @@ class TestMaxVersionTierFilter:
         passed whether or not download_and_verify actually filtered. Driving
         the real function means deleting the filter fails the test.
         """
-        import db as _db
+        from spotify_slsk import db as _db
 
         enqueued = []
 

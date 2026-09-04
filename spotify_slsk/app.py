@@ -8,7 +8,7 @@ import requests
 import signal
 import threading
 import time
-from db import (
+from .db import (
     create_connection,
     create_table,
     insert_track,
@@ -24,22 +24,22 @@ from db import (
     get_upgrade_candidates,
     mark_upgrade_checked,
 )
-from log_config import setup_logging
+from .log_config import setup_logging
 from mutagen import File as MutagenFile
 from mutagen.id3 import ID3, TIT2, TPE1, TALB
 from mutagen.flac import FLAC
 from mutagen.aiff import AIFF
 from mutagen.mp3 import MP3
-from utils import sanitize_table_name, get_playlist_id
+from .utils import sanitize_table_name, get_playlist_id
 from spotipy.oauth2 import SpotifyClientCredentials
-from soulseek_api import (
+from .soulseek_api import (
     search_and_download,
     get_client as get_slskd_client,
     set_shutdown_event as _slsk_set_shutdown_event,
     refresh_from_db as _slsk_refresh_from_db,
     _version_tier,
 )
-from models import Track
+from .models import Track
 
 
 MIN_MATCH_SCORE = float(os.getenv("MIN_MATCH_SCORE", "0.62"))
@@ -1099,7 +1099,7 @@ def main():
         # operator needed to diagnose the outage — leaving Docker to
         # crash-loop the container every ~90s.
         if os.getenv("UI_ENABLED", "1") == "1":
-            from webui import run_in_thread as _run_webui
+            from .webui import run_in_thread as _run_webui
             _run_webui(
                 db_path="./data/playlist_tracks.db",
                 spotify_client=sp,

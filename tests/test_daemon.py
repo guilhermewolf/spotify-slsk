@@ -8,7 +8,7 @@ import threading
 
 import pytest
 
-import app
+from spotify_slsk import app
 
 
 @pytest.fixture(autouse=True)
@@ -234,7 +234,7 @@ class TestMissingSpotifyCredentials:
     def test_env_playlist_import_does_not_raise_without_a_client(
         self, tmp_path, monkeypatch
     ):
-        import db
+        from spotify_slsk import db
 
         monkeypatch.setenv(
             "SPOTIFY_PLAYLIST_URLS", "https://open.spotify.com/playlist/abc"
@@ -245,7 +245,7 @@ class TestMissingSpotifyCredentials:
         conn.close()
 
     def test_startup_reconciliation_does_not_raise_without_a_client(self, tmp_path):
-        import db
+        from spotify_slsk import db
 
         conn = db.create_connection(str(tmp_path / "t.db"))
         db.upsert_playlist_meta(conn, "pid1", "pl_x", "X", None)

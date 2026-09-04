@@ -12,8 +12,8 @@ os.environ.setdefault("SLSKD_API_KEY", "x")
 
 import pytest
 
-import db
-from webui import create_app
+from spotify_slsk import db
+from spotify_slsk.webui import create_app
 
 
 @pytest.fixture

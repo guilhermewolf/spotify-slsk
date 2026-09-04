@@ -6,7 +6,7 @@ import re
 import slskd_api
 from rapidfuzz import fuzz
 
-from db import get_tried_files, add_tried_file, get_setting
+from .db import get_tried_files, add_tried_file, get_setting
 
 DEFAULT_FORMATS = "flac,mp3,aiff,wav"
 

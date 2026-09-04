@@ -88,7 +88,14 @@ database and music library out of the image — do not remove it.
 python3 -m venv .venv
 make install PYTHON=.venv/bin/python
 make check   PYTHON=.venv/bin/python
+
+# run the daemon outside Docker (needs a .env and a reachable slskd)
+.venv/bin/python -m spotify_slsk
 ```
+
+The application lives in the `spotify_slsk/` package; `tests/` sits alongside
+it. Run from the repo root — the SQLite path is resolved relative to the
+working directory.
 
 `make check` runs the same compile, lint, test and dependency-audit steps as
 CI. The test suite is hermetic: `tests/conftest.py` forces fake credentials, an

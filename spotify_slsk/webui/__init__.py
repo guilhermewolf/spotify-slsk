@@ -27,8 +27,8 @@ from flask import (
 
 import requests
 
-import db
-from utils import get_playlist_id, sanitize_table_name
+from .. import db
+from ..utils import get_playlist_id, sanitize_table_name
 
 
 # The daemon and this web thread share one spotipy client, and spotipy's

@@ -20,8 +20,7 @@ install:
 	$(PYTHON) -m pip install -r requirements.txt -r requirements-dev.txt
 
 compile:
-	$(PYTHON) -m compileall -q app.py db.py soulseek_api.py utils.py models.py \
-		log_config.py webui tests
+	$(PYTHON) -m compileall -q spotify_slsk tests
 
 lint:
 	$(PYTHON) -m ruff check --select=E,F,W --ignore=E501 \

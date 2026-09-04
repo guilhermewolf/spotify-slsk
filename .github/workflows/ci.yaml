@@ -41,7 +41,7 @@ jobs:
           docker run --rm --entrypoint sh spotify-slsk:local -c '
             set -e
             [ "$(id -u)" = "1000" ] || { echo "image runs as $(id -u), expected 1000"; exit 1; }
-            python -c "import app, db, soulseek_api, webui"
+            python -c "import spotify_slsk.app, spotify_slsk.webui"
             echo "image OK"
           '
       - name: Verify no secrets or media were baked into the image

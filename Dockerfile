@@ -32,5 +32,7 @@ HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 \
         || exit 1
 
 # Exec form (no shell) so PID 1 is python itself and receives SIGTERM
-# directly — app.py installs the handler that drives the graceful shutdown.
-CMD ["python", "app.py"]
+# directly — spotify_slsk.app installs the handler that drives the
+# graceful shutdown. Run as a module so WORKDIR stays /app and the
+# daemon's relative "./data/playlist_tracks.db" keeps resolving.
+CMD ["python", "-m", "spotify_slsk"]

@@ -96,7 +96,7 @@ def _no_real_slskd_client(monkeypatch):
     monkeypatch.setattr(slskd_api, "SlskdClient", _blocked)
     # get_client() caches its client in a module global; make sure a client
     # built by an earlier test can never leak into this one.
-    import soulseek_api
+    from spotify_slsk import soulseek_api
 
     monkeypatch.setattr(soulseek_api, "_client", None)
 

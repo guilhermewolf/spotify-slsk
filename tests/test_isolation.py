@@ -9,7 +9,7 @@ import os
 
 import pytest
 
-import soulseek_api
+from spotify_slsk import soulseek_api
 
 
 class TestEnvironmentIsolation:

@@ -9,8 +9,8 @@ import os
 
 import pytest
 
-import app
-import db
+from spotify_slsk import app
+from spotify_slsk import db
 
 
 @pytest.fixture

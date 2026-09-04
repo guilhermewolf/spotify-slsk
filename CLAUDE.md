@@ -16,7 +16,7 @@ Local (non-Docker) run requires a `.env` sourced into the shell and a reachable 
 
 ```bash
 pip install -r requirements.txt
-python app.py
+python -m spotify_slsk
 ```
 
 ## Quality gate
@@ -60,12 +60,30 @@ this is deliberate — do not weaken it:
 
 Use the `sandbox_dirs` fixture for anything touching the filesystem.
 
+## Layout
+
+```
+spotify_slsk/          the application package
+  __main__.py          entrypoint: python -m spotify_slsk
+  app.py               daemon orchestration
+  db.py                SQLite persistence
+  soulseek_api.py      slskd search/download
+  models.py utils.py log_config.py
+  webui/               Flask dashboard (templates/, static/)
+tests/                 pytest suite (conftest.py enforces isolation)
+```
+
+Everything is inside the package, so imports between modules are relative
+(`from .db import ...`). The daemon resolves `./data/playlist_tracks.db`
+relative to the working directory — run it from the repo root, which is what
+the container does (`WORKDIR /app`).
+
 ## Architecture
 
-Single long-running process (`app.py::main`) with two threads:
+Single long-running process (`spotify_slsk/app.py::main`) with two threads:
 
 1. **Daemon thread** (main) — loops over enabled playlists: fetch/diff from Spotify, download pending tracks, tag, move. Interruptible by SIGTERM via `_shutdown` Event.
-2. **Web UI thread** — Flask app from `webui/` serving the dashboard. Each request opens its own SQLite connection; WAL mode makes concurrent reads alongside the daemon's writer safe.
+2. **Web UI thread** — Flask app from `spotify_slsk/webui/` serving the dashboard. Each request opens its own SQLite connection; WAL mode makes concurrent reads alongside the daemon's writer safe.
 
 Startup order in `main()` matters and is load-bearing:
 
@@ -91,19 +109,19 @@ Docker `HEALTHCHECK` compares `HEARTBEAT_FILE` mtime against `HEARTBEAT_STALE_SE
 
 ### Module responsibilities
 
-- **`app.py`** — orchestrator. Spotify client setup, Spotify→DB env migration, startup reconciliation, cycle loop, metadata tagging via `mutagen`, file moves, ntfy. Owns the **local-file ↔ DB** matcher (`difflib`-based).
-- **`soulseek_api.py`** — `get_client()` lazy slskd factory, search waterfall (multi-query + CJK passthrough + early-stop on response count), candidate filtering (format allowlist + reported-bitrate floor + effective-bitrate floor via `_effective_mp3_kbps` + version-gate via `_version_mismatch`), sort (version tier > format > bitrate > peer upload speed), cleanup via `searches.delete` in `finally`. `refresh_from_db(conn)` reloads tunables at each cycle start; `_interruptible_sleep` honors the shared shutdown Event. Uses `rapidfuzz` for token-set scoring.
-- **`db.py`** — SQLite persistence. WAL mode + `busy_timeout=5000` + `PRAGMA user_version` migrations. Per-playlist dynamic tables (`pl_<sanitized_name>` + `pl_<…>_tried`) plus a global `playlists_meta` catalogue keyed by Spotify id and a global `settings` key-value bag. `get_setting(conn, key, default)` prefers DB, falls back to env, then default — so any env var becomes a mutable setting for free.
-- **`webui/`** — Flask dashboard (see next section).
-- **`utils.py`** — `sanitize_table_name`, `get_playlist_id`.
-- **`log_config.py`** — timezone-aware logging; `LIB_LOGLEVEL` (default WARNING) silences noisy third-party loggers independently of app `LOGLEVEL`.
+- **`spotify_slsk/app.py`** — orchestrator. Spotify client setup, Spotify→DB env migration, startup reconciliation, cycle loop, metadata tagging via `mutagen`, file moves, ntfy. Owns the **local-file ↔ DB** matcher (`difflib`-based).
+- **`spotify_slsk/soulseek_api.py`** — `get_client()` lazy slskd factory, search waterfall (multi-query + CJK passthrough + early-stop on response count), candidate filtering (format allowlist + reported-bitrate floor + effective-bitrate floor via `_effective_mp3_kbps` + version-gate via `_version_mismatch`), sort (version tier > format > bitrate > peer upload speed), cleanup via `searches.delete` in `finally`. `refresh_from_db(conn)` reloads tunables at each cycle start; `_interruptible_sleep` honors the shared shutdown Event. Uses `rapidfuzz` for token-set scoring.
+- **`spotify_slsk/db.py`** — SQLite persistence. WAL mode + `busy_timeout=5000` + `PRAGMA user_version` migrations. Per-playlist dynamic tables (`pl_<sanitized_name>` + `pl_<…>_tried`) plus a global `playlists_meta` catalogue keyed by Spotify id and a global `settings` key-value bag. `get_setting(conn, key, default)` prefers DB, falls back to env, then default — so any env var becomes a mutable setting for free.
+- **`spotify_slsk/webui/`** — Flask dashboard (see next section).
+- **`spotify_slsk/utils.py`** — `sanitize_table_name`, `get_playlist_id`.
+- **`spotify_slsk/log_config.py`** — timezone-aware logging; `LIB_LOGLEVEL` (default WARNING) silences noisy third-party loggers independently of app `LOGLEVEL`.
 
 ### Web UI
 
-Flask + Jinja2 + Pico.css + htmx. **Assets are self-hosted** in `webui/static/`
+Flask + Jinja2 + Pico.css + htmx. **Assets are self-hosted** in `spotify_slsk/webui/static/`
 (Pico 2.0.6, htmx 1.9.12) — not on a CDN. A compromised CDN could drive the
 unauthenticated mutating routes, and self-hosting is what allows the CSP to stay
-at `script-src 'self'`. `webui/static/app.css` is the small design layer on top
+at `script-src 'self'`. `spotify_slsk/webui/static/app.css` is the small design layer on top
 of Pico. Note the classless Pico build ships **no** `.secondary`/`.outline`
 classes; `app.css` defines them.
 
@@ -170,7 +188,7 @@ Deploy-time / infra (env only):
 - `SPOTIFY_PLAYLIST_URLS` — read **only on first boot** to seed the DB
 
 UI-editable (env is a default; DB override wins). All are validated on save —
-see `SETTINGS_SPEC` and `validate_setting` in `webui/__init__.py`:
+see `SETTINGS_SPEC` and `validate_setting` in `spotify_slsk/webui/__init__.py`:
 - `MIN_MATCH_SCORE` (0.62), `SLSKD_PREFERRED_FORMATS`, `SLSKD_MIN_PEER_UPLOAD_SPEED` (0),
   `SLSKD_MIN_EFFECTIVE_MP3_KBPS` (280), `SLSKD_EARLY_STOP_RESPONSES` (20),
   `SLSKD_WAIT_TIMEOUT` (60), `UPGRADE_CHECK_INTERVAL_HOURS` (168)
