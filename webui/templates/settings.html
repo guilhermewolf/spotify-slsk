@@ -18,4 +18,11 @@
   <button type="submit">Save</button>
 </form>
 
+<hr>
+<h3>ntfy</h3>
+<p class="muted">Sends one test notification to the configured NTFY_URL + NTFY_TOPIC.</p>
+<form method="POST" action="{{ url_for('test_ntfy') }}">
+  <button type="submit" class="secondary outline" style="width: auto;">Send test notification</button>
+</form>
+
 {% endblock %}

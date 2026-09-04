@@ -6,6 +6,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.classless.min.css">
   <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <script>
+    // Apply persisted theme synchronously to avoid a flash of light mode.
+    (function () {
+      try {
+        const t = localStorage.getItem('theme');
+        if (t === 'dark' || t === 'light') {
+          document.documentElement.setAttribute('data-theme', t);
+        }
+      } catch (_) { /* localStorage may be disabled */ }
+    })();
+  </script>
   <style>
     .badge { display: inline-block; padding: 0.15em 0.55em; border-radius: 0.3em; font-size: 0.75em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
     .badge-ok        { background: #2ecc71; color: #fff; }
@@ -24,6 +35,22 @@
     table td.tight { white-space: nowrap; }
     .nav-filters a { margin-right: 0.75em; }
     .nav-filters a.active { font-weight: 600; text-decoration: underline; }
+    .activity { background: var(--pico-card-background-color); border-left: 4px solid #3498db; padding: 0.6em 0.9em; margin: 0 0 1em 0; border-radius: 0.25em; }
+    .activity.idle { border-left-color: #95a5a6; }
+    .activity.downloading { border-left-color: #2ecc71; }
+    .activity.syncing { border-left-color: #3498db; }
+    .activity.upgrading { border-left-color: #9b59b6; }
+    .activity.waiting_slskd, .activity.starting, .activity.reconciling { border-left-color: #f39c12; }
+    .activity.shutting_down { border-left-color: #e74c3c; }
+    .activity .phase { font-weight: 600; text-transform: uppercase; font-size: 0.75em; letter-spacing: 0.06em; margin-right: 0.6em; }
+    .activity .ago { color: var(--pico-muted-color); font-size: 0.8em; margin-left: 0.5em; }
+    .row-active { box-shadow: 0 0 0 2px #2ecc71; }
+    .log-viewer { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.78em; background: #1e1f24; color: #e8e8e8; padding: 0.75em; border-radius: 0.3em; height: 70vh; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+    .log-line { padding: 1px 0; }
+    .log-line.WARNING { color: #f1c40f; }
+    .log-line.ERROR, .log-line.CRITICAL { color: #ff6b6b; }
+    .log-line.DEBUG { color: #95a5a6; }
+    .theme-toggle { background: none; border: 0; cursor: pointer; font-size: 1.1em; padding: 0.2em 0.5em; color: var(--pico-color); }
   </style>
 </head>
 <body>
@@ -34,10 +61,28 @@
       </ul>
       <ul>
         <li><a href="{{ url_for('dashboard') }}">Playlists</a></li>
+        <li><a href="{{ url_for('logs_page') }}">Logs</a></li>
         <li><a href="{{ url_for('settings') }}">Settings</a></li>
         <li><a href="{{ url_for('healthz') }}">Health</a></li>
+        <li>
+          <button type="button" class="theme-toggle" id="theme-toggle"
+                  title="Toggle dark mode" aria-label="Toggle dark mode">🌓</button>
+        </li>
       </ul>
     </nav>
+    <script>
+      (function () {
+        const btn = document.getElementById('theme-toggle');
+        if (!btn) return;
+        btn.addEventListener('click', () => {
+          const current = document.documentElement.getAttribute('data-theme')
+            || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+          const next = current === 'dark' ? 'light' : 'dark';
+          document.documentElement.setAttribute('data-theme', next);
+          try { localStorage.setItem('theme', next); } catch (_) { }
+        });
+      })();
+    </script>
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% for category, message in messages %}
         <div class="flash-{{ category }}">{{ message }}</div>
