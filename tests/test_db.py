@@ -211,6 +211,35 @@ class TestTriedFiles:
         db.add_tried_file(conn, "pl_test", "abc", "bad.mp3")
         assert db.get_tried_files(conn, "pl_test", "abc") == ["bad.mp3"]
 
+    def test_clear_tried_entries_actually_clears_the_history(self, conn):
+        """The rejected-filename history must be readable-then-empty.
+
+        app.handle_track_download calls clear_tried_entries after a verified
+        download so a filename rejected once isn't blacklisted forever. It
+        previously wrote to a dead `tried_files` column while the history
+        lived in the `_tried` table, making the call a silent no-op.
+        """
+        db.create_table(conn, "pl_test")
+        db.insert_track(conn, "pl_test", ("abc", "S", "A", "Alb"))
+        db.add_tried_file(conn, "pl_test", "abc", "rejected.mp3")
+        assert db.get_tried_files(conn, "pl_test", "abc") == ["rejected.mp3"]
+
+        db.clear_tried_entries(conn, "pl_test", "abc")
+
+        assert db.get_tried_files(conn, "pl_test", "abc") == []
+
+    def test_clear_tried_entries_only_affects_the_named_track(self, conn):
+        db.create_table(conn, "pl_test")
+        db.insert_track(conn, "pl_test", ("abc", "S", "A", "Alb"))
+        db.insert_track(conn, "pl_test", ("xyz", "S2", "A2", "Alb2"))
+        db.add_tried_file(conn, "pl_test", "abc", "one.mp3")
+        db.add_tried_file(conn, "pl_test", "xyz", "two.mp3")
+
+        db.clear_tried_entries(conn, "pl_test", "abc")
+
+        assert db.get_tried_files(conn, "pl_test", "abc") == []
+        assert db.get_tried_files(conn, "pl_test", "xyz") == ["two.mp3"]
+
 
 class TestUpgradeChecks:
     def _seed(self, conn, table="pl_up"):

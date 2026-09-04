@@ -1,7 +1,6 @@
 import os
 import sqlite3
 import logging
-import json
 from models import Track
 
 SCHEMA_VERSION = 3
@@ -509,11 +508,19 @@ def add_tried_file(conn, table_name, track_id, file_path):
 
 
 def clear_tried_entries(conn, playlist_name, track_id):
+    """Wipe the rejected-filename history for one track.
+
+    The history lives in the `_tried` companion table — the same place
+    get_tried_files reads and add_tried_file writes. This used to blank a
+    `tried_files` column on the main table instead, which nothing reads, so
+    every filename ever rejected for a track stayed blacklisted forever and
+    the upgrade pass could never reconsider it.
+    """
     try:
         with conn:
             conn.execute(
-                f'UPDATE "{playlist_name}" SET tried_files = ? WHERE id = ?',
-                (json.dumps([]), track_id),
+                f'DELETE FROM "{playlist_name}_tried" WHERE track_id = ?',
+                (track_id,),
             )
         logging.info(f"Cleared tried entries for track {track_id} in {playlist_name}")
     except sqlite3.Error as e:
