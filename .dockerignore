@@ -1,0 +1,43 @@
+# The Dockerfile does `COPY . /app/`. Without this file a local
+# `docker compose up --build` bakes the operator's real .env (Spotify
+# secrets, slskd API key), the production SQLite database, the entire music
+# library and slskd's data-protection keys into the image layers. CI builds
+# from a clean checkout so they were never affected — local builds were.
+
+# Secrets and live state
+.env
+.env.*
+!.env-example
+data/
+data-test/
+downloads/
+playlists/
+playlists-test/
+slsk_app/
+*.db
+*.db-wal
+*.db-shm
+
+# VCS and tooling
+.git/
+.github/
+.gitignore
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.cache
+.claude/
+graphify-out/
+
+# Development-only files — not needed at runtime
+tests/
+requirements-dev.txt
+docker-compose*.yaml
+Makefile
+CLAUDE.md
+README.md
+test.py
+.DS_Store
