@@ -253,26 +253,61 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
     @app.route("/")
     def dashboard():
         playlists = db.list_playlists(g.conn)
+        totals = {
+            "total": 0,
+            "downloaded": 0,
+            "pending": 0,
+            "retrying": 0,
+            "suspended": 0,
+        }
         for pl in playlists:
             pl["stats"] = db.playlist_stats(g.conn, pl["table_name"])
-        return render_template("dashboard.html", playlists=playlists)
+            # Disabled playlists still hold tracks, but counting them in the
+            # library totals would misrepresent what the daemon is working on.
+            if pl["enabled"]:
+                for key in totals:
+                    totals[key] += pl["stats"][key]
+        return render_template(
+            "dashboard.html", playlists=playlists, totals=totals
+        )
 
     @app.route("/playlist/<playlist_id>")
     def playlist_detail(playlist_id):
         _, table_name, name, last_synced = db.get_playlist_meta(g.conn, playlist_id)
         if not table_name:
             abort(404)
-        tracks = db.list_tracks(g.conn, table_name)
+        all_tracks = db.list_tracks(g.conn, table_name)
+        # Counts come from the unfiltered list so every filter chip can show
+        # its size — the previous page only knew the total.
+        counts = {"all": len(all_tracks)}
+        for status in ("downloaded", "pending", "retrying", "suspended"):
+            counts[status] = sum(1 for t in all_tracks if t["status"] == status)
+
         status_filter = request.args.get("status")
-        if status_filter:
-            tracks = [t for t in tracks if t["status"] == status_filter]
+        tracks = (
+            [t for t in all_tracks if t["status"] == status_filter]
+            if status_filter
+            else all_tracks
+        )
+        query = (request.args.get("q") or "").strip()
+        if query:
+            needle = query.lower()
+            tracks = [
+                t
+                for t in tracks
+                if needle in (t["name"] or "").lower()
+                or needle in (t["artists"] or "").lower()
+                or needle in (t["album"] or "").lower()
+            ]
         return render_template(
             "playlist.html",
             playlist_id=playlist_id,
             name=name,
             last_synced=last_synced,
             tracks=tracks,
+            counts=counts,
             status_filter=status_filter,
+            query=query,
         )
 
     @app.route("/track/<playlist_id>/<track_id>")
@@ -434,8 +469,13 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
 
     # ---- ops ----------------------------------------------------------
 
-    @app.route("/healthz")
-    def healthz():
+    def _health_snapshot() -> dict:
+        """Shared by /healthz and the header badge, so they cannot disagree.
+
+        Deliberately cheap: a PRAGMA and a stat() call. No slskd round-trip —
+        a health endpoint that depends on a remote service fails when that
+        service is slow, which is exactly when you need it to answer.
+        """
         try:
             version = g.conn.execute("PRAGMA user_version").fetchone()[0]
             heartbeat_file = os.getenv("HEARTBEAT_FILE", "/tmp/heartbeat")
@@ -446,18 +486,35 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
             ok = version == db.SCHEMA_VERSION and (
                 heartbeat_age is None or heartbeat_age < stale
             )
-            return (
-                jsonify(
-                    {
-                        "ok": ok,
-                        "schema_version": version,
-                        "heartbeat_age_seconds": heartbeat_age,
-                    }
-                ),
-                200 if ok else 503,
-            )
+            if not ok:
+                reason = (
+                    f"schema version {version}, expected {db.SCHEMA_VERSION}"
+                    if version != db.SCHEMA_VERSION
+                    else f"no daemon heartbeat for {int(heartbeat_age)}s"
+                )
+            elif heartbeat_age is None:
+                reason = "waiting for the daemon's first heartbeat"
+            else:
+                reason = f"daemon active {int(heartbeat_age)}s ago"
+            return {
+                "ok": ok,
+                "schema_version": version,
+                "heartbeat_age_seconds": heartbeat_age,
+                "reason": reason,
+            }
         except Exception as e:
-            return jsonify({"ok": False, "error": str(e)}), 503
+            return {"ok": False, "error": str(e), "reason": str(e)}
+
+    @app.context_processor
+    def _inject_health():
+        # Every page shows the daemon's status in the header, so it must not
+        # depend on a single route remembering to pass it.
+        return {"health": _health_snapshot()}
+
+    @app.route("/healthz")
+    def healthz():
+        snapshot = _health_snapshot()
+        return jsonify(snapshot), 200 if snapshot["ok"] else 503
 
     return app
 

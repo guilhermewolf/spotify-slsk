@@ -1,39 +1,72 @@
 {% extends "base.html" %}
+{% set active_page = 'dashboard' %}
 {% block title %}{{ track.name }} · spotify-slsk{% endblock %}
 {% block content %}
 
-<p class="muted"><a href="{{ url_for('playlist_detail', playlist_id=playlist_id) }}">« {{ playlist_name }}</a></p>
-<h2>{{ track.name }}</h2>
-<p>{{ track.artists }} — <em>{{ track.album }}</em></p>
+<a class="back-link" href="{{ url_for('playlist_detail', playlist_id=playlist_id) }}">
+  &larr; {{ playlist_name }}
+</a>
 
-<table>
-  <tr><th>Status</th>
-      <td>
-        {% if track.status == 'downloaded' %}<span class="badge badge-ok">downloaded</span>
-        {% elif track.status == 'suspended' %}<span class="badge badge-suspended">suspended</span>
-        {% elif track.status == 'retrying' %}<span class="badge badge-retrying">retrying</span>
-        {% else %}<span class="badge badge-pending">pending</span>
-        {% endif %}
-      </td></tr>
-  <tr><th>Path</th><td>{% if track.path %}<code>{{ track.path }}</code>{% else %}—{% endif %}</td></tr>
-  <tr><th>Attempts</th><td>{{ track.attempts }}</td></tr>
-  <tr><th>Last attempt</th><td>{{ track.last_attempt or '—' }}</td></tr>
-  <tr><th>Suspended until</th><td>{{ track.suspended_until or '—' }}</td></tr>
-</table>
+<div class="page-head">
+  <div>
+    <h1>{{ track.name }}</h1>
+    <p class="subtle">{{ track.artists }} · {{ track.album }}</p>
+  </div>
+  <span class="badge badge-{{ track.status }}">{{ track.status }}</span>
+</div>
+
+{# Lead with the answer to "what is happening with this track?" #}
+<p>
+  {% if track.status == 'downloaded' %}
+    Downloaded and tagged. The file is in your library.
+  {% elif track.status == 'suspended' %}
+    Failed {{ track.attempts }} time{{ '' if track.attempts == 1 else 's' }}, so it is
+    paused until <strong>{{ track.suspended_until }}</strong>. Retry now to clear the
+    pause and try again on the next cycle.
+  {% elif track.status == 'retrying' %}
+    Last attempt failed; it will be tried again on the next cycle.
+  {% else %}
+    Waiting for its first download attempt.
+  {% endif %}
+</p>
+
+<dl class="detail-grid">
+  <dt>File</dt>
+  <dd>{% if track.path %}<code>{{ track.path }}</code>{% else %}—{% endif %}</dd>
+  <dt>Attempts</dt>
+  <dd>{{ track.attempts }}</dd>
+  <dt>Last attempt</dt>
+  <dd>{{ track.last_attempt or '—' }}</dd>
+  <dt>Paused until</dt>
+  <dd>{{ track.suspended_until or '—' }}</dd>
+</dl>
 
 {% if not track.downloaded %}
-<form method="POST" action="{{ url_for('retry_track', playlist_id=playlist_id, track_id=track.id) }}">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-  <button type="submit">Retry now</button>
-  <small class="muted">Clears attempts, suspension, and the rejected-filename history.</small>
+<form method="POST"
+      action="{{ url_for('retry_track', playlist_id=playlist_id, track_id=track.id) }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <button type="submit" style="width:auto">Retry now</button>
+  <small class="subtle">
+    Clears the attempt count, any pause, and the rejected-file list below, then starts a cycle.
+  </small>
 </form>
 {% endif %}
 
 {% if track.tried %}
-<h4>Rejected filenames</h4>
-<ul>
-  {% for f in track.tried %}<li><code>{{ f }}</code></li>{% endfor %}
-</ul>
+<h2 style="font-size:1.05rem;margin-top:2rem;">Rejected files</h2>
+<p class="subtle">
+  Candidates already tried and rejected — wrong version, failed transfer, or metadata that
+  didn't match. They are skipped on future searches until you retry.
+</p>
+<div class="table-wrap">
+  <table class="track-table">
+    <tbody>
+      {% for f in track.tried %}
+      <tr><td><code>{{ f }}</code></td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
 {% endif %}
 
 {% endblock %}

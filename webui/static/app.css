@@ -1,0 +1,458 @@
+/* spotify-slsk dashboard styles.
+ *
+ * Deliberately small: Pico supplies typography, forms and dark mode, and this
+ * file only adds what a media-library dashboard needs on top — status colour,
+ * progress, stat rows and the playlist/track layouts. Colours are defined as
+ * tokens that follow Pico's light/dark switch so both themes stay legible.
+ */
+
+:root {
+  --ss-ok: #16a34a;
+  --ss-ok-bg: #dcfce7;
+  --ss-pending: #64748b;
+  --ss-pending-bg: #e2e8f0;
+  --ss-retry: #b45309;
+  --ss-retry-bg: #fef3c7;
+  --ss-suspended: #b91c1c;
+  --ss-suspended-bg: #fee2e2;
+  --ss-radius: 0.4rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ss-ok-bg: #052e16;
+    --ss-pending-bg: #1e293b;
+    --ss-retry-bg: #422006;
+    --ss-suspended-bg: #450a0a;
+    --ss-ok: #4ade80;
+    --ss-pending: #94a3b8;
+    --ss-retry: #fbbf24;
+    --ss-suspended: #f87171;
+  }
+}
+
+/* ---- shell ---------------------------------------------------------- */
+
+body > main {
+  max-width: 68rem;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 4rem;
+}
+
+.skip-link {
+  position: absolute;
+  left: -999px;
+}
+.skip-link:focus {
+  left: 1rem;
+  top: 0.5rem;
+  z-index: 10;
+  background: var(--pico-background-color);
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--ss-radius);
+}
+
+.site-header {
+  border-bottom: 1px solid var(--pico-muted-border-color);
+  background: var(--pico-card-background-color);
+}
+.site-nav {
+  max-width: 68rem;
+  margin: 0 auto;
+  padding: 0.75rem 1rem;
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+}
+.brand {
+  font-weight: 700;
+  text-decoration: none;
+  color: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.brand-mark {
+  width: 0.65rem;
+  height: 0.65rem;
+  border-radius: 50%;
+  background: var(--ss-ok);
+}
+.nav-links {
+  display: flex;
+  gap: 1rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.nav-links a {
+  text-decoration: none;
+  color: var(--pico-muted-color);
+}
+.nav-links a[aria-current="page"] {
+  color: var(--pico-color);
+  font-weight: 600;
+}
+.health {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  text-decoration: none;
+  color: var(--pico-muted-color);
+}
+.health .dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: var(--ss-ok);
+}
+.health-bad .dot { background: var(--ss-suspended); }
+.health-bad { color: var(--ss-suspended); }
+
+/* ---- flashes -------------------------------------------------------- */
+
+.flashes {
+  max-width: 68rem;
+  margin: 1rem auto 0;
+  padding: 0 1rem;
+}
+.flash {
+  margin: 0 0 0.5rem;
+  padding: 0.6rem 0.9rem;
+  border-radius: var(--ss-radius);
+  border-left: 4px solid;
+}
+.flash-success {
+  border-color: var(--ss-ok);
+  background: var(--ss-ok-bg);
+  color: var(--ss-ok);
+}
+.flash-error {
+  border-color: var(--ss-suspended);
+  background: var(--ss-suspended-bg);
+  color: var(--ss-suspended);
+}
+
+/* ---- page furniture ------------------------------------------------- */
+
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+.page-head h1 {
+  margin: 0;
+  font-size: 1.5rem;
+  line-height: 1.2;
+}
+.subtle {
+  color: var(--pico-muted-color);
+  font-size: 0.85rem;
+  margin: 0.25rem 0 0;
+}
+.back-link {
+  display: inline-block;
+  font-size: 0.85rem;
+  margin-bottom: 0.75rem;
+}
+
+/* ---- summary tiles -------------------------------------------------- */
+
+.summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+.tile {
+  background: var(--pico-card-background-color);
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--ss-radius);
+  padding: 0.75rem 0.9rem;
+}
+.tile .value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.tile .label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--pico-muted-color);
+}
+.tile-ok .value { color: var(--ss-ok); }
+.tile-retry .value { color: var(--ss-retry); }
+.tile-suspended .value { color: var(--ss-suspended); }
+
+/* ---- playlist cards ------------------------------------------------- */
+
+.playlist-card {
+  background: var(--pico-card-background-color);
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--ss-radius);
+  padding: 1rem;
+  margin-bottom: 0.75rem;
+}
+.playlist-card.is-disabled { opacity: 0.65; }
+.playlist-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.playlist-card-head h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+.playlist-card-head a { text-decoration: none; }
+.pct {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.progress {
+  height: 0.5rem;
+  background: var(--pico-muted-border-color);
+  border-radius: 999px;
+  overflow: hidden;
+  margin: 0.6rem 0 0.5rem;
+}
+.progress-bar {
+  height: 100%;
+  background: var(--ss-ok);
+  transition: width 0.4s ease;
+}
+
+.counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  font-size: 0.85rem;
+  color: var(--pico-muted-color);
+  margin: 0;
+}
+.counts strong {
+  color: var(--pico-color);
+  font-variant-numeric: tabular-nums;
+}
+
+.card-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.85rem;
+}
+.card-actions form { margin: 0; }
+.card-actions button,
+.filter-form button {
+  margin: 0;
+  width: auto;
+  padding: 0.35rem 0.8rem;
+  font-size: 0.85rem;
+}
+
+/* Destructive actions must look destructive, not merely available. */
+button.danger {
+  --pico-background-color: transparent;
+  border-color: var(--ss-suspended);
+  color: var(--ss-suspended);
+  background: transparent;
+}
+button.danger:hover,
+button.danger:focus {
+  background: var(--ss-suspended);
+  color: #fff;
+}
+
+/* ---- badges --------------------------------------------------------- */
+
+.badge {
+  display: inline-block;
+  padding: 0.15em 0.6em;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.badge-downloaded { background: var(--ss-ok-bg); color: var(--ss-ok); }
+.badge-pending    { background: var(--ss-pending-bg); color: var(--ss-pending); }
+.badge-retrying   { background: var(--ss-retry-bg); color: var(--ss-retry); }
+.badge-suspended  { background: var(--ss-suspended-bg); color: var(--ss-suspended); }
+.badge-disabled   { background: var(--ss-pending-bg); color: var(--ss-pending); }
+
+/* ---- filters -------------------------------------------------------- */
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 1rem 0;
+  padding: 0;
+  list-style: none;
+}
+.filters a {
+  display: inline-block;
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: 999px;
+  font-size: 0.85rem;
+  text-decoration: none;
+  color: var(--pico-muted-color);
+}
+.filters a[aria-current="true"] {
+  border-color: currentColor;
+  color: var(--pico-color);
+  font-weight: 600;
+}
+.filter-form {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin: 0 0 1rem;
+}
+.filter-form input { margin: 0; }
+
+/* ---- tables --------------------------------------------------------- */
+
+.table-wrap {
+  overflow-x: auto;               /* wide track tables scroll, page doesn't */
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--ss-radius);
+}
+.table-wrap table { margin: 0; }
+.track-table td, .track-table th { padding: 0.5rem 0.75rem; }
+.track-table .nowrap { white-space: nowrap; }
+.track-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.track-title { font-weight: 600; }
+.track-table tbody tr:hover { background: var(--pico-card-sectioning-background-color); }
+
+/* ---- detail lists --------------------------------------------------- */
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.4rem 1.25rem;
+  margin: 0 0 1.5rem;
+}
+.detail-grid dt {
+  color: var(--pico-muted-color);
+  font-size: 0.85rem;
+}
+.detail-grid dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* ---- empty states --------------------------------------------------- */
+
+.empty {
+  text-align: center;
+  padding: 2.5rem 1rem;
+  border: 1px dashed var(--pico-muted-border-color);
+  border-radius: var(--ss-radius);
+  color: var(--pico-muted-color);
+}
+.empty h2 {
+  margin: 0 0 0.35rem;
+  font-size: 1.05rem;
+  color: var(--pico-color);
+}
+.empty p { margin: 0; }
+
+/* ---- settings ------------------------------------------------------- */
+
+.setting {
+  padding: 0.9rem 0;
+  border-bottom: 1px solid var(--pico-muted-border-color);
+}
+.setting:last-of-type { border-bottom: none; }
+.setting label { font-weight: 600; margin-bottom: 0.15rem; }
+.setting .help {
+  color: var(--pico-muted-color);
+  font-size: 0.85rem;
+  display: block;
+  margin-bottom: 0.4rem;
+}
+.setting input { margin-bottom: 0.25rem; }
+.setting .effective {
+  font-size: 0.8rem;
+  color: var(--pico-muted-color);
+}
+.setting code { font-size: 0.8rem; }
+
+/* htmx: dim a region while its background refresh is in flight. */
+.htmx-request { opacity: 0.6; transition: opacity 0.2s ease; }
+
+@media (max-width: 34rem) {
+  .site-nav { gap: 0.75rem; }
+  .health { margin-left: 0; width: 100%; }
+  .page-head h1 { font-size: 1.25rem; }
+}
+
+/* ---- buttons -------------------------------------------------------- */
+/* The classless Pico build ships no .secondary/.outline variants, so every
+ * button rendered as a filled primary and the visual hierarchy was flat.
+ * These define the two variants the templates ask for. */
+
+button.secondary,
+[role="button"].secondary,
+button.outline,
+[role="button"].outline {
+  background: transparent;
+  border: 1px solid var(--pico-primary);
+  /* NOT var(--pico-color): Pico scopes that to the inverse (white) inside a
+     button, which renders transparent-background buttons invisible. */
+  color: var(--pico-primary);
+}
+button.secondary:hover,
+[role="button"].secondary:hover,
+button.outline:hover,
+[role="button"].outline:hover,
+button.secondary:focus,
+[role="button"].secondary:focus {
+  background: var(--pico-primary);
+  border-color: var(--pico-primary);
+  color: var(--pico-primary-inverse);
+}
+
+.card-actions [role="button"] {
+  padding: 0.35rem 0.8rem;
+  font-size: 0.85rem;
+  text-decoration: none;
+  line-height: 1.5;
+}
+
+/* danger is declared after the variants above so it wins on .outline.danger */
+button.danger,
+button.outline.danger {
+  border-color: var(--ss-suspended);
+  color: var(--ss-suspended);
+  background: transparent;
+}
+button.danger:hover,
+button.outline.danger:hover,
+button.danger:focus,
+button.outline.danger:focus {
+  background: var(--ss-suspended);
+  border-color: var(--ss-suspended);
+  color: #fff;
+}
+
+/* Flex children stretch by default; keep action buttons at their natural
+   width so the search field takes the free space, not the button. */
+.filter-form button,
+.filter-form [role="button"] { flex: 0 0 auto; }

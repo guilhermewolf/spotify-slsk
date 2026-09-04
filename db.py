@@ -288,7 +288,14 @@ def playlist_stats(conn, table_name: str) -> dict:
             f'    (suspended_until IS NULL OR suspended_until < CURRENT_TIMESTAMP) '
             f'    THEN 1 ELSE 0 END), 0), '
             f'  COALESCE(SUM(CASE WHEN downloaded = 0 AND suspended_until IS NOT NULL '
-            f'    AND suspended_until >= CURRENT_TIMESTAMP THEN 1 ELSE 0 END), 0) '
+            f'    AND suspended_until >= CURRENT_TIMESTAMP THEN 1 ELSE 0 END), 0), '
+            # "retrying" is a subset of "pending": not downloaded, not
+            # currently suspended, but has already failed at least once. The
+            # dashboard shows it separately so a user can tell "not tried yet"
+            # from "tried and failed".
+            f'  COALESCE(SUM(CASE WHEN downloaded = 0 AND attempts > 0 AND '
+            f'    (suspended_until IS NULL OR suspended_until < CURRENT_TIMESTAMP) '
+            f'    THEN 1 ELSE 0 END), 0) '
             f'FROM "{table_name}"'
         ).fetchone()
         return {
@@ -296,10 +303,17 @@ def playlist_stats(conn, table_name: str) -> dict:
             "downloaded": row[1],
             "pending": row[2],
             "suspended": row[3],
+            "retrying": row[4],
         }
     except sqlite3.Error as e:
         logging.warning(f"Could not get stats for {table_name}: {e}")
-        return {"total": 0, "downloaded": 0, "pending": 0, "suspended": 0}
+        return {
+            "total": 0,
+            "downloaded": 0,
+            "pending": 0,
+            "suspended": 0,
+            "retrying": 0,
+        }
 
 
 def _track_status(downloaded, attempts, suspended_until, now):

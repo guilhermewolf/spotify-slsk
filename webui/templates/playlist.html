@@ -1,55 +1,112 @@
 {% extends "base.html" %}
+{% set active_page = 'dashboard' %}
 {% block title %}{{ name }} · spotify-slsk{% endblock %}
 {% block content %}
 
-<p class="muted"><a href="{{ url_for('dashboard') }}">« Dashboard</a></p>
-<h2>{{ name }}</h2>
-<p class="muted">Last synced: {{ last_synced or 'never' }}</p>
+<a class="back-link" href="{{ url_for('dashboard') }}">&larr; All playlists</a>
 
-<form class="inline-form" method="POST" action="{{ url_for('refresh_playlist', playlist_id=playlist_id) }}">
+<div class="page-head">
+  <div>
+    <h1>{{ name }}</h1>
+    <p class="subtle">Last synced {{ last_synced or 'never' }}</p>
+  </div>
+  <form method="POST" action="{{ url_for('refresh_playlist', playlist_id=playlist_id) }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-  <button type="submit" class="secondary outline">Force re-sync</button>
-</form>
+    <button type="submit" class="secondary outline">Re-sync from Spotify</button>
+  </form>
+</div>
 
-<nav class="nav-filters" style="margin-top: 1em;">
-  <a href="{{ url_for('playlist_detail', playlist_id=playlist_id) }}"
-     class="{{ 'active' if not status_filter }}">All ({{ tracks|length }})</a>
-  <a href="{{ url_for('playlist_detail', playlist_id=playlist_id, status='downloaded') }}"
-     class="{{ 'active' if status_filter == 'downloaded' }}">Downloaded</a>
-  <a href="{{ url_for('playlist_detail', playlist_id=playlist_id, status='pending') }}"
-     class="{{ 'active' if status_filter == 'pending' }}">Pending</a>
-  <a href="{{ url_for('playlist_detail', playlist_id=playlist_id, status='retrying') }}"
-     class="{{ 'active' if status_filter == 'retrying' }}">Retrying</a>
-  <a href="{{ url_for('playlist_detail', playlist_id=playlist_id, status='suspended') }}"
-     class="{{ 'active' if status_filter == 'suspended' }}">Suspended</a>
+<nav aria-label="Filter tracks by status">
+  <ul class="filters">
+    {# (label, status value, count) — a chip is only useful with its size. #}
+    {% set chips = [
+      ('All', none, counts.all),
+      ('Downloaded', 'downloaded', counts.downloaded),
+      ('Pending', 'pending', counts.pending),
+      ('Retrying', 'retrying', counts.retrying),
+      ('Suspended', 'suspended', counts.suspended)
+    ] %}
+    {% for label, value, count in chips %}
+    <li>
+      <a href="{{ url_for('playlist_detail', playlist_id=playlist_id, status=value, q=query or none) }}"
+         aria-current="{{ 'true' if status_filter == value else 'false' }}">
+        {{ label }} <span class="subtle">{{ count }}</span>
+      </a>
+    </li>
+    {% endfor %}
+  </ul>
 </nav>
 
-<table>
-  <thead>
-    <tr>
-      <th>Title</th><th>Artist</th><th>Album</th>
-      <th>Status</th><th class="tight">Attempts</th>
-    </tr>
-  </thead>
-  <tbody>
-  {% for t in tracks %}
-    <tr>
-      <td><a href="{{ url_for('track_detail', playlist_id=playlist_id, track_id=t.id) }}">{{ t.name }}</a></td>
-      <td>{{ t.artists }}</td>
-      <td>{{ t.album }}</td>
-      <td>
-        {% if t.status == 'downloaded' %}<span class="badge badge-ok">downloaded</span>
-        {% elif t.status == 'suspended' %}<span class="badge badge-suspended">suspended</span>
-        {% elif t.status == 'retrying' %}<span class="badge badge-retrying">retrying</span>
-        {% else %}<span class="badge badge-pending">pending</span>
-        {% endif %}
-      </td>
-      <td class="tight">{{ t.attempts }}</td>
-    </tr>
-  {% else %}
-    <tr><td colspan="5" class="muted">No tracks match this filter.</td></tr>
-  {% endfor %}
-  </tbody>
-</table>
+<form class="filter-form" method="GET" role="search"
+      action="{{ url_for('playlist_detail', playlist_id=playlist_id) }}">
+  {% if status_filter %}<input type="hidden" name="status" value="{{ status_filter }}">{% endif %}
+  <input type="search" id="q" name="q" value="{{ query }}" style="flex:1"
+         aria-label="Filter tracks by title, artist or album"
+         placeholder="Filter by title, artist or album…">
+  <button type="submit" class="secondary outline">Search</button>
+  {% if query %}
+    <a role="button" class="secondary outline"
+       href="{{ url_for('playlist_detail', playlist_id=playlist_id, status=status_filter or none) }}">Clear</a>
+  {% endif %}
+</form>
+
+{% if tracks %}
+<div class="table-wrap">
+  <table class="track-table">
+    <thead>
+      <tr>
+        <th scope="col">Track</th>
+        <th scope="col">Album</th>
+        <th scope="col">Status</th>
+        <th scope="col" class="num">Tries</th>
+        <th scope="col">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for t in tracks %}
+      <tr>
+        <td>
+          <a class="track-title"
+             href="{{ url_for('track_detail', playlist_id=playlist_id, track_id=t.id) }}">{{ t.name }}</a>
+          <div class="subtle">{{ t.artists }}</div>
+        </td>
+        <td class="subtle">{{ t.album }}</td>
+        <td class="nowrap">
+          <span class="badge badge-{{ t.status }}">{{ t.status }}</span>
+          {% if t.status == 'suspended' and t.suspended_until %}
+            <div class="subtle">retries after {{ t.suspended_until }}</div>
+          {% elif t.status == 'retrying' and t.last_attempt %}
+            <div class="subtle">last tried {{ t.last_attempt }}</div>
+          {% endif %}
+        </td>
+        <td class="num">{{ t.attempts }}</td>
+        <td class="nowrap">
+          {% if not t.downloaded %}
+          <form method="POST"
+                action="{{ url_for('retry_track', playlist_id=playlist_id, track_id=t.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="secondary outline">Retry</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty">
+  <h2>Nothing here</h2>
+  <p>
+    {% if query %}
+      No track matches “{{ query }}”{{ ' with that status' if status_filter else '' }}.
+    {% elif status_filter %}
+      No tracks are {{ status_filter }} right now.
+    {% else %}
+      This playlist has no tracks yet — the next sync will populate it.
+    {% endif %}
+  </p>
+</div>
+{% endif %}
 
 {% endblock %}
