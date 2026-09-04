@@ -410,3 +410,49 @@ class TestSettingsValidation:
     def test_removed_dead_knob_is_not_offered(self, client):
         """SLSKD_MAX_RETRIES was configurable but wired to nothing."""
         assert b"SLSKD_MAX_RETRIES" not in client.get("/settings").data
+
+
+class TestHealthz:
+    """The endpoint Docker and the operator rely on to spot a wedged daemon."""
+
+    def test_ok_when_schema_current_and_no_heartbeat_yet(self, client):
+        body = client.get("/healthz").get_json()
+        assert body["ok"] is True
+        assert body["schema_version"] == db.SCHEMA_VERSION
+
+    def test_fresh_heartbeat_is_healthy(self, client, tmp_path, monkeypatch):
+        hb = tmp_path / "hb"
+        hb.write_text("now")
+        monkeypatch.setenv("HEARTBEAT_FILE", str(hb))
+        monkeypatch.setenv("HEARTBEAT_STALE_SECONDS", "900")
+
+        r = client.get("/healthz")
+        assert r.status_code == 200
+        assert r.get_json()["ok"] is True
+        assert r.get_json()["heartbeat_age_seconds"] < 900
+
+    def test_stale_heartbeat_reports_503(self, client, tmp_path, monkeypatch):
+        hb = tmp_path / "hb"
+        hb.write_text("old")
+        os.utime(hb, (0, 0))  # epoch: definitively stale
+        monkeypatch.setenv("HEARTBEAT_FILE", str(hb))
+        monkeypatch.setenv("HEARTBEAT_STALE_SECONDS", "900")
+
+        r = client.get("/healthz")
+        assert r.status_code == 503
+        assert r.get_json()["ok"] is False
+
+    def test_healthz_needs_no_csrf_token(self, client):
+        assert client.get("/healthz").status_code in (200, 503)
+
+
+class TestDatabaseUnavailable:
+    def test_corrupt_database_returns_503_not_an_empty_page(self, tmp_path):
+        """A connection that only *looks* usable would render empty pages."""
+        bad = tmp_path / "corrupt.db"
+        bad.write_bytes(b"not a sqlite file" * 50)
+        app = create_app(str(bad), spotify_client=None)
+        app.config.update(TESTING=True)
+
+        r = app.test_client().get("/")
+        assert r.status_code == 503

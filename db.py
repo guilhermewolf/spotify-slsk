@@ -91,10 +91,23 @@ def create_connection(db_file):
         _ensure_playlists_meta_table(conn)
         _ensure_settings_table(conn)
         _ensure_schema_version(conn)
+
+        # sqlite3.connect() succeeds on a corrupt or non-SQLite file — the
+        # error only surfaces on first use, and every helper above logs and
+        # swallows sqlite3.Error. Without this probe we would hand back a
+        # connection on which nothing works: the webui (which only checks for
+        # None) would render empty pages instead of returning 503, and the
+        # daemon would run cycles that silently do nothing.
+        conn.execute("SELECT 1 FROM playlists_meta LIMIT 1").fetchone()
+
         logging.info(f"Connected to SQLite database: {db_file}")
         return conn
     except sqlite3.Error as e:
         logging.error(f"Error connecting to SQLite: {e}")
+        try:
+            conn.close()
+        except Exception:
+            pass
         return None
 
 

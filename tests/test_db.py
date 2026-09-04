@@ -3,6 +3,7 @@
 Using a file is necessary because WAL mode on :memory: is silently demoted.
 """
 import os
+import sqlite3
 import tempfile
 
 os.environ.setdefault("SLSKD_HOST_URL", "http://localhost")
@@ -286,3 +287,82 @@ class TestUpgradeChecks:
             )
         out = db.get_upgrade_candidates(conn, table, 168)
         assert sorted(t.id for t, _ in out) == ["a", "b"]
+
+
+class TestSchemaMigrations:
+    """CLAUDE.md promises older DBs upgrade automatically. Nothing tested it.
+
+    Every other fixture starts from create_connection, which always produces
+    the current schema — so the ALTER TABLE guards were never exercised
+    against an actually-old database.
+    """
+
+    def test_v2_playlists_meta_gains_enabled_and_added_at(self, tmp_path):
+        path = str(tmp_path / "old.db")
+        raw = sqlite3.connect(path)
+        # The pre-v3 shape: no `enabled`, no `added_at`.
+        raw.execute(
+            "CREATE TABLE playlists_meta ("
+            "playlist_id TEXT PRIMARY KEY, table_name TEXT NOT NULL, "
+            "name TEXT NOT NULL, snapshot_id TEXT, last_synced TIMESTAMP)"
+        )
+        raw.execute(
+            "INSERT INTO playlists_meta VALUES ('pid-old','pl_old','Old',"
+            "'snap',NULL)"
+        )
+        raw.commit()
+        raw.close()
+
+        conn = db.create_connection(path)
+        assert conn is not None
+
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(playlists_meta)")}
+        assert {"enabled", "added_at"} <= cols
+
+        rows = db.list_playlists(conn)
+        assert len(rows) == 1, "pre-existing playlist lost during migration"
+        assert rows[0]["playlist_id"] == "pid-old"
+        assert rows[0]["enabled"] is True, "migrated playlist should default to enabled"
+        conn.close()
+
+    def test_playlist_table_gains_last_upgrade_check(self, tmp_path):
+        path = str(tmp_path / "old.db")
+        conn = db.create_connection(path)
+        # A per-playlist table created before the upgrade-pass feature.
+        conn.execute(
+            'CREATE TABLE "pl_legacy" ('
+            "id TEXT PRIMARY KEY, name TEXT NOT NULL, artists TEXT NOT NULL, "
+            "album TEXT NOT NULL, downloaded INTEGER DEFAULT 0, path TEXT, "
+            "attempts INTEGER DEFAULT 0, last_attempt TIMESTAMP, "
+            "suspended_until TIMESTAMP, tried_files TEXT DEFAULT '')"
+        )
+        conn.execute(
+            "INSERT INTO pl_legacy (id, name, artists, album, downloaded) "
+            "VALUES ('t1','S','A','Alb',1)"
+        )
+        conn.commit()
+
+        db.create_table(conn, "pl_legacy")
+
+        cols = {r[1] for r in conn.execute('PRAGMA table_info("pl_legacy")')}
+        assert "last_upgrade_check" in cols
+        # And the feature that needs the column works against the old row.
+        assert db.get_upgrade_candidates(conn, "pl_legacy", 1)[0][0].id == "t1"
+        conn.close()
+
+    def test_existing_rows_survive_reopening(self, tmp_path):
+        path = str(tmp_path / "reopen.db")
+        conn = db.create_connection(path)
+        db.create_table(conn, "pl_x")
+        db.insert_track(conn, "pl_x", ("t1", "S", "A", "Alb"))
+        conn.close()
+
+        conn = db.create_connection(path)
+        assert [r[0] for r in db.fetch_all_tracks(conn, "pl_x")] == ["t1"]
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+        conn.close()
+
+    def test_corrupted_database_returns_none_rather_than_raising(self, tmp_path):
+        path = tmp_path / "corrupt.db"
+        path.write_bytes(b"this is definitely not a sqlite database" * 10)
+        assert db.create_connection(str(path)) is None
