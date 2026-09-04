@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% set active_page = 'settings' %}
+{% block title %}Settings · spotify-slsk{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Settings</h1>
+    <p class="subtle">
+      Stored in the database and re-read at the start of every cycle, so changes
+      apply without a restart. Leave a field empty to fall back to the environment
+      variable, then the built-in default.
+    </p>
+  </div>
+</div>
+
+{# Two groups: what counts as an acceptable file, and how the search behaves.
+   Keys are matched explicitly so a new setting must be placed deliberately. #}
+{% set groups = [
+  ('Match quality', 'What counts as an acceptable file',
+   ['MIN_MATCH_SCORE', 'SLSKD_PREFERRED_FORMATS', 'SLSKD_MIN_EFFECTIVE_MP3_KBPS']),
+  ('Search & transfers', 'How the daemon talks to slskd',
+   ['SLSKD_MIN_PEER_UPLOAD_SPEED', 'SLSKD_EARLY_STOP_RESPONSES', 'SLSKD_WAIT_TIMEOUT',
+    'UPGRADE_CHECK_INTERVAL_HOURS'])
+] %}
+
+<form method="POST">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+  {% for group_name, group_help, keys in groups %}
+  <article>
+    <header>
+      <strong>{{ group_name }}</strong>
+      <div class="subtle">{{ group_help }}</div>
+    </header>
+
+    {% for key, default, help_text, kind in spec %}
+      {% if key in keys %}
+      <div class="setting">
+        <label for="{{ key }}">{{ key }}</label>
+        <span class="help" id="{{ key }}_help">{{ help_text }}</span>
+        <input type="text" id="{{ key }}" name="{{ key }}"
+               value="{{ overrides.get(key, '') }}"
+               placeholder="{{ effective[key] }}"
+               aria-describedby="{{ key }}_help {{ key }}_effective">
+        <span class="effective" id="{{ key }}_effective">
+          In effect: <code>{{ effective[key] }}</code>
+          {%- if overrides.get(key) %} (overridden here)
+          {%- else %} (default <code>{{ default }}</code>){% endif %}
+        </span>
+      </div>
+      {% endif %}
+    {% endfor %}
+  </article>
+  {% endfor %}
+
+  <button type="submit" style="width:auto">Save settings</button>
+</form>
+
+<article>
+  <header>
+    <strong>Notifications</strong>
+    <div class="subtle">ntfy is configured by environment variable, not here</div>
+  </header>
+  <p class="subtle">
+    Sends one notification to the configured <code>NTFY_URL</code> /
+    <code>NTFY_TOPIC</code> so you can confirm delivery works.
+  </p>
+  <form method="POST" action="{{ url_for('test_ntfy') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button type="submit" class="secondary outline" style="width:auto">
+      Send test notification
+    </button>
+  </form>
+</article>
+
+{% endblock %}

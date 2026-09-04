@@ -6,8 +6,8 @@ import re
 import slskd_api
 from rapidfuzz import fuzz
 
-from db import get_tried_files, add_tried_file, get_setting
-import runtime_state
+from .db import get_tried_files, add_tried_file, get_setting
+from . import runtime_state
 
 DEFAULT_FORMATS = "flac,mp3,aiff,wav"
 
@@ -34,7 +34,6 @@ def _normalize_ext_list(env_val: str):
 PREFERRED_FORMATS = _normalize_ext_list(os.getenv("SLSKD_PREFERRED_FORMATS", DEFAULT_FORMATS))
 DOWNLOAD_DIR = os.getenv("SLSKD_DOWNLOADS_DIR", "/downloads")
 EXTERNAL_PROCESS_WAIT_TIMEOUT = int(os.getenv("SLSKD_WAIT_TIMEOUT", "60"))
-MAX_RETRIES = int(os.getenv("SLSKD_MAX_RETRIES", "2"))
 MIN_PEER_UPLOAD_SPEED = int(os.getenv("SLSKD_MIN_PEER_UPLOAD_SPEED", "0"))
 # MP3s whose effective bitrate (size*8/duration/1000) falls below this are
 # rejected even if their reported bitrate claims 320 — catches upsampled fakes.
@@ -54,7 +53,7 @@ def refresh_from_db(conn) -> None:
     stay env-only because they're deploy-time concerns.
     """
     global PREFERRED_FORMATS, MIN_PEER_UPLOAD_SPEED, MIN_EFFECTIVE_MP3_KBPS
-    global EARLY_STOP_RESPONSES, MAX_RETRIES, EXTERNAL_PROCESS_WAIT_TIMEOUT
+    global EARLY_STOP_RESPONSES, EXTERNAL_PROCESS_WAIT_TIMEOUT
 
     PREFERRED_FORMATS = _normalize_ext_list(
         get_setting(conn, "SLSKD_PREFERRED_FORMATS", DEFAULT_FORMATS)
@@ -69,7 +68,6 @@ def refresh_from_db(conn) -> None:
         EARLY_STOP_RESPONSES = int(
             get_setting(conn, "SLSKD_EARLY_STOP_RESPONSES", "20")
         )
-        MAX_RETRIES = int(get_setting(conn, "SLSKD_MAX_RETRIES", "2"))
         EXTERNAL_PROCESS_WAIT_TIMEOUT = int(
             get_setting(conn, "SLSKD_WAIT_TIMEOUT", "60")
         )
@@ -460,7 +458,6 @@ def download_and_verify(
     conn,
     playlist_name,
     track_id,
-    max_attempts=2,
     max_version_tier=None,
 ):
     """Filter, sort, and try to download the best candidate from one search.
@@ -538,7 +535,6 @@ def search_and_download(
     playlist_name,
     track_id,
     album=None,
-    max_attempts=2,
     max_version_tier=None,
     timeout=60,
 ):
@@ -568,7 +564,6 @@ def search_and_download(
             conn=conn,
             playlist_name=playlist_name,
             track_id=track_id,
-            max_attempts=max_attempts,
             max_version_tier=max_version_tier,
         )
         if file_path:

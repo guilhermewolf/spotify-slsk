@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% set active_page = 'logs' %}
+{% block title %}Logs · spotify-slsk{% endblock %}
+{% block content %}
+
+{% set activity = activity if activity is defined else None %}
+<div class="page-head"><div><h1>Live logs</h1></div></div>
+<p class="subtle">In-memory ring buffer (last {{ entries|length }} of up to 2000). Polls every 2 seconds.</p>
+
+<div class="log-controls">
+  <label>
+    <input type="checkbox" id="log-autoscroll" checked> auto-scroll
+  </label>
+  <label>
+    <input type="checkbox" id="log-pause"> pause
+  </label>
+  <label>
+    Filter:
+    <select id="log-filter">
+      <option value="">all</option>
+      <option value="DEBUG">debug</option>
+      <option value="INFO">info</option>
+      <option value="WARNING">warning+</option>
+      <option value="ERROR">error+</option>
+    </select>
+  </label>
+</div>
+
+<div id="log-viewer" class="log-viewer" data-last-seq="{{ last_seq }}">
+{% for e in entries %}<div class="log-line {{ e.level }}">{{ e.message }}</div>{% endfor %}
+</div>
+
+<script src="{{ url_for('static', filename='logs.js') }}" defer></script>
+
+{% endblock %}

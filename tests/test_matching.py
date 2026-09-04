@@ -5,7 +5,7 @@ import os
 os.environ.setdefault("SLSKD_HOST_URL", "http://localhost")
 os.environ.setdefault("SLSKD_API_KEY", "x")
 
-from app import (
+from spotify_slsk.app import (
     _artists_overlap,
     _looks_like_match,
     _remix_equivalent,
@@ -15,7 +15,7 @@ from app import (
     _tokenize,
     score_track_match,
 )
-from utils import sanitize_table_name, get_playlist_id
+from spotify_slsk.utils import sanitize_table_name, get_playlist_id
 
 
 class TestTokenize:

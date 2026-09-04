@@ -50,7 +50,7 @@ def setup_logging():
     # Mirror every record into the in-memory ring buffer so the web UI can
     # tail it. Stays alongside the stdout handler — Docker still captures the
     # stream.
-    from runtime_state import RingBufferHandler
+    from .runtime_state import RingBufferHandler
     buffer_handler = RingBufferHandler()
     buffer_handler.setFormatter(formatter)
 

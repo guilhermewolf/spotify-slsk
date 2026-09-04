@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{% block title %}spotify-slsk{% endblock %}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Self-hosted (Pico 2.0.6, htmx 1.9.12): a compromised CDN would get to
+       drive this UI's unauthenticated mutating routes, and self-hosting is
+       what lets the CSP stay at script-src 'self'. -->
+  <link rel="stylesheet" href="{{ url_for('static', filename='pico.classless.min.css') }}">
+  <script src="{{ url_for('static', filename='htmx.min.js') }}" defer></script>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  <!-- Not deferred: applies the stored theme before first paint. -->
+  <script src="{{ url_for('static', filename='theme.js') }}"></script>
+</head>
+<body>
+  <!-- Keyboard users shouldn't have to tab through the nav on every page. -->
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="site-header">
+    <nav class="site-nav" aria-label="Primary">
+      <a class="brand" href="{{ url_for('dashboard') }}">
+        <span class="brand-mark" aria-hidden="true"></span>spotify-slsk
+      </a>
+      <ul class="nav-links">
+        <li>
+          <a href="{{ url_for('dashboard') }}"
+             {% if active_page == 'dashboard' %}aria-current="page"{% endif %}>Dashboard</a>
+        </li>
+        <li>
+          <a href="{{ url_for('logs_page') }}"
+             {% if active_page == 'logs' %}aria-current="page"{% endif %}>Logs</a>
+        </li>
+        <li>
+          <a href="{{ url_for('settings') }}"
+             {% if active_page == 'settings' %}aria-current="page"{% endif %}>Settings</a>
+        </li>
+        <li>
+          <button type="button" class="theme-toggle" id="theme-toggle"
+                  title="Toggle dark mode" aria-label="Toggle dark mode">🌓</button>
+        </li>
+      </ul>
+      {% if health is defined and health %}
+      <a class="health health-{{ 'ok' if health.ok else 'bad' }}"
+         href="{{ url_for('healthz') }}"
+         title="{{ health.reason }}">
+        <span class="dot" aria-hidden="true"></span>
+        <span>{{ 'Healthy' if health.ok else 'Degraded' }}</span>
+      </a>
+      {% endif %}
+    </nav>
+  </header>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+    <!-- role=status so a screen reader announces the result of an action. -->
+    <div class="flashes" role="status" aria-live="polite">
+      {% for category, message in messages %}
+        <p class="flash flash-{{ category }}">{{ message }}</p>
+      {% endfor %}
+    </div>
+    {% endif %}
+  {% endwith %}
+
+  <main id="main">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

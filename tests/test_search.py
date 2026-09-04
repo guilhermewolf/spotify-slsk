@@ -4,7 +4,7 @@ import os
 os.environ.setdefault("SLSKD_HOST_URL", "http://localhost")
 os.environ.setdefault("SLSKD_API_KEY", "x")
 
-from soulseek_api import (
+from spotify_slsk.soulseek_api import (
     _build_search_queries,
     _effective_mp3_kbps,
     _has_version_marker,
@@ -19,7 +19,7 @@ from soulseek_api import (
     extract_candidates,
     sort_candidates,
 )
-import soulseek_api
+from spotify_slsk import soulseek_api
 
 
 class TestNormalizeExtList:
@@ -309,26 +309,68 @@ class TestMaxVersionTierFilter:
             ],
         }]
 
-    def test_filter_keeps_strictly_better_only(self):
-        # Simulate "I currently have Original Mix (tier 1); only consider
-        # tier 0 = Extended Mix".
-        results = self._two_versions_search_result()
-        cands = extract_candidates(results, "Heart To Find", "Mat Joe")
+    def _attempted_filenames(self, monkeypatch, tmp_path, max_version_tier):
+        """Run the real download_and_verify and report what it tried to fetch.
+
+        These tests used to re-implement the tier predicate inline, so they
+        passed whether or not download_and_verify actually filtered. Driving
+        the real function means deleting the filter fails the test.
+        """
+        from spotify_slsk import db as _db
+
+        enqueued = []
+
+        class _Transfers:
+            def enqueue(self, username, files):
+                enqueued.append(files[0]["filename"])
+
+        class _Client:
+            transfers = _Transfers()
+
+        monkeypatch.setattr(soulseek_api, "get_client", lambda: _Client())
+        # Every attempt "fails" so the loop walks all permitted candidates.
+        monkeypatch.setattr(soulseek_api, "wait_for_completion", lambda c: None)
+
+        conn = _db.create_connection(str(tmp_path / "t.db"))
+        _db.create_table(conn, "pl_x")
+        _db.insert_track(conn, "pl_x", ("t1", "Heart To Find", "Mat Joe", "Alb"))
+        try:
+            soulseek_api.download_and_verify(
+                search_results=self._two_versions_search_result(),
+                expected_title="Heart To Find",
+                expected_artist="Mat Joe",
+                conn=conn,
+                playlist_name="pl_x",
+                track_id="t1",
+                max_version_tier=max_version_tier,
+            )
+        finally:
+            conn.close()
+        return enqueued
+
+    def test_both_tiers_are_recognised(self):
+        cands = extract_candidates(
+            self._two_versions_search_result(), "Heart To Find", "Mat Joe"
+        )
         assert {c["version_tier"] for c in cands} == {0, 1}
 
-        # The download_and_verify body filters; replicate the predicate:
-        max_tier = 1
-        kept = [c for c in cands if c.get("version_tier", 2) < max_tier]
-        assert len(kept) == 1
-        assert kept[0]["version_tier"] == 0
+    def test_only_strictly_better_tier_is_downloaded(self, monkeypatch, tmp_path):
+        # Currently holding Original Mix (tier 1): only Extended Mix qualifies.
+        attempted = self._attempted_filenames(monkeypatch, tmp_path, max_version_tier=1)
+        assert len(attempted) == 1
+        assert "Extended Mix" in attempted[0]
 
-    def test_filter_excludes_equal_tier(self):
-        # Already on Extended Mix (tier 0) means nothing is strictly better.
-        results = self._two_versions_search_result()
-        cands = extract_candidates(results, "Heart To Find", "Mat Joe")
-        max_tier = 0
-        kept = [c for c in cands if c.get("version_tier", 2) < max_tier]
-        assert kept == []
+    def test_equal_tier_is_not_downloaded(self, monkeypatch, tmp_path):
+        # Already on Extended Mix (tier 0): nothing is strictly better.
+        assert self._attempted_filenames(monkeypatch, tmp_path, max_version_tier=0) == []
+
+    def test_without_the_cap_both_versions_are_eligible(self, monkeypatch, tmp_path):
+        attempted = self._attempted_filenames(
+            monkeypatch, tmp_path, max_version_tier=None
+        )
+        assert len(attempted) == 2, "a normal download should consider both versions"
+        # Extended Mix outranks Original Mix, so it is tried first.
+        assert "Extended Mix" in attempted[0]
 
 
 class TestRunOneSearch:

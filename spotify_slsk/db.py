@@ -1,8 +1,7 @@
 import os
 import sqlite3
 import logging
-import json
-from models import Track
+from .models import Track
 
 SCHEMA_VERSION = 4
 
@@ -115,10 +114,23 @@ def create_connection(db_file):
         _ensure_settings_table(conn)
         _ensure_cycle_history_table(conn)
         _ensure_schema_version(conn)
+
+        # sqlite3.connect() succeeds on a corrupt or non-SQLite file — the
+        # error only surfaces on first use, and every helper above logs and
+        # swallows sqlite3.Error. Without this probe we would hand back a
+        # connection on which nothing works: the webui (which only checks for
+        # None) would render empty pages instead of returning 503, and the
+        # daemon would run cycles that silently do nothing.
+        conn.execute("SELECT 1 FROM playlists_meta LIMIT 1").fetchone()
+
         logging.info(f"Connected to SQLite database: {db_file}")
         return conn
     except sqlite3.Error as e:
         logging.error(f"Error connecting to SQLite: {e}")
+        try:
+            conn.close()
+        except Exception:
+            pass
         return None
 
 
@@ -367,7 +379,14 @@ def playlist_stats(conn, table_name: str) -> dict:
             f'    (suspended_until IS NULL OR suspended_until < CURRENT_TIMESTAMP) '
             f'    THEN 1 ELSE 0 END), 0), '
             f'  COALESCE(SUM(CASE WHEN downloaded = 0 AND suspended_until IS NOT NULL '
-            f'    AND suspended_until >= CURRENT_TIMESTAMP THEN 1 ELSE 0 END), 0) '
+            f'    AND suspended_until >= CURRENT_TIMESTAMP THEN 1 ELSE 0 END), 0), '
+            # "retrying" is a subset of "pending": not downloaded, not
+            # currently suspended, but has already failed at least once. The
+            # dashboard shows it separately so a user can tell "not tried yet"
+            # from "tried and failed".
+            f'  COALESCE(SUM(CASE WHEN downloaded = 0 AND attempts > 0 AND '
+            f'    (suspended_until IS NULL OR suspended_until < CURRENT_TIMESTAMP) '
+            f'    THEN 1 ELSE 0 END), 0) '
             f'FROM "{table_name}"'
         ).fetchone()
         return {
@@ -375,10 +394,17 @@ def playlist_stats(conn, table_name: str) -> dict:
             "downloaded": row[1],
             "pending": row[2],
             "suspended": row[3],
+            "retrying": row[4],
         }
     except sqlite3.Error as e:
         logging.warning(f"Could not get stats for {table_name}: {e}")
-        return {"total": 0, "downloaded": 0, "pending": 0, "suspended": 0}
+        return {
+            "total": 0,
+            "downloaded": 0,
+            "pending": 0,
+            "suspended": 0,
+            "retrying": 0,
+        }
 
 
 def _track_status(downloaded, attempts, suspended_until, now):
@@ -600,11 +626,19 @@ def add_tried_file(conn, table_name, track_id, file_path):
 
 
 def clear_tried_entries(conn, playlist_name, track_id):
+    """Wipe the rejected-filename history for one track.
+
+    The history lives in the `_tried` companion table — the same place
+    get_tried_files reads and add_tried_file writes. This used to blank a
+    `tried_files` column on the main table instead, which nothing reads, so
+    every filename ever rejected for a track stayed blacklisted forever and
+    the upgrade pass could never reconsider it.
+    """
     try:
         with conn:
             conn.execute(
-                f'UPDATE "{playlist_name}" SET tried_files = ? WHERE id = ?',
-                (json.dumps([]), track_id),
+                f'DELETE FROM "{playlist_name}_tried" WHERE track_id = ?',
+                (track_id,),
             )
         logging.info(f"Cleared tried entries for track {track_id} in {playlist_name}")
     except sqlite3.Error as e:

@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% set active_page = 'dashboard' %}
+{% block title %}{{ track.name }} · spotify-slsk{% endblock %}
+{% block content %}
+
+<a class="back-link" href="{{ url_for('playlist_detail', playlist_id=playlist_id) }}">
+  &larr; {{ playlist_name }}
+</a>
+
+<div class="page-head">
+  <div>
+    <h1>{{ track.name }}</h1>
+    <p class="subtle">{{ track.artists }} · {{ track.album }}</p>
+  </div>
+  <span class="badge badge-{{ track.status }}">{{ track.status }}</span>
+</div>
+
+{# Lead with the answer to "what is happening with this track?" #}
+<p>
+  {% if track.status == 'downloaded' %}
+    Downloaded and tagged. The file is in your library.
+  {% elif track.status == 'suspended' %}
+    Failed {{ track.attempts }} time{{ '' if track.attempts == 1 else 's' }}, so it is
+    paused until <strong>{{ track.suspended_until }}</strong>. Retry now to clear the
+    pause and try again on the next cycle.
+  {% elif track.status == 'retrying' %}
+    Last attempt failed; it will be tried again on the next cycle.
+  {% else %}
+    Waiting for its first download attempt.
+  {% endif %}
+</p>
+
+<dl class="detail-grid">
+  <dt>File</dt>
+  <dd>{% if track.path %}<code>{{ track.path }}</code>{% else %}—{% endif %}</dd>
+  {% if track.rel_path %}
+  <dt>Preview</dt>
+  <dd>
+    <audio controls preload="none" style="width:100%;max-width:480px;">
+      <source src="{{ url_for('serve_file', rel=track.rel_path) }}">
+      Your browser doesn't support the audio element.
+    </audio>
+  </dd>
+  {% endif %}
+  <dt>Attempts</dt>
+  <dd>{{ track.attempts }}</dd>
+  <dt>Last attempt</dt>
+  <dd>{{ track.last_attempt or '—' }}</dd>
+  <dt>Paused until</dt>
+  <dd>{{ track.suspended_until or '—' }}</dd>
+</dl>
+
+{% if not track.downloaded %}
+<form method="POST"
+      action="{{ url_for('retry_track', playlist_id=playlist_id, track_id=track.id) }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <button type="submit" style="width:auto">Retry now</button>
+  <small class="subtle">
+    Clears the attempt count, any pause, and the rejected-file list below, then starts a cycle.
+  </small>
+</form>
+{% endif %}
+
+{% if track.downloaded and track.path %}
+<form method="POST"
+      action="{{ url_for('retag_track', playlist_id=playlist_id, track_id=track.id) }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <button type="submit" class="secondary outline" style="width:auto">Re-tag from DB</button>
+  <small class="subtle">
+    Rewrites title/artist/album from the Spotify metadata. No re-download.
+  </small>
+</form>
+{% endif %}
+
+{% if search_history %}
+<h2 style="font-size:1.05rem;margin-top:2rem;">Recent slskd searches</h2>
+<p class="subtle">
+  The last {{ search_history|length }} queries the daemon ran for this track.
+  In-memory per process — this resets when the container restarts.
+</p>
+<div class="table-wrap">
+  <table class="track-table">
+    <thead><tr><th scope="col">Query</th><th scope="col" class="num">Results</th></tr></thead>
+    <tbody>
+      {% for h in search_history|reverse %}
+      <tr><td><code>{{ h.query }}</code></td><td class="num">{{ h.result_count }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if track.tried %}
+<h2 style="font-size:1.05rem;margin-top:2rem;">Rejected files</h2>
+<p class="subtle">
+  Candidates already tried and rejected — wrong version, failed transfer, or metadata that
+  didn't match. They are skipped on future searches until you retry.
+</p>
+<div class="table-wrap">
+  <table class="track-table">
+    <tbody>
+      {% for f in track.tried %}
+      <tr><td><code>{{ f }}</code></td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% endblock %}

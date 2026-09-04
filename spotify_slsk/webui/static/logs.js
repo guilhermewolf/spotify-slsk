@@ -1,35 +1,7 @@
-{% extends "base.html" %}
-{% block title %}Logs · spotify-slsk{% endblock %}
-{% block content %}
-
-{% set activity = activity if activity is defined else None %}
-<h2>Live logs</h2>
-<p class="muted">In-memory ring buffer (last {{ entries|length }} of up to 2000). Polls every 2 seconds.</p>
-
-<div style="margin-bottom: 0.5em;">
-  <label style="display: inline-block;">
-    <input type="checkbox" id="log-autoscroll" checked> auto-scroll
-  </label>
-  <label style="display: inline-block; margin-left: 1em;">
-    <input type="checkbox" id="log-pause"> pause
-  </label>
-  <label style="display: inline-block; margin-left: 1em;">
-    Filter:
-    <select id="log-filter">
-      <option value="">all</option>
-      <option value="DEBUG">debug</option>
-      <option value="INFO">info</option>
-      <option value="WARNING">warning+</option>
-      <option value="ERROR">error+</option>
-    </select>
-  </label>
-</div>
-
-<div id="log-viewer" class="log-viewer" data-last-seq="{{ last_seq }}">
-{% for e in entries %}<div class="log-line {{ e.level }}">{{ e.message }}</div>{% endfor %}
-</div>
-
-<script>
+// Live log tail for /logs. Extracted from an inline <script> so the
+// dashboard's Content-Security-Policy can stay at script-src 'self'.
+// State comes from the DOM (#log-viewer[data-last-seq]), so nothing
+// here needs templating.
 (function () {
   const viewer = document.getElementById('log-viewer');
   const autoscroll = document.getElementById('log-autoscroll');
@@ -88,6 +60,3 @@
   if (autoscroll.checked) viewer.scrollTop = viewer.scrollHeight;
   setInterval(tick, 2000);
 })();
-</script>
-
-{% endblock %}

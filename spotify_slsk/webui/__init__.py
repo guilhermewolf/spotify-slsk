@@ -5,8 +5,10 @@ against the same DB file the daemon writes to (WAL mode makes this safe).
 """
 from __future__ import annotations
 
+import hmac
 import logging
 import os
+import secrets
 import threading
 import time
 
@@ -20,14 +22,37 @@ from flask import (
     render_template,
     request,
     send_from_directory,
+    session,
     url_for,
 )
 
 import requests
 
-import db
-import runtime_state
-from utils import get_playlist_id, sanitize_table_name
+from .. import db
+from .. import runtime_state
+from ..utils import get_playlist_id, sanitize_table_name
+
+
+# The daemon and this web thread share one spotipy client, and spotipy's
+# underlying requests.Session is not thread-safe; a stale pooled connection
+# also shows up here as RemoteDisconnected. Retry a couple of times before
+# giving up — a retry gets a fresh socket.
+SPOTIFY_TRANSPORT_RETRIES = 3
+
+
+def _fetch_playlist_name(sp, pid: str) -> str:
+    last_exc = None
+    for attempt in range(SPOTIFY_TRANSPORT_RETRIES):
+        try:
+            return sp.playlist(pid, fields="name")["name"]
+        except requests.exceptions.RequestException as e:
+            last_exc = e
+            logging.warning(
+                f"Spotify transport error for {pid} "
+                f"(attempt {attempt + 1}/{SPOTIFY_TRANSPORT_RETRIES}): {e}"
+            )
+            time.sleep(0.5 * (attempt + 1))
+    raise last_exc
 
 
 def _dir_size(path: str) -> int:
@@ -128,16 +153,102 @@ def _human_bytes(n: int) -> str:
     return f"{n:.1f} PiB"
 
 
+# (key, default, help text, kind). `kind` drives validation on save — an
+# unvalidated setting is worse than no setting: the daemon's _reload_settings
+# silently keeps the previous value on a bad parse, so the UI would report
+# "Saved" for a value that never takes effect.
 SETTINGS_SPEC = [
-    ("MIN_MATCH_SCORE", "0.62", "Accept threshold for downloaded-file -> DB match (0.0-1.0)"),
-    ("SLSKD_PREFERRED_FORMATS", "flac,mp3,aiff,wav", "Comma-separated, ordered — first format wins ties"),
-    ("SLSKD_MIN_PEER_UPLOAD_SPEED", "0", "Passed to slskd; bytes/sec"),
-    ("SLSKD_MIN_EFFECTIVE_MP3_KBPS", "280", "Reject MP3s whose size/duration yields below this"),
-    ("SLSKD_EARLY_STOP_RESPONSES", "20", "Stop the slskd search once this many peers replied"),
-    ("SLSKD_MAX_RETRIES", "2", "Per-search download attempt cap"),
-    ("SLSKD_WAIT_TIMEOUT", "60", "Seconds to wait for a downloaded file to appear on disk"),
-    ("UPGRADE_CHECK_INTERVAL_HOURS", "168", "Re-search downloaded tracks for a better version_tier (Extended Mix > Original Mix); 0 disables"),
+    ("MIN_MATCH_SCORE", "0.62", "Accept threshold for downloaded-file -> DB match (0.0-1.0)", "ratio"),
+    ("SLSKD_PREFERRED_FORMATS", "flac,mp3,aiff,wav", "Comma-separated, ordered — first format wins ties", "formats"),
+    ("SLSKD_MIN_PEER_UPLOAD_SPEED", "0", "Passed to slskd; bytes/sec", "int0"),
+    ("SLSKD_MIN_EFFECTIVE_MP3_KBPS", "280", "Reject MP3s whose size/duration yields below this", "int0"),
+    ("SLSKD_EARLY_STOP_RESPONSES", "20", "Stop the slskd search once this many peers replied", "int1"),
+    ("SLSKD_WAIT_TIMEOUT", "60", "Seconds to wait for a downloaded file to appear on disk", "int1"),
+    ("UPGRADE_CHECK_INTERVAL_HOURS", "168", "Re-search downloaded tracks for a better version_tier (Extended Mix > Original Mix); 0 disables", "int0"),
 ]
+
+# Formats the tagging/'extract metadata' code in app.py can actually handle.
+_KNOWN_FORMATS = {"flac", "mp3", "aiff", "wav", "m4a", "ogg"}
+
+
+def validate_setting(kind: str, value: str):
+    """Return (normalised_value, error). Exactly one is non-None."""
+    if kind == "ratio":
+        try:
+            parsed = float(value)
+        except ValueError:
+            return None, "must be a number between 0 and 1"
+        if not 0.0 <= parsed <= 1.0:
+            return None, "must be between 0 and 1"
+        return str(parsed), None
+
+    if kind in ("int0", "int1"):
+        minimum = 0 if kind == "int0" else 1
+        try:
+            parsed = int(value)
+        except ValueError:
+            return None, f"must be a whole number >= {minimum}"
+        if parsed < minimum:
+            return None, f"must be >= {minimum}"
+        return str(parsed), None
+
+    if kind == "formats":
+        items = [f.strip().lstrip(".").lower() for f in value.split(",")]
+        items = [f for f in items if f]
+        if not items:
+            return None, "needs at least one format"
+        unknown = [f for f in items if f not in _KNOWN_FORMATS]
+        if unknown:
+            return None, (
+                f"unsupported format(s): {', '.join(unknown)}. "
+                f"Known: {', '.join(sorted(_KNOWN_FORMATS))}"
+            )
+        return ",".join(items), None
+
+    return value, None
+
+
+
+# Reserved settings key holding the generated Flask secret. It is not in
+# SETTINGS_SPEC, so it never appears on the settings page.
+_SECRET_KEY_SETTING = "_ui_secret_key"
+
+# Methods that cannot change state, so they need no CSRF token.
+_CSRF_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
+
+
+def _resolve_secret_key(db_path: str) -> str:
+    """Return a secret key that survives a restart.
+
+    This used to be `os.urandom(32).hex()` whenever UI_SECRET_KEY was unset,
+    i.e. a fresh key on every boot. That was tolerable when the session only
+    carried flash messages, but CSRF tokens live in the session too: a
+    restart would invalidate the token embedded in any open page and turn the
+    next click into a confusing 403. Persisting a generated key in the
+    existing settings table keeps deployments that set no env var working.
+    """
+    env_key = os.getenv("UI_SECRET_KEY")
+    if env_key:
+        return env_key
+
+    conn = db.create_connection(db_path)
+    if conn is None:
+        # Can't persist one; fall back to ephemeral so the UI still starts.
+        logging.warning("Could not open DB for secret key; using an ephemeral one")
+        return secrets.token_hex(32)
+    try:
+        stored = db.get_setting(conn, _SECRET_KEY_SETTING, default=None)
+        if stored:
+            return stored
+        generated = secrets.token_hex(32)
+        db.set_setting(conn, _SECRET_KEY_SETTING, generated)
+        logging.info(
+            "Generated a persistent UI secret key. Set UI_SECRET_KEY to "
+            "manage it yourself."
+        )
+        return generated
+    finally:
+        conn.close()
 
 
 def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
@@ -153,8 +264,67 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
     # cycle sleep is interrupted and the change is observable in seconds
     # rather than after the full CYCLE_INTERVAL_SECONDS window.
     app.config["WAKE_DAEMON"] = wake_callback
-    app.secret_key = os.getenv("UI_SECRET_KEY", os.urandom(32).hex())
+    app.secret_key = _resolve_secret_key(db_path)
+    # The dashboard is normally loopback-bound and has no auth, so the
+    # session cookie is the only thing standing between a random page in
+    # another tab and the destructive routes below. Lax still allows the
+    # normal top-level navigations this UI relies on.
+    app.config.update(
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        # Only set Secure when the operator terminates TLS in front of us —
+        # forcing it on plain http:// loopback would drop the cookie entirely.
+        SESSION_COOKIE_SECURE=os.getenv("UI_COOKIE_SECURE", "0") == "1",
+    )
+
+    # ---- CSRF ----------------------------------------------------------
+    # No auth means a browser is a confused deputy: any page the operator
+    # visits can POST to 127.0.0.1:8000 and delete a playlist or rewrite
+    # settings. Loopback binding does not help — the *browser* is inside the
+    # trust boundary. A session-backed token is proxy-safe, unlike an
+    # Origin/Referer check which breaks behind a misconfigured reverse proxy.
+
+    def _csrf_token() -> str:
+        token = session.get("_csrf_token")
+        if not token:
+            token = secrets.token_urlsafe(32)
+            session["_csrf_token"] = token
+        return token
+
+    @app.before_request
+    def _require_csrf_token():
+        if request.method in _CSRF_SAFE_METHODS:
+            return None
+        expected = session.get("_csrf_token")
+        submitted = request.form.get("csrf_token") or request.headers.get(
+            "X-CSRF-Token", ""
+        )
+        if not expected or not hmac.compare_digest(expected, submitted):
+            logging.warning(
+                f"Rejected {request.method} {request.path}: bad or missing CSRF token"
+            )
+            abort(400, "invalid or missing CSRF token")
+        return None
+
+    # Templates call csrf_token() to render the hidden field.
+    app.jinja_env.globals["csrf_token"] = _csrf_token
     app.jinja_env.filters["human_bytes"] = _human_bytes
+
+    @app.after_request
+    def _security_headers(response):
+        # Conservative headers for a single-user dashboard. The CSP matches
+        # what the templates actually use: self-hosted CSS/JS, no inline
+        # scripts, no third-party origins.
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; "
+            "base-uri 'none'",
+        )
+        return response
 
     def _wake():
         cb = app.config.get("WAKE_DAEMON")
@@ -185,16 +355,27 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
     def dashboard():
         playlists = db.list_playlists(g.conn)
         playlists_root = os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists")
+        totals = {
+            "total": 0,
+            "downloaded": 0,
+            "pending": 0,
+            "retrying": 0,
+            "suspended": 0,
+        }
         for pl in playlists:
             pl["stats"] = db.playlist_stats(g.conn, pl["table_name"])
             pl["disk_bytes"] = _dir_size(os.path.join(playlists_root, pl["table_name"]))
-        activity = runtime_state.get_activity()
-        cycles = db.list_cycles(g.conn, limit=10)
+            # Disabled playlists still hold tracks, but counting them in the
+            # library totals would misrepresent what the daemon is working on.
+            if pl["enabled"]:
+                for key in totals:
+                    totals[key] += pl["stats"][key]
         return render_template(
             "dashboard.html",
             playlists=playlists,
-            activity=activity,
-            cycles=cycles,
+            totals=totals,
+            activity=runtime_state.get_activity(),
+            cycles=db.list_cycles(g.conn, limit=10),
         )
 
     @app.route("/playlist/<playlist_id>")
@@ -202,17 +383,38 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
         _, table_name, name, last_synced = db.get_playlist_meta(g.conn, playlist_id)
         if not table_name:
             abort(404)
-        tracks = db.list_tracks(g.conn, table_name)
+        all_tracks = db.list_tracks(g.conn, table_name)
+        # Counts come from the unfiltered list so every filter chip can show
+        # its size — the previous page only knew the total.
+        counts = {"all": len(all_tracks)}
+        for status in ("downloaded", "pending", "retrying", "suspended"):
+            counts[status] = sum(1 for t in all_tracks if t["status"] == status)
+
         status_filter = request.args.get("status")
-        if status_filter:
-            tracks = [t for t in tracks if t["status"] == status_filter]
+        tracks = (
+            [t for t in all_tracks if t["status"] == status_filter]
+            if status_filter
+            else all_tracks
+        )
+        query = (request.args.get("q") or "").strip()
+        if query:
+            needle = query.lower()
+            tracks = [
+                t
+                for t in tracks
+                if needle in (t["name"] or "").lower()
+                or needle in (t["artists"] or "").lower()
+                or needle in (t["album"] or "").lower()
+            ]
         return render_template(
             "playlist.html",
             playlist_id=playlist_id,
             name=name,
             last_synced=last_synced,
             tracks=tracks,
+            counts=counts,
             status_filter=status_filter,
+            query=query,
             activity=runtime_state.get_activity(),
         )
 
@@ -225,9 +427,9 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
         if not track:
             abort(404)
         track["tried"] = db.get_tried_files(g.conn, table_name, track_id)
-        # Compute the playlists-root-relative path for the audio preview link.
-        # If the file lives outside the root (legacy data, manual move) we
-        # just don't render the preview — serve_file would 404 anyway.
+        # Playlists-root-relative path for the <audio> preview. Files outside
+        # the root (legacy rows, manual moves) get no preview — /file would
+        # refuse them anyway.
         track["rel_path"] = _relative_to_playlists_root(track.get("path"))
         return render_template(
             "track.html",
@@ -250,8 +452,17 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
         sp = app.config.get("SPOTIFY")
         if sp is not None:
             try:
-                info = sp.playlist(pid, fields="name")
-                name = info["name"]
+                name = _fetch_playlist_name(sp, pid)
+            except requests.exceptions.RequestException as e:
+                # Transport-level failure: a stale keep-alive socket, or the
+                # daemon thread using the same requests.Session at the same
+                # time. The playlist itself is probably fine, so add it under
+                # a placeholder name and let the first sync correct it.
+                logging.warning(
+                    f"Spotify unreachable while validating {pid}; "
+                    f"adding unvalidated: {e}"
+                )
+                name = pid
             except Exception as e:
                 logging.warning(f"Spotify validation failed for {pid}: {e}")
                 flash(f"Spotify rejected that playlist: {e}", "error")
@@ -329,19 +540,46 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
     @app.route("/settings", methods=["GET", "POST"])
     def settings():
         if request.method == "POST":
-            for key, _default, _help in SETTINGS_SPEC:
+            # Validate everything before writing anything, so a form with one
+            # bad field doesn't half-apply.
+            cleaned, errors = {}, []
+            for key, _default, _help, kind in SETTINGS_SPEC:
                 val = (request.form.get(key) or "").strip()
-                if val:
-                    db.set_setting(g.conn, key, val)
+                if not val:
+                    cleaned[key] = None  # clear the override
+                    continue
+                normalised, error = validate_setting(kind, val)
+                if error:
+                    errors.append(f"{key}: {error}")
                 else:
+                    cleaned[key] = normalised
+
+            if errors:
+                for message in errors:
+                    flash(message, "error")
+                return redirect(url_for("settings"))
+
+            for key, value in cleaned.items():
+                if value is None:
                     db.delete_setting(g.conn, key)
+                else:
+                    db.set_setting(g.conn, key, value)
+            _wake()
             flash("Saved. Takes effect on the next cycle.", "success")
             return redirect(url_for("settings"))
 
-        overrides = db.list_settings(g.conn)
+        # Underscore-prefixed keys are internal (currently _ui_secret_key).
+        # The template only renders SETTINGS_SPEC keys today, so this is
+        # belt-and-braces — but a secret should never be one careless
+        # template loop away from being rendered.
+        overrides = {
+            key: value
+            for key, value in db.list_settings(g.conn).items()
+            if not key.startswith("_")
+        }
         effective = {
             key: db.get_setting(g.conn, key, default=default)
-            for key, default, _help in SETTINGS_SPEC
+            for key, default, _help, _kind in SETTINGS_SPEC
         }
         return render_template(
             "settings.html",
@@ -455,8 +693,13 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
 
     # ---- ops ----------------------------------------------------------
 
-    @app.route("/healthz")
-    def healthz():
+    def _health_snapshot() -> dict:
+        """Shared by /healthz and the header badge, so they cannot disagree.
+
+        Deliberately cheap: a PRAGMA and a stat() call. No slskd round-trip —
+        a health endpoint that depends on a remote service fails when that
+        service is slow, which is exactly when you need it to answer.
+        """
         try:
             version = g.conn.execute("PRAGMA user_version").fetchone()[0]
             heartbeat_file = os.getenv("HEARTBEAT_FILE", "/tmp/heartbeat")
@@ -467,18 +710,35 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
             ok = version == db.SCHEMA_VERSION and (
                 heartbeat_age is None or heartbeat_age < stale
             )
-            return (
-                jsonify(
-                    {
-                        "ok": ok,
-                        "schema_version": version,
-                        "heartbeat_age_seconds": heartbeat_age,
-                    }
-                ),
-                200 if ok else 503,
-            )
+            if not ok:
+                reason = (
+                    f"schema version {version}, expected {db.SCHEMA_VERSION}"
+                    if version != db.SCHEMA_VERSION
+                    else f"no daemon heartbeat for {int(heartbeat_age)}s"
+                )
+            elif heartbeat_age is None:
+                reason = "waiting for the daemon's first heartbeat"
+            else:
+                reason = f"daemon active {int(heartbeat_age)}s ago"
+            return {
+                "ok": ok,
+                "schema_version": version,
+                "heartbeat_age_seconds": heartbeat_age,
+                "reason": reason,
+            }
         except Exception as e:
-            return jsonify({"ok": False, "error": str(e)}), 503
+            return {"ok": False, "error": str(e), "reason": str(e)}
+
+    @app.context_processor
+    def _inject_health():
+        # Every page shows the daemon's status in the header, so it must not
+        # depend on a single route remembering to pass it.
+        return {"health": _health_snapshot()}
+
+    @app.route("/healthz")
+    def healthz():
+        snapshot = _health_snapshot()
+        return jsonify(snapshot), 200 if snapshot["ok"] else 503
 
     return app
 

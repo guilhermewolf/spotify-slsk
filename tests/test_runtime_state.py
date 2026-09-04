@@ -1,7 +1,7 @@
 """Unit tests for the in-process activity tracker + log ring buffer."""
 import logging
 
-import runtime_state
+from spotify_slsk import runtime_state
 
 
 def _reset_buffer():
@@ -128,3 +128,41 @@ class TestRingBufferHandler:
         assert len(runtime_state._log_buffer) == runtime_state.LOG_BUFFER_MAX
         # Sequence numbers keep climbing even though oldest entries dropped.
         assert runtime_state._log_seq >= runtime_state.LOG_BUFFER_MAX + 50
+
+
+class TestLoggingWiring:
+    """setup_logging() is never exercised elsewhere in the suite.
+
+    That gap let a broken intra-package import survive the whole test run:
+    `from runtime_state import RingBufferHandler` inside setup_logging raised
+    ModuleNotFoundError at runtime once the code moved into a package, while
+    every test still passed. This covers the wiring, not just the buffer.
+    """
+
+    def test_setup_logging_installs_the_ring_buffer_handler(self, monkeypatch):
+        import logging
+
+        from spotify_slsk import log_config
+
+        root = logging.getLogger()
+        saved_handlers, saved_level = root.handlers[:], root.level
+        try:
+            monkeypatch.setenv("LOGLEVEL", "INFO")
+            log_config.setup_logging()  # must not raise
+
+            assert any(
+                type(h).__name__ == "RingBufferHandler" for h in root.handlers
+            ), "ring buffer handler was not installed"
+            # stdout handler must survive too — Docker reads that stream.
+            assert any(
+                isinstance(h, logging.StreamHandler)
+                and type(h).__name__ != "RingBufferHandler"
+                for h in root.handlers
+            ), "stdout handler was replaced instead of supplemented"
+
+            before = runtime_state.get_logs(since=0, limit=1)["last_seq"]
+            logging.info("wiring probe")
+            after = runtime_state.get_logs(since=before, limit=10)
+            assert any("wiring probe" in e["message"] for e in after["entries"])
+        finally:
+            root.handlers, root.level = saved_handlers, saved_level
