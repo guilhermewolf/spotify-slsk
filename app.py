@@ -1089,7 +1089,8 @@ def main():
 
     try:
         sp = setup_spotify_client()
-        _migrate_env_playlists(conn, sp)
+        if sp is not None:
+            _migrate_env_playlists(conn, sp)
         _reload_settings(conn)
 
         # Bring the dashboard up before waiting on slskd. Previously the
@@ -1113,7 +1114,17 @@ def main():
         send_ntfy_notification(
             ntfy_url, ntfy_topic, "Spotify Playlist Downloader starting"
         )
-        _run_startup_reconciliation(sp, conn)
+        # Both of these need Spotify. Their own try/except would swallow the
+        # resulting AttributeError, but the operator would then get a
+        # 'NoneType' has no attribute 'playlist' traceback per playlist per
+        # boot instead of being told the actual problem.
+        if sp is not None:
+            _run_startup_reconciliation(sp, conn)
+        else:
+            logging.error(
+                "Skipping startup reconciliation: no Spotify client. Set "
+                "SPOTIPY_CLIENT_ID / SPOTIPY_CLIENT_SECRET and restart."
+            )
 
         while not _shutdown.is_set():
             _touch_heartbeat()

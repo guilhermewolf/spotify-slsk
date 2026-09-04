@@ -220,3 +220,36 @@ class TestHeartbeatFile:
         monkeypatch.setattr(app, "HEARTBEAT_FILE", str(target))
         app._touch_heartbeat()
         assert os.path.exists(target)
+
+
+class TestMissingSpotifyCredentials:
+    """Losing credentials must degrade, not crash.
+
+    setup_spotify_client returns None so the dashboard still boots. These pin
+    the behaviour of the startup paths that run before the cycle loop's own
+    guard — a reviewer flagged them as an uncaught crash, so the no-raise
+    contract is worth asserting rather than re-deriving.
+    """
+
+    def test_env_playlist_import_does_not_raise_without_a_client(
+        self, tmp_path, monkeypatch
+    ):
+        import db
+
+        monkeypatch.setenv(
+            "SPOTIFY_PLAYLIST_URLS", "https://open.spotify.com/playlist/abc"
+        )
+        conn = db.create_connection(str(tmp_path / "t.db"))
+        app._migrate_env_playlists(conn, None)  # must not raise
+        assert db.list_playlists(conn) == [], "imported a playlist with no client"
+        conn.close()
+
+    def test_startup_reconciliation_does_not_raise_without_a_client(self, tmp_path):
+        import db
+
+        conn = db.create_connection(str(tmp_path / "t.db"))
+        db.upsert_playlist_meta(conn, "pid1", "pl_x", "X", None)
+        db.create_table(conn, "pl_x")
+        app._run_startup_reconciliation(None, conn)  # must not raise
+        conn.close()
+
