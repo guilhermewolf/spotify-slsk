@@ -1,76 +1,116 @@
 # spotify-slsk
 
-## Overview
-
-**spotify-slsk** is a Python-based automation tool that monitors Spotify playlists, searches for matching tracks on Soulseek using the `slskd` API, downloads them based on audio format preferences, and tags them with accurate metadata. It is designed for 24/7 unattended operation and supports error handling, retry logic, and detailed notifications via [ntfy.sh](https://ntfy.sh).
-
----
+Keeps a local music library in sync with your Spotify playlists by finding the
+tracks on Soulseek via [`slskd`](https://github.com/slskd/slskd), tagging them,
+and filing them into per-playlist folders. Runs unattended, with a small web
+dashboard for adding playlists, watching progress and retrying what failed.
 
 ## Features
 
-- **🎵 Spotify Integration**: Automatically syncs with public Spotify playlists to track new songs.
-- **🔎 Smart Searching**: Uses the `slskd` API to find matching tracks on Soulseek, with fuzzy matching for best-fit candidates.
-- **⬇️ Controlled Downloads**: Only downloads one file per track at a time; retries once on failure with the next best match.
-- **🎯 Format Prioritisation**: Filters search results to prefer specific audio formats (e.g., `.flac`, `.mp3`, `.aiff`) via environment variable.
-- **🧠 Metadata Tagging**: Automatically tags downloaded files with title, artist, and album metadata using `mutagen`.
-- **🧹 Startup Cleanup**: On startup, it verifies existing files, cleans invalid ones, and updates download status.
-- **📂 Organised Storage**: Moves successfully downloaded and tagged files into dedicated per-playlist folders.
-- **📊 SQLite Persistence**: Keeps track of track status, download attempts, and previously tried files to avoid duplication.
-- **🔁 Retry & Suspension Logic**: Skips tracks that failed too many times and retries them after a cooling-off period.
-- **📲 ntfy.sh Integration**: Sends rich notifications on start, playlist updates, and download completions.
+- **Spotify sync** — polls your playlists and picks up new tracks. Uses Spotify's
+  `snapshot_id` to skip the expensive track fetch when a playlist hasn't changed.
+- **Quality-aware search** — format allowlist, bitrate floors (including an
+  effective-bitrate check that catches 128 kbps files retagged as 320), and a
+  version gate so a Live or Remix version isn't accepted for a studio track.
+- **Version preference** — prefers Extended Mix over Original Mix over
+  everything else, and can periodically re-search downloaded tracks for a
+  better version.
+- **Metadata tagging** — writes title/artist/album with `mutagen`, then moves
+  the file into `/playlists/<playlist>/`.
+- **Retry and back-off** — a track that fails twice is suspended for two days
+  rather than retried forever; rejected filenames are remembered so the same bad
+  file isn't downloaded again.
+- **Web dashboard** — library totals, per-playlist progress, per-track status
+  and history, manual retry, and editable settings that apply without a restart.
+- **Health** — `/healthz` plus a Docker `HEALTHCHECK` fed by a heartbeat file.
+- **ntfy notifications** — optional; silently skipped when unconfigured.
 
----
+## Requirements
 
-## Prerequisites
+- Docker and Docker Compose (recommended), or Python 3.11+
+- A running [`slskd`](https://github.com/slskd/slskd) instance and a Soulseek account
+- Spotify API credentials (client ID/secret) — playlists must be public
 
-- Python 3.9+
-- Running instance of [`slskd`](https://github.com/slskd/slskd)
-- Soulseek account credentials
-- Spotify API credentials (client ID/secret)
-- Docker (optional, but recommended)
-
----
-
-## Environment Variables
-
-| Variable                  | Description                                                   |
-|---------------------------|---------------------------------------------------------------|
-| `SPOTIPY_CLIENT_ID`       | Your Spotify API client ID                                    |
-| `SPOTIPY_CLIENT_SECRET`   | Your Spotify API client secret                                |
-| `SPOTIFY_PLAYLIST_URLS`   | Comma-separated list of Spotify playlist URLs to monitor      |
-| `SLSKD_HOST_URL`          | Base URL to your slskd instance (e.g. `http://slskd:5030`)    |
-| `SLSKD_API_KEY`           | API key configured in `slskd.yml`                             |
-| `SLSKD_PREFERRED_FORMATS` | Preferred audio formats (e.g., `.flac,.mp3,.aiff`)            |
-| `NTFY_URL`                | ntfy.sh base URL                                              |
-| `NTFY_TOPIC`              | Topic name for sending notifications                          |
-| `DOWNLOAD_ROOT`           | Directory where files are downloaded (default: `/downloads`)  |
-| `DATA_ROOT`               | Directory where verified files are moved (default: `/data`)   |
-
----
-
-## Running
-
-### 1. Clone the repo
+## Quick start
 
 ```bash
-git clone https://github.com/your-username/spotify-slsk.git
+git clone https://github.com/guilhermewolf/spotify-slsk.git
 cd spotify-slsk
+cp .env-example .env      # then fill it in
+docker compose up --build
 ```
 
-### 2. Set up your .env
+The dashboard is then on <http://127.0.0.1:8000>. Add playlists there — the
+`SPOTIFY_PLAYLIST_URLS` variable is only read on the very first boot to seed an
+empty database.
+
+## Configuration
+
+Set these in `.env`. Everything has a working default except the credentials.
+
+| Variable | Description |
+|---|---|
+| `SPOTIPY_CLIENT_ID` / `SPOTIPY_CLIENT_SECRET` | Spotify API credentials (required) |
+| `SLSKD_HOST_URL` | slskd base URL (default `http://slskd:5030`) |
+| `SLSKD_API_KEY` | API key configured in `slskd.yml` (required) |
+| `SLSKD_DOWNLOADS_DIR` | Where slskd writes downloads (default `/downloads`) |
+| `SLSKD_PLAYLISTS_DIR` | Where tagged files are filed (default `/playlists`) |
+| `SPOTIFY_PLAYLIST_URLS` | Comma-separated playlist URLs; **first boot only** |
+| `NTFY_URL` / `NTFY_TOPIC` | Optional push notifications |
+| `CYCLE_INTERVAL_SECONDS` | Seconds between sync cycles (default 300) |
+| `UI_ENABLED` / `UI_BIND_ADDR` / `UI_PORT` | Dashboard toggle and bind (default `1`, `0.0.0.0`, `8000`) |
+| `UI_SECRET_KEY` | Flask secret. Generated and stored in the DB if unset |
+| `UI_COOKIE_SECURE` | Set `1` when a reverse proxy terminates TLS |
+| `PUID` / `PGID` | UID/GID for the container (default `1000:1000`) |
+| `LOGLEVEL` / `LIB_LOGLEVEL` / `TIMEZONE` | Logging verbosity and timestamps |
+
+These are also editable from the **Settings** page, where the database value
+overrides the environment variable and changes apply on the next cycle:
+`MIN_MATCH_SCORE`, `SLSKD_PREFERRED_FORMATS`, `SLSKD_MIN_PEER_UPLOAD_SPEED`,
+`SLSKD_MIN_EFFECTIVE_MP3_KBPS`, `SLSKD_EARLY_STOP_RESPONSES`,
+`SLSKD_WAIT_TIMEOUT`, `UPGRADE_CHECK_INTERVAL_HOURS`.
+
+## Security
+
+**The dashboard has no authentication.** Compose binds it to `127.0.0.1` for
+that reason. If you expose it beyond loopback, put a reverse proxy with
+authentication in front of it, and set `UI_COOKIE_SECURE=1` if that proxy
+terminates TLS.
+
+State-changing actions are CSRF-protected, static assets are self-hosted (no
+CDN), and security headers including a CSP are sent on every response. The
+container runs as a non-root user, and `.dockerignore` keeps your `.env`,
+database and music library out of the image — do not remove it.
+
+## Development
 
 ```bash
-SPOTIPY_CLIENT_ID=your_spotify_client_id
-SPOTIPY_CLIENT_SECRET=your_spotify_client_secret
-SPOTIFY_PLAYLIST_URLS=https://open.spotify.com/playlist/...
-SLSKD_HOST_URL=http://slskd:5030
-SLSKD_API_KEY=your_api_key
-SLSKD_PREFERRED_FORMATS=.flac,.mp3,.aiff
-NTFY_URL=https://ntfy.sh
-NTFY_TOPIC=spotify-downloads
+python3 -m venv .venv
+make install PYTHON=.venv/bin/python
+make check   PYTHON=.venv/bin/python
 ```
 
-### 3. Run with Docker Compose
-````bash
-docker-compose
+`make check` runs the same compile, lint, test and dependency-audit steps as
+CI. The test suite is hermetic: `tests/conftest.py` forces fake credentials, an
+unreachable slskd host and temporary download/playlist directories, and makes a
+real slskd client or outbound HTTP request raise. It cannot touch your library
+or your database.
+
+See [CLAUDE.md](CLAUDE.md) for architecture, invariants and the reasoning behind
+the less obvious design decisions.
+
+## Backups
+
+SQLite runs in WAL mode, so `data/playlist_tracks.db` is always accompanied by
+`-wal` and `-shm` files. Copy all three, or run
+`PRAGMA wal_checkpoint(TRUNCATE);` before backing up the single file.
+
+## Releases
+
+Pushes to `main` publish `:main`, `:sha-<short>` and `:latest`. Tagging
+publishes the version tags without moving `:latest`, which is intentional so
+deployments pinned to `:latest` follow `main`:
+
+```bash
+git tag v1.0.0 && git push origin v1.0.0
 ```
