@@ -695,13 +695,34 @@ def extract_metadata_from_file(file_path):
         return None, None, None
 
 def setup_spotify_client():
+    """Build the Spotify client, or return None if credentials are missing.
+
+    Returning None rather than raising keeps the dashboard reachable so the
+    operator can see *why* nothing is syncing. Every caller already tolerates
+    a missing client: the webui falls back to a placeholder playlist name,
+    and the cycle loop skips syncing (see main()).
+    """
     logging.info("Setting up Spotify client")
-    auth_manager = SpotifyClientCredentials()
-    sp = spotipy.Spotify(auth_manager=auth_manager)
+    try:
+        auth_manager = SpotifyClientCredentials()
+        sp = spotipy.Spotify(auth_manager=auth_manager)
+    except Exception as e:
+        logging.error(
+            f"Spotify client unavailable — check SPOTIPY_CLIENT_ID / "
+            f"SPOTIPY_CLIENT_SECRET: {e}"
+        )
+        return None
     logging.info("Spotify client setup complete")
     return sp
 
 def send_ntfy_notification(url, topic, message):
+    # ntfy is optional. Without this guard an unconfigured deployment POSTs to
+    # the literal URL "None/None" on every playlist of every cycle, which
+    # raises, gets swallowed, and logs an ERROR — forever.
+    if not url or not topic:
+        logging.debug(f"ntfy not configured; skipping notification: {message}")
+        return
+
     try:
         response = requests.post(f"{url}/{topic}", data=message)
         if response.status_code == 200:
@@ -790,30 +811,68 @@ def tag_audio_file(file_path, title, artist, album):
 
 
 def wait_for_slskd_healthy(host, api_key, timeout=90, check_interval=1):
+    """Poll slskd until it reports connected+logged-in. Returns True on success.
+
+    Returns False on timeout rather than raising: an unreachable slskd is an
+    expected transient condition (compose start order, a restart upstream),
+    not a reason to kill a daemon whose dashboard the operator needs most
+    during exactly that outage. `block_until_slskd_healthy` owns the retrying.
+    """
     logging.info(f"Waiting for slskd at {host} (timeout: {timeout}s)...")
     client = get_slskd_client()
 
     start = time.time()
     last_err = None
     while time.time() - start < timeout:
+        if _shutdown.is_set():
+            return False
         try:
             state = client.application.state()
             if state['server'].get('isConnected') and state['server'].get('isLoggedIn'):
                 logging.info("slskd is healthy and connected.")
-                return
+                return True
         except Exception as e:
             last_err = e
 
         if int(time.time() - start) % 5 == 0:
             logging.debug(f"Still waiting for slskd... (last error: {last_err})")
 
-        time.sleep(check_interval)
+        if _shutdown.wait(check_interval):
+            return False
 
-    raise RuntimeError("❌ slskd did not become healthy in time.")
+    logging.warning(f"slskd did not become healthy within {timeout}s: {last_err}")
+    return False
+
+
+def block_until_slskd_healthy(host, api_key, retry_seconds=60):
+    """Keep waiting for slskd, staying alive and heartbeating while we do.
+
+    Cycles must not start before slskd is reachable: every download would
+    fail, and two failures suspend a track for two days (see
+    db.MAX_ATTEMPTS_BEFORE_SUSPEND). So a dependency outage would otherwise
+    convert into a self-inflicted two-day backlog.
+
+    Returns True when healthy, False if shutdown was requested first.
+    """
+    while not _shutdown.is_set():
+        # Keep the heartbeat fresh: the process is alive and doing its job,
+        # it is a dependency that is down. Letting the file go stale would
+        # have Docker restart us repeatedly for someone else's outage.
+        _touch_heartbeat()
+        if wait_for_slskd_healthy(host, api_key):
+            return True
+        logging.warning(
+            f"slskd still unreachable; retrying in {retry_seconds}s. "
+            f"The dashboard stays available at /healthz."
+        )
+        if _shutdown.wait(retry_seconds):
+            break
+    return False
 
 
 def process_playlist(sp, conn, playlist_id, ntfy_url, ntfy_topic):
     logging.info(f"Processing playlist ID: {playlist_id}")
+    _touch_heartbeat()
 
     new_tracks, playlist_name = fetch_and_compare_tracks(conn, playlist_id, sp)
 
@@ -827,6 +886,11 @@ def process_playlist(sp, conn, playlist_id, ntfy_url, ntfy_topic):
             if _shutdown.is_set():
                 logging.info("Shutdown requested, stopping track processing")
                 return
+            # One track can occupy several minutes (60s search + up to 300s
+            # transfer + 60s post-processing, per candidate). Touching the
+            # heartbeat per track is what lets the Docker HEALTHCHECK tell a
+            # slow-but-working daemon from a wedged one.
+            _touch_heartbeat()
             logging.info(f"Downloading: {track.name} by {track.artist}")
             success = handle_track_download(track, playlist_name, conn, max_attempts=2)
             if success:
@@ -948,6 +1012,7 @@ def _run_upgrade_pass(conn, playlist_name):
         if _shutdown.is_set():
             logging.info("[upgrade] Shutdown requested, stopping upgrade pass")
             return
+        _touch_heartbeat()
         try:
             try_upgrade_track(track, playlist_name, conn, current_path)
         except Exception:
@@ -1019,19 +1084,21 @@ def main():
     ntfy_url = os.getenv("NTFY_URL")
     ntfy_topic = os.getenv("NTFY_TOPIC")
 
-    wait_for_slskd_healthy(slskd_host_url, slskd_api_key)
-    send_ntfy_notification(ntfy_url, ntfy_topic, "Spotify Playlist Downloader starting")
-    sp = setup_spotify_client()
-
     conn = create_connection("./data/playlist_tracks.db")
     if not conn:
         logging.error("Failed to connect to the SQLite database.")
         return
 
     try:
+        sp = setup_spotify_client()
         _migrate_env_playlists(conn, sp)
         _reload_settings(conn)
 
+        # Bring the dashboard up before waiting on slskd. Previously the
+        # slskd wait ran first and raised on timeout, so an slskd outage took
+        # the whole process down — and with it the UI and /healthz the
+        # operator needed to diagnose the outage — leaving Docker to
+        # crash-loop the container every ~90s.
         if os.getenv("UI_ENABLED", "1") == "1":
             from webui import run_in_thread as _run_webui
             _run_webui(
@@ -1042,13 +1109,28 @@ def main():
                 port=int(os.getenv("UI_PORT", "8000")),
             )
 
+        if not block_until_slskd_healthy(slskd_host_url, slskd_api_key):
+            return  # shutdown requested while waiting
+
+        send_ntfy_notification(
+            ntfy_url, ntfy_topic, "Spotify Playlist Downloader starting"
+        )
         _run_startup_reconciliation(sp, conn)
 
         while not _shutdown.is_set():
             _touch_heartbeat()
             _reload_settings(conn)
             playlists = list_playlists(conn, only_enabled=True)
-            if not playlists:
+            if sp is None:
+                # No Spotify credentials. Idle rather than spin: syncing is
+                # impossible and attempting downloads would burn attempts and
+                # suspend tracks for two days over a config error.
+                logging.error(
+                    "Spotify client unavailable; skipping cycle. Set "
+                    "SPOTIPY_CLIENT_ID / SPOTIPY_CLIENT_SECRET and restart."
+                )
+                playlists = []
+            elif not playlists:
                 logging.info(
                     "No enabled playlists; waiting for the UI to add some"
                 )
