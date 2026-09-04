@@ -340,3 +340,73 @@ class TestSecretKeyPersistence:
         create_app(app_tmp.config["DB_PATH"], spotify_client=None)
         body = client.get("/settings").data
         assert b"_ui_secret_key" not in body
+
+
+class TestSettingsValidation:
+    """A setting that silently fails to apply is worse than no setting.
+
+    _reload_settings keeps the previous value when a stored value won't
+    parse, so an unvalidated save reported success for a value the daemon
+    then ignored forever.
+    """
+
+    def test_non_numeric_score_is_rejected(self, app_tmp, client):
+        r = post(client, "/settings", data={"MIN_MATCH_SCORE": "garbage"},
+                 follow_redirects=True)
+        assert b"must be a number" in r.data
+
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        assert db.list_settings(conn).get("MIN_MATCH_SCORE") is None
+        conn.close()
+
+    def test_out_of_range_score_is_rejected(self, client):
+        r = post(client, "/settings", data={"MIN_MATCH_SCORE": "1.5"},
+                 follow_redirects=True)
+        assert b"between 0 and 1" in r.data
+
+    def test_negative_integer_is_rejected(self, client):
+        r = post(client, "/settings", data={"SLSKD_MIN_EFFECTIVE_MP3_KBPS": "-5"},
+                 follow_redirects=True)
+        assert b"must be &gt;= 0" in r.data or b"must be >= 0" in r.data
+
+    def test_zero_rejected_where_minimum_is_one(self, client):
+        r = post(client, "/settings", data={"SLSKD_WAIT_TIMEOUT": "0"},
+                 follow_redirects=True)
+        assert b"must be" in r.data
+
+    def test_unknown_audio_format_is_rejected(self, client):
+        r = post(client, "/settings", data={"SLSKD_PREFERRED_FORMATS": "flac,exe"},
+                 follow_redirects=True)
+        assert b"unsupported format" in r.data
+
+    def test_formats_are_normalised(self, app_tmp, client):
+        post(client, "/settings",
+             data={"SLSKD_PREFERRED_FORMATS": " .FLAC , MP3 "},
+             follow_redirects=True)
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        assert db.list_settings(conn)["SLSKD_PREFERRED_FORMATS"] == "flac,mp3"
+        conn.close()
+
+    def test_one_bad_field_does_not_half_apply_the_form(self, app_tmp, client):
+        r = post(client, "/settings",
+                 data={"MIN_MATCH_SCORE": "0.8", "SLSKD_WAIT_TIMEOUT": "nope"},
+                 follow_redirects=True)
+        assert r.status_code == 200
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        stored = db.list_settings(conn)
+        conn.close()
+        assert stored.get("MIN_MATCH_SCORE") is None, "valid field applied despite an invalid one"
+
+    def test_valid_values_still_save(self, app_tmp, client):
+        post(client, "/settings",
+             data={"MIN_MATCH_SCORE": "0.75", "SLSKD_WAIT_TIMEOUT": "90"},
+             follow_redirects=True)
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        stored = db.list_settings(conn)
+        conn.close()
+        assert stored["MIN_MATCH_SCORE"] == "0.75"
+        assert stored["SLSKD_WAIT_TIMEOUT"] == "90"
+
+    def test_removed_dead_knob_is_not_offered(self, client):
+        """SLSKD_MAX_RETRIES was configurable but wired to nothing."""
+        assert b"SLSKD_MAX_RETRIES" not in client.get("/settings").data

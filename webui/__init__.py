@@ -53,16 +53,60 @@ def _fetch_playlist_name(sp, pid: str) -> str:
     raise last_exc
 
 
+# (key, default, help text, kind). `kind` drives validation on save — an
+# unvalidated setting is worse than no setting: the daemon's _reload_settings
+# silently keeps the previous value on a bad parse, so the UI would report
+# "Saved" for a value that never takes effect.
 SETTINGS_SPEC = [
-    ("MIN_MATCH_SCORE", "0.62", "Accept threshold for downloaded-file -> DB match (0.0-1.0)"),
-    ("SLSKD_PREFERRED_FORMATS", "flac,mp3,aiff,wav", "Comma-separated, ordered — first format wins ties"),
-    ("SLSKD_MIN_PEER_UPLOAD_SPEED", "0", "Passed to slskd; bytes/sec"),
-    ("SLSKD_MIN_EFFECTIVE_MP3_KBPS", "280", "Reject MP3s whose size/duration yields below this"),
-    ("SLSKD_EARLY_STOP_RESPONSES", "20", "Stop the slskd search once this many peers replied"),
-    ("SLSKD_MAX_RETRIES", "2", "Per-search download attempt cap"),
-    ("SLSKD_WAIT_TIMEOUT", "60", "Seconds to wait for a downloaded file to appear on disk"),
-    ("UPGRADE_CHECK_INTERVAL_HOURS", "168", "Re-search downloaded tracks for a better version_tier (Extended Mix > Original Mix); 0 disables"),
+    ("MIN_MATCH_SCORE", "0.62", "Accept threshold for downloaded-file -> DB match (0.0-1.0)", "ratio"),
+    ("SLSKD_PREFERRED_FORMATS", "flac,mp3,aiff,wav", "Comma-separated, ordered — first format wins ties", "formats"),
+    ("SLSKD_MIN_PEER_UPLOAD_SPEED", "0", "Passed to slskd; bytes/sec", "int0"),
+    ("SLSKD_MIN_EFFECTIVE_MP3_KBPS", "280", "Reject MP3s whose size/duration yields below this", "int0"),
+    ("SLSKD_EARLY_STOP_RESPONSES", "20", "Stop the slskd search once this many peers replied", "int1"),
+    ("SLSKD_WAIT_TIMEOUT", "60", "Seconds to wait for a downloaded file to appear on disk", "int1"),
+    ("UPGRADE_CHECK_INTERVAL_HOURS", "168", "Re-search downloaded tracks for a better version_tier (Extended Mix > Original Mix); 0 disables", "int0"),
 ]
+
+# Formats the tagging/'extract metadata' code in app.py can actually handle.
+_KNOWN_FORMATS = {"flac", "mp3", "aiff", "wav", "m4a", "ogg"}
+
+
+def validate_setting(kind: str, value: str):
+    """Return (normalised_value, error). Exactly one is non-None."""
+    if kind == "ratio":
+        try:
+            parsed = float(value)
+        except ValueError:
+            return None, "must be a number between 0 and 1"
+        if not 0.0 <= parsed <= 1.0:
+            return None, "must be between 0 and 1"
+        return str(parsed), None
+
+    if kind in ("int0", "int1"):
+        minimum = 0 if kind == "int0" else 1
+        try:
+            parsed = int(value)
+        except ValueError:
+            return None, f"must be a whole number >= {minimum}"
+        if parsed < minimum:
+            return None, f"must be >= {minimum}"
+        return str(parsed), None
+
+    if kind == "formats":
+        items = [f.strip().lstrip(".").lower() for f in value.split(",")]
+        items = [f for f in items if f]
+        if not items:
+            return None, "needs at least one format"
+        unknown = [f for f in items if f not in _KNOWN_FORMATS]
+        if unknown:
+            return None, (
+                f"unsupported format(s): {', '.join(unknown)}. "
+                f"Known: {', '.join(sorted(_KNOWN_FORMATS))}"
+            )
+        return ",".join(items), None
+
+    return value, None
+
 
 
 # Reserved settings key holding the generated Flask secret. It is not in
@@ -348,19 +392,38 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
     @app.route("/settings", methods=["GET", "POST"])
     def settings():
         if request.method == "POST":
-            for key, _default, _help in SETTINGS_SPEC:
+            # Validate everything before writing anything, so a form with one
+            # bad field doesn't half-apply.
+            cleaned, errors = {}, []
+            for key, _default, _help, kind in SETTINGS_SPEC:
                 val = (request.form.get(key) or "").strip()
-                if val:
-                    db.set_setting(g.conn, key, val)
+                if not val:
+                    cleaned[key] = None  # clear the override
+                    continue
+                normalised, error = validate_setting(kind, val)
+                if error:
+                    errors.append(f"{key}: {error}")
                 else:
+                    cleaned[key] = normalised
+
+            if errors:
+                for message in errors:
+                    flash(message, "error")
+                return redirect(url_for("settings"))
+
+            for key, value in cleaned.items():
+                if value is None:
                     db.delete_setting(g.conn, key)
+                else:
+                    db.set_setting(g.conn, key, value)
+            _wake()
             flash("Saved. Takes effect on the next cycle.", "success")
             return redirect(url_for("settings"))
 
         overrides = db.list_settings(g.conn)
         effective = {
             key: db.get_setting(g.conn, key, default=default)
-            for key, default, _help in SETTINGS_SPEC
+            for key, default, _help, _kind in SETTINGS_SPEC
         }
         return render_template(
             "settings.html",

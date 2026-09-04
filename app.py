@@ -892,7 +892,7 @@ def process_playlist(sp, conn, playlist_id, ntfy_url, ntfy_topic):
             # slow-but-working daemon from a wedged one.
             _touch_heartbeat()
             logging.info(f"Downloading: {track.name} by {track.artist}")
-            success = handle_track_download(track, playlist_name, conn, max_attempts=2)
+            success = handle_track_download(track, playlist_name, conn)
             if success:
                 logging.info(f"Downloaded: {track.name} by {track.artist}")
             else:
@@ -910,7 +910,7 @@ def safe_get(tag):
         return tag[0]
     return tag
 
-def handle_track_download(track, playlist_name, conn, max_attempts=2):
+def handle_track_download(track, playlist_name, conn):
     """Search slskd (with query fall-through) and download the best match."""
     file_path = search_and_download(
         artist=track.artist,
@@ -919,7 +919,6 @@ def handle_track_download(track, playlist_name, conn, max_attempts=2):
         playlist_name=playlist_name,
         track_id=track.id,
         album=track.album,
-        max_attempts=max_attempts,
     )
 
     if file_path:
@@ -960,7 +959,6 @@ def try_upgrade_track(track, playlist_name, conn, current_path):
         playlist_name=playlist_name,
         track_id=track.id,
         album=track.album,
-        max_attempts=2,
         max_version_tier=current_tier,
     )
     if not new_file:
