@@ -6,8 +6,10 @@ on:
       - "**"
   pull_request:
 
+# Every step below is a Makefile target, so `make check` locally runs exactly
+# what CI runs — no "works only in GitHub Actions" drift.
 jobs:
-  lint-and-test:
+  quality-gate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,12 +18,37 @@ jobs:
           python-version: "3.11"
           cache: pip
       - name: Install runtime + dev dependencies
-        run: |
-          pip install --quiet -r requirements.txt
-          pip install --quiet -r requirements-dev.txt
+        run: make install PYTHON=python
       - name: Syntax-check all Python sources
-        run: python -m compileall -q .
+        run: make compile PYTHON=python
       - name: Ruff (errors only)
-        run: ruff check --select=E,F,W --ignore=E501 .
+        run: make lint PYTHON=python
       - name: Pytest
-        run: pytest -q
+        run: make test PYTHON=python
+      - name: Dependency vulnerability audit
+        run: make audit PYTHON=python
+
+  container:
+    # Building the image is part of the gate: a Dockerfile or dependency
+    # change that breaks the build should fail the PR, not the release.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: make docker-build
+      - name: Verify it runs as a non-root user and imports cleanly
+        run: |
+          docker run --rm --entrypoint sh spotify-slsk:local -c '
+            set -e
+            [ "$(id -u)" = "1000" ] || { echo "image runs as $(id -u), expected 1000"; exit 1; }
+            python -c "import app, db, soulseek_api, webui"
+            echo "image OK"
+          '
+      - name: Verify no secrets or media were baked into the image
+        run: |
+          docker run --rm --entrypoint sh spotify-slsk:local -c '
+            for p in /app/.env /app/data /app/playlists /app/slsk_app; do
+              if [ -e "$p" ]; then echo "build context leaked $p into the image"; exit 1; fi
+            done
+            echo "no leaked paths"
+          '

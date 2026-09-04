@@ -1,2 +1,4 @@
 pytest==8.3.3
 ruff==0.5.5
+# Dependency vulnerability scanning; run via `make audit` and in CI.
+pip-audit==2.9.0
