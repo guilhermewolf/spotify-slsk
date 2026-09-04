@@ -14,3 +14,4 @@ docker-compose.test.yaml
 data-test/
 playlists-test/
 docker-compose.test.yaml
+graphify-out/

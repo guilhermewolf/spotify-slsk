@@ -22,8 +22,32 @@ from flask import (
     url_for,
 )
 
+import requests
+
 import db
 from utils import get_playlist_id, sanitize_table_name
+
+
+# The daemon and this web thread share one spotipy client, and spotipy's
+# underlying requests.Session is not thread-safe; a stale pooled connection
+# also shows up here as RemoteDisconnected. Retry a couple of times before
+# giving up — a retry gets a fresh socket.
+SPOTIFY_TRANSPORT_RETRIES = 3
+
+
+def _fetch_playlist_name(sp, pid: str) -> str:
+    last_exc = None
+    for attempt in range(SPOTIFY_TRANSPORT_RETRIES):
+        try:
+            return sp.playlist(pid, fields="name")["name"]
+        except requests.exceptions.RequestException as e:
+            last_exc = e
+            logging.warning(
+                f"Spotify transport error for {pid} "
+                f"(attempt {attempt + 1}/{SPOTIFY_TRANSPORT_RETRIES}): {e}"
+            )
+            time.sleep(0.5 * (attempt + 1))
+    raise last_exc
 
 
 SETTINGS_SPEC = [
@@ -132,8 +156,17 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
         sp = app.config.get("SPOTIFY")
         if sp is not None:
             try:
-                info = sp.playlist(pid, fields="name")
-                name = info["name"]
+                name = _fetch_playlist_name(sp, pid)
+            except requests.exceptions.RequestException as e:
+                # Transport-level failure: a stale keep-alive socket, or the
+                # daemon thread using the same requests.Session at the same
+                # time. The playlist itself is probably fine, so add it under
+                # a placeholder name and let the first sync correct it.
+                logging.warning(
+                    f"Spotify unreachable while validating {pid}; "
+                    f"adding unvalidated: {e}"
+                )
+                name = pid
             except Exception as e:
                 logging.warning(f"Spotify validation failed for {pid}: {e}")
                 flash(f"Spotify rejected that playlist: {e}", "error")
