@@ -455,7 +455,15 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
             flash("Saved. Takes effect on the next cycle.", "success")
             return redirect(url_for("settings"))
 
-        overrides = db.list_settings(g.conn)
+        # Underscore-prefixed keys are internal (currently _ui_secret_key).
+        # The template only renders SETTINGS_SPEC keys today, so this is
+        # belt-and-braces — but a secret should never be one careless
+        # template loop away from being rendered.
+        overrides = {
+            key: value
+            for key, value in db.list_settings(g.conn).items()
+            if not key.startswith("_")
+        }
         effective = {
             key: db.get_setting(g.conn, key, default=default)
             for key, default, _help, _kind in SETTINGS_SPEC

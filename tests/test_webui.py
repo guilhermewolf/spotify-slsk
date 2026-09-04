@@ -456,3 +456,17 @@ class TestDatabaseUnavailable:
 
         r = app.test_client().get("/")
         assert r.status_code == 503
+
+
+class TestInternalSettingsAreNotExposed:
+    def test_overrides_passed_to_the_template_exclude_private_keys(self, app_tmp, client):
+        """The secret key lives in the settings table; keep it out of the view."""
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        db.set_setting(conn, "_ui_secret_key", "super-secret-value")
+        db.set_setting(conn, "MIN_MATCH_SCORE", "0.8")
+        conn.close()
+
+        body = client.get("/settings").data
+        assert b"super-secret-value" not in body
+        assert b"_ui_secret_key" not in body
+        assert b"0.8" in body, "ordinary overrides must still render"
