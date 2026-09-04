@@ -47,8 +47,15 @@ def setup_logging():
     handler = logging.StreamHandler()
     handler.setFormatter(formatter)
 
+    # Mirror every record into the in-memory ring buffer so the web UI can
+    # tail it. Stays alongside the stdout handler — Docker still captures the
+    # stream.
+    from .runtime_state import RingBufferHandler
+    buffer_handler = RingBufferHandler()
+    buffer_handler.setFormatter(formatter)
+
     root = logging.getLogger()
-    root.handlers = [handler]
+    root.handlers = [handler, buffer_handler]
     root.setLevel(log_level)
 
     for name in _NOISY_LIBRARIES:

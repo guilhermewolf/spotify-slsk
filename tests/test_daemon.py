@@ -155,6 +155,10 @@ class TestHeartbeatDuringWork:
         monkeypatch.setattr(
             app, "fetch_and_compare_tracks", lambda conn, pid, sp: ([], "pl_x")
         )
+        # process_playlist reads the stored name for the activity badge.
+        monkeypatch.setattr(
+            app, "get_playlist_meta", lambda conn, pid: (None, "pl_x", "X", None)
+        )
         monkeypatch.setattr(
             app,
             "get_pending_tracks",
@@ -176,6 +180,10 @@ class TestShutdownResponsiveness:
     def test_process_playlist_stops_between_tracks(self, monkeypatch):
         monkeypatch.setattr(
             app, "fetch_and_compare_tracks", lambda conn, pid, sp: ([], "pl_x")
+        )
+        # process_playlist reads the stored name for the activity badge.
+        monkeypatch.setattr(
+            app, "get_playlist_meta", lambda conn, pid: (None, "pl_x", "X", None)
         )
         monkeypatch.setattr(
             app,

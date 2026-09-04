@@ -57,4 +57,21 @@
   <button type="submit" style="width:auto">Save settings</button>
 </form>
 
+<article>
+  <header>
+    <strong>Notifications</strong>
+    <div class="subtle">ntfy is configured by environment variable, not here</div>
+  </header>
+  <p class="subtle">
+    Sends one notification to the configured <code>NTFY_URL</code> /
+    <code>NTFY_TOPIC</code> so you can confirm delivery works.
+  </p>
+  <form method="POST" action="{{ url_for('test_ntfy') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button type="submit" class="secondary outline" style="width:auto">
+      Send test notification
+    </button>
+  </form>
+</article>
+
 {% endblock %}

@@ -23,8 +23,10 @@ from .db import (
     get_setting,
     get_upgrade_candidates,
     mark_upgrade_checked,
+    record_cycle,
 )
 from .log_config import setup_logging
+from . import runtime_state
 from mutagen import File as MutagenFile
 from mutagen.id3 import ID3, TIT2, TPE1, TALB
 from mutagen.flac import FLAC
@@ -871,10 +873,30 @@ def block_until_slskd_healthy(host, api_key, retry_seconds=60):
 
 
 def process_playlist(sp, conn, playlist_id, ntfy_url, ntfy_topic):
+    """Sync + download for one playlist. Returns per-playlist counters
+    (tracks_added/downloaded/failed) so the caller can aggregate them
+    into a cycle_history row.
+    """
     logging.info(f"Processing playlist ID: {playlist_id}")
     _touch_heartbeat()
 
+    # Best-effort name lookup so the activity badge has something readable
+    # before the Spotify fetch returns.
+    _, _stored_table, stored_name, _ = get_playlist_meta(conn, playlist_id)
+    runtime_state.set_activity(
+        "syncing",
+        detail="Fetching playlist from Spotify",
+        playlist_id=playlist_id,
+        playlist_name=stored_name,
+        table_name=_stored_table,
+    )
+
     new_tracks, playlist_name = fetch_and_compare_tracks(conn, playlist_id, sp)
+    counters = {
+        "tracks_added": len(new_tracks),
+        "tracks_downloaded": 0,
+        "tracks_failed": 0,
+    }
 
     if new_tracks:
         msg = f"Playlist updated: {len(new_tracks)} new track(s) added to {playlist_name}"
@@ -885,24 +907,44 @@ def process_playlist(sp, conn, playlist_id, ntfy_url, ntfy_topic):
         for track in tracks:
             if _shutdown.is_set():
                 logging.info("Shutdown requested, stopping track processing")
-                return
+                return counters
             # One track can occupy several minutes (60s search + up to 300s
             # transfer + 60s post-processing, per candidate). Touching the
             # heartbeat per track is what lets the Docker HEALTHCHECK tell a
             # slow-but-working daemon from a wedged one.
             _touch_heartbeat()
+            runtime_state.set_activity(
+                "downloading",
+                detail=f"{track.name} — {track.artist}",
+                playlist_id=playlist_id,
+                playlist_name=playlist_name,
+                table_name=playlist_name,
+                track_id=track.id,
+                track_name=track.name,
+                track_artist=track.artist,
+            )
             logging.info(f"Downloading: {track.name} by {track.artist}")
             success = handle_track_download(track, playlist_name, conn)
             if success:
+                counters["tracks_downloaded"] += 1
                 logging.info(f"Downloaded: {track.name} by {track.artist}")
             else:
+                counters["tracks_failed"] += 1
                 logging.warning(f"Failed: {track.name} by {track.artist}")
     else:
         logging.info(f"No pending tracks for {playlist_name}")
 
+    runtime_state.set_activity(
+        "upgrading",
+        detail="Checking for higher-tier versions",
+        playlist_id=playlist_id,
+        playlist_name=playlist_name,
+        table_name=playlist_name,
+    )
     _run_upgrade_pass(conn, playlist_name)
 
     send_ntfy_notification(ntfy_url, ntfy_topic, f"Finished processing playlist: {playlist_name}")
+    return counters
 
 
 def safe_get(tag):
@@ -1076,11 +1118,13 @@ def main():
     _install_signal_handlers()
     _slsk_set_shutdown_event(_shutdown)
     logging.info("Starting main process")
+    runtime_state.set_activity("starting", detail="Daemon booting")
 
     slskd_api_key = os.getenv("SLSKD_API_KEY")
     slskd_host_url = os.getenv("SLSKD_HOST_URL", "http://slskd:5030")
     ntfy_url = os.getenv("NTFY_URL")
     ntfy_topic = os.getenv("NTFY_TOPIC")
+
 
     conn = create_connection("./data/playlist_tracks.db")
     if not conn:
@@ -1108,6 +1152,9 @@ def main():
                 port=int(os.getenv("UI_PORT", "8000")),
             )
 
+        runtime_state.set_activity(
+            "waiting_slskd", detail=f"Waiting for slskd at {slskd_host_url}"
+        )
         if not block_until_slskd_healthy(slskd_host_url, slskd_api_key):
             return  # shutdown requested while waiting
 
@@ -1119,6 +1166,9 @@ def main():
         # 'NoneType' has no attribute 'playlist' traceback per playlist per
         # boot instead of being told the actual problem.
         if sp is not None:
+            runtime_state.set_activity(
+                "reconciling", detail="Matching local files to DB"
+            )
             _run_startup_reconciliation(sp, conn)
         else:
             logging.error(
@@ -1147,28 +1197,54 @@ def main():
                 logging.info(
                     f"Starting new cycle ({len(playlists)} enabled playlist(s))"
                 )
+            cycle_started_at = time.time()
+            cycle_totals = {
+                "tracks_added": 0,
+                "tracks_downloaded": 0,
+                "tracks_failed": 0,
+            }
             try:
                 for pl in playlists:
                     if _shutdown.is_set():
                         break
-                    process_playlist(
+                    counters = process_playlist(
                         sp, conn, pl["playlist_id"], ntfy_url, ntfy_topic
                     )
+                    if counters:
+                        for k in cycle_totals:
+                            cycle_totals[k] += counters.get(k, 0)
             except Exception:
                 logging.exception("Cycle failed; backing off and retrying")
                 if _shutdown.wait(CYCLE_ERROR_BACKOFF_SECONDS):
                     break
                 continue
+            # Only record cycles that did real work — empty-playlist ticks
+            # would dilute the dashboard view of recent activity.
+            if playlists:
+                record_cycle(
+                    conn,
+                    started_at=cycle_started_at,
+                    duration_seconds=time.time() - cycle_started_at,
+                    playlists_synced=len(playlists),
+                    tracks_added=cycle_totals["tracks_added"],
+                    tracks_downloaded=cycle_totals["tracks_downloaded"],
+                    tracks_failed=cycle_totals["tracks_failed"],
+                )
             # Sleep until the next cycle, but allow the webui (or a signal
             # handler) to interrupt us via _wake_event.set(). Clearing
             # *after* the wait means a wake_now() that arrives during the
             # cycle is preserved and shortcuts the next sleep.
+            runtime_state.set_activity(
+                "idle",
+                detail=f"Sleeping up to {CYCLE_INTERVAL_SECONDS}s until next cycle",
+            )
             if _wake_event.wait(CYCLE_INTERVAL_SECONDS):
                 _wake_event.clear()
                 if _shutdown.is_set():
                     break
                 logging.info("Cycle interrupted by wake request; starting next cycle")
     finally:
+        runtime_state.set_activity("shutting_down", detail="Closing connections")
         logging.info("Shutting down, closing database connection")
         try:
             conn.close()

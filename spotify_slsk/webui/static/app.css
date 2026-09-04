@@ -456,3 +456,78 @@ button.outline.danger:focus {
    width so the search field takes the free space, not the button. */
 .filter-form button,
 .filter-form [role="button"] { flex: 0 0 auto; }
+
+/* ---- live activity + logs (from the observability feature) ---------- */
+/* Ported from inline <style> so the CSP needs no style exemption, and
+ * rewritten onto the token palette so both themes stay legible. */
+
+.activity {
+  background: var(--pico-card-background-color);
+  border: 1px solid var(--pico-muted-border-color);
+  border-left: 4px solid var(--ss-pending);
+  padding: 0.6rem 0.9rem;
+  margin: 0 0 1rem;
+  border-radius: var(--ss-radius);
+}
+.activity .phase {
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  margin-right: 0.6rem;
+}
+.activity .ago {
+  color: var(--pico-muted-color);
+  font-size: 0.8rem;
+  margin-left: 0.5rem;
+}
+.activity.idle           { border-left-color: var(--ss-pending); }
+.activity.downloading    { border-left-color: var(--ss-ok); }
+.activity.syncing        { border-left-color: var(--pico-primary); }
+.activity.upgrading      { border-left-color: #9b59b6; }
+.activity.starting,
+.activity.reconciling,
+.activity.waiting_slskd  { border-left-color: var(--ss-retry); }
+.activity.shutting_down  { border-left-color: var(--ss-suspended); }
+
+/* "the daemon is on this row right now" */
+.row-active { box-shadow: inset 3px 0 0 var(--ss-ok); }
+
+.log-viewer {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  background: #1e1f24;
+  color: #e8e8e8;
+  padding: 0.75rem;
+  border-radius: var(--ss-radius);
+  height: 70vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.log-line { padding: 1px 0; }
+.log-line.WARNING              { color: #f1c40f; }
+.log-line.ERROR,
+.log-line.CRITICAL             { color: #ff6b6b; }
+.log-line.DEBUG                { color: #95a5a6; }
+
+.log-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: center;
+  margin-bottom: 0.5rem;
+  font-size: 0.85rem;
+}
+.log-controls label { margin: 0; display: inline-flex; align-items: center; gap: 0.35rem; }
+.log-controls select { margin: 0; width: auto; }
+
+.theme-toggle {
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font-size: 1.05rem;
+  padding: 0.2rem 0.4rem;
+  width: auto;
+  color: var(--pico-muted-color);
+}

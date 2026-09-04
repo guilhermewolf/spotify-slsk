@@ -7,6 +7,7 @@ import slskd_api
 from rapidfuzz import fuzz
 
 from .db import get_tried_files, add_tried_file, get_setting
+from . import runtime_state
 
 DEFAULT_FORMATS = "flac,mp3,aiff,wav"
 
@@ -549,6 +550,11 @@ def search_and_download(
         return None
     for query in queries:
         results = _run_one_search(query, timeout)
+        # Record every attempt — even empty ones — so the inspector shows
+        # the full waterfall the daemon actually walked.
+        runtime_state.record_search(
+            track_id, query, result_count=len(results) if results else 0
+        )
         if not results:
             continue
         file_path = download_and_verify(

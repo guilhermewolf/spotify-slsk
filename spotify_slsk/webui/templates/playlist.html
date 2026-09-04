@@ -16,6 +16,8 @@
   </form>
 </div>
 
+{% include "_activity.html" %}
+
 <nav aria-label="Filter tracks by status">
   <ul class="filters">
     {# (label, status value, count) — a chip is only useful with its size. #}
@@ -64,10 +66,13 @@
     </thead>
     <tbody>
     {% for t in tracks %}
-      <tr>
+      {% set is_active = activity and activity.track_id == t.id
+                         and activity.playlist_id == playlist_id %}
+      <tr class="{{ 'row-active' if is_active }}">
         <td>
           <a class="track-title"
              href="{{ url_for('track_detail', playlist_id=playlist_id, track_id=t.id) }}">{{ t.name }}</a>
+          {% if is_active %}<span class="badge badge-retrying">downloading now</span>{% endif %}
           <div class="subtle">{{ t.artists }}</div>
         </td>
         <td class="subtle">{{ t.album }}</td>

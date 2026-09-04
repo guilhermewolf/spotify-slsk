@@ -10,6 +10,8 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='pico.classless.min.css') }}">
   <script src="{{ url_for('static', filename='htmx.min.js') }}" defer></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  <!-- Not deferred: applies the stored theme before first paint. -->
+  <script src="{{ url_for('static', filename='theme.js') }}"></script>
 </head>
 <body>
   <!-- Keyboard users shouldn't have to tab through the nav on every page. -->
@@ -26,8 +28,16 @@
              {% if active_page == 'dashboard' %}aria-current="page"{% endif %}>Dashboard</a>
         </li>
         <li>
+          <a href="{{ url_for('logs_page') }}"
+             {% if active_page == 'logs' %}aria-current="page"{% endif %}>Logs</a>
+        </li>
+        <li>
           <a href="{{ url_for('settings') }}"
              {% if active_page == 'settings' %}aria-current="page"{% endif %}>Settings</a>
+        </li>
+        <li>
+          <button type="button" class="theme-toggle" id="theme-toggle"
+                  title="Toggle dark mode" aria-label="Toggle dark mode">🌓</button>
         </li>
       </ul>
       {% if health is defined and health %}

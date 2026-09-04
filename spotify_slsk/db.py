@@ -3,7 +3,7 @@ import sqlite3
 import logging
 from .models import Track
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
@@ -84,12 +84,35 @@ def _ensure_settings_table(conn: sqlite3.Connection) -> None:
         logging.error(f"Error ensuring settings: {e}")
 
 
+def _ensure_cycle_history_table(conn: sqlite3.Connection) -> None:
+    """One row per completed daemon cycle (added in schema v4).
+
+    Survives restarts so the dashboard can show trends across deploys —
+    that's the only reason this lives in the DB instead of runtime_state.
+    """
+    try:
+        with conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS cycle_history ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "started_at TIMESTAMP NOT NULL, "
+                "duration_seconds REAL NOT NULL, "
+                "playlists_synced INTEGER NOT NULL DEFAULT 0, "
+                "tracks_added INTEGER NOT NULL DEFAULT 0, "
+                "tracks_downloaded INTEGER NOT NULL DEFAULT 0, "
+                "tracks_failed INTEGER NOT NULL DEFAULT 0)"
+            )
+    except sqlite3.Error as e:
+        logging.error(f"Error ensuring cycle_history: {e}")
+
+
 def create_connection(db_file):
     try:
         conn = sqlite3.connect(db_file, timeout=30)
         _apply_pragmas(conn)
         _ensure_playlists_meta_table(conn)
         _ensure_settings_table(conn)
+        _ensure_cycle_history_table(conn)
         _ensure_schema_version(conn)
 
         # sqlite3.connect() succeeds on a corrupt or non-SQLite file — the
@@ -271,6 +294,74 @@ def list_settings(conn) -> dict:
     except sqlite3.Error as e:
         logging.warning(f"Could not list settings: {e}")
         return {}
+
+
+def record_cycle(
+    conn,
+    *,
+    started_at: float,
+    duration_seconds: float,
+    playlists_synced: int,
+    tracks_added: int,
+    tracks_downloaded: int,
+    tracks_failed: int,
+    keep_last: int = 200,
+) -> None:
+    """Persist one cycle's stats and prune anything older than ``keep_last``.
+
+    Capping in the same transaction keeps the table from growing without
+    bound on long-running deployments.
+    """
+    try:
+        from datetime import datetime, timezone
+        ts = datetime.fromtimestamp(started_at, tz=timezone.utc).isoformat()
+        with conn:
+            conn.execute(
+                "INSERT INTO cycle_history "
+                "(started_at, duration_seconds, playlists_synced, "
+                "tracks_added, tracks_downloaded, tracks_failed) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    ts,
+                    duration_seconds,
+                    playlists_synced,
+                    tracks_added,
+                    tracks_downloaded,
+                    tracks_failed,
+                ),
+            )
+            conn.execute(
+                "DELETE FROM cycle_history WHERE id NOT IN ("
+                "SELECT id FROM cycle_history ORDER BY id DESC LIMIT ?)",
+                (keep_last,),
+            )
+    except sqlite3.Error as e:
+        logging.error(f"Error recording cycle history: {e}")
+
+
+def list_cycles(conn, limit: int = 20) -> list:
+    """Return the most recent cycles, newest first."""
+    try:
+        rows = conn.execute(
+            "SELECT started_at, duration_seconds, playlists_synced, "
+            "tracks_added, tracks_downloaded, tracks_failed "
+            "FROM cycle_history ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [
+            {
+                "started_at": r[0],
+                "duration_seconds": r[1],
+                "playlists_synced": r[2],
+                "tracks_added": r[3],
+                "tracks_downloaded": r[4],
+                "tracks_failed": r[5],
+            }
+            for r in rows
+        ]
+    except sqlite3.Error as e:
+        logging.warning(f"Could not list cycle history: {e}")
+        return []
 
 
 def playlist_stats(conn, table_name: str) -> dict:

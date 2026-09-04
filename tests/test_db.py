@@ -366,3 +366,55 @@ class TestSchemaMigrations:
         path = tmp_path / "corrupt.db"
         path.write_bytes(b"this is definitely not a sqlite database" * 10)
         assert db.create_connection(str(path)) is None
+class TestCycleHistory:
+    def test_record_then_list(self, conn):
+        import time as _time
+        db.record_cycle(
+            conn,
+            started_at=_time.time(),
+            duration_seconds=12.5,
+            playlists_synced=3,
+            tracks_added=2,
+            tracks_downloaded=5,
+            tracks_failed=1,
+        )
+        rows = db.list_cycles(conn, limit=10)
+        assert len(rows) == 1
+        assert rows[0]["playlists_synced"] == 3
+        assert rows[0]["tracks_downloaded"] == 5
+        assert rows[0]["tracks_failed"] == 1
+        assert rows[0]["duration_seconds"] == 12.5
+
+    def test_list_orders_newest_first(self, conn):
+        import time as _time
+        for i in range(3):
+            db.record_cycle(
+                conn,
+                started_at=_time.time() + i,
+                duration_seconds=float(i),
+                playlists_synced=1,
+                tracks_added=0,
+                tracks_downloaded=0,
+                tracks_failed=0,
+            )
+        rows = db.list_cycles(conn, limit=10)
+        assert [r["duration_seconds"] for r in rows] == [2.0, 1.0, 0.0]
+
+    def test_keep_last_caps_history(self, conn):
+        import time as _time
+        for i in range(8):
+            db.record_cycle(
+                conn,
+                started_at=_time.time() + i,
+                duration_seconds=float(i),
+                playlists_synced=1,
+                tracks_added=0,
+                tracks_downloaded=0,
+                tracks_failed=0,
+                keep_last=5,
+            )
+        rows = db.list_cycles(conn, limit=10)
+        # Newest 5 of the 8 inserted survive
+        assert [r["duration_seconds"] for r in rows] == [7.0, 6.0, 5.0, 4.0, 3.0]
+
+

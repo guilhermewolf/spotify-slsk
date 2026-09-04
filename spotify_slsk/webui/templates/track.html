@@ -33,6 +33,15 @@
 <dl class="detail-grid">
   <dt>File</dt>
   <dd>{% if track.path %}<code>{{ track.path }}</code>{% else %}—{% endif %}</dd>
+  {% if track.rel_path %}
+  <dt>Preview</dt>
+  <dd>
+    <audio controls preload="none" style="width:100%;max-width:480px;">
+      <source src="{{ url_for('serve_file', rel=track.rel_path) }}">
+      Your browser doesn't support the audio element.
+    </audio>
+  </dd>
+  {% endif %}
   <dt>Attempts</dt>
   <dd>{{ track.attempts }}</dd>
   <dt>Last attempt</dt>
@@ -50,6 +59,35 @@
     Clears the attempt count, any pause, and the rejected-file list below, then starts a cycle.
   </small>
 </form>
+{% endif %}
+
+{% if track.downloaded and track.path %}
+<form method="POST"
+      action="{{ url_for('retag_track', playlist_id=playlist_id, track_id=track.id) }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <button type="submit" class="secondary outline" style="width:auto">Re-tag from DB</button>
+  <small class="subtle">
+    Rewrites title/artist/album from the Spotify metadata. No re-download.
+  </small>
+</form>
+{% endif %}
+
+{% if search_history %}
+<h2 style="font-size:1.05rem;margin-top:2rem;">Recent slskd searches</h2>
+<p class="subtle">
+  The last {{ search_history|length }} queries the daemon ran for this track.
+  In-memory per process — this resets when the container restarts.
+</p>
+<div class="table-wrap">
+  <table class="track-table">
+    <thead><tr><th scope="col">Query</th><th scope="col" class="num">Results</th></tr></thead>
+    <tbody>
+      {% for h in search_history|reverse %}
+      <tr><td><code>{{ h.query }}</code></td><td class="num">{{ h.result_count }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
 {% endif %}
 
 {% if track.tried %}

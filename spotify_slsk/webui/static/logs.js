@@ -1,0 +1,62 @@
+// Live log tail for /logs. Extracted from an inline <script> so the
+// dashboard's Content-Security-Policy can stay at script-src 'self'.
+// State comes from the DOM (#log-viewer[data-last-seq]), so nothing
+// here needs templating.
+(function () {
+  const viewer = document.getElementById('log-viewer');
+  const autoscroll = document.getElementById('log-autoscroll');
+  const pause = document.getElementById('log-pause');
+  const filterSel = document.getElementById('log-filter');
+  const LEVEL_RANK = {DEBUG: 10, INFO: 20, WARNING: 30, ERROR: 40, CRITICAL: 50};
+
+  function passesFilter(level) {
+    const f = filterSel.value;
+    if (!f) return true;
+    return (LEVEL_RANK[level] || 0) >= (LEVEL_RANK[f] || 0);
+  }
+
+  function applyFilter() {
+    viewer.querySelectorAll('.log-line').forEach((el) => {
+      const lvl = el.classList[1];
+      el.style.display = passesFilter(lvl) ? '' : 'none';
+    });
+  }
+
+  filterSel.addEventListener('change', applyFilter);
+  applyFilter();
+
+  async function tick() {
+    if (pause.checked) return;
+    const since = viewer.dataset.lastSeq || 0;
+    try {
+      const r = await fetch(`/logs.json?since=${since}&limit=500`, {cache: 'no-store'});
+      if (!r.ok) return;
+      const data = await r.json();
+      if (!data.entries.length) {
+        viewer.dataset.lastSeq = data.last_seq;
+        return;
+      }
+      const frag = document.createDocumentFragment();
+      for (const e of data.entries) {
+        const line = document.createElement('div');
+        line.className = `log-line ${e.level}`;
+        line.textContent = e.message;
+        if (!passesFilter(e.level)) line.style.display = 'none';
+        frag.appendChild(line);
+      }
+      viewer.appendChild(frag);
+      viewer.dataset.lastSeq = data.last_seq;
+
+      // Cap rendered lines so the DOM doesn't grow unbounded over a long
+      // session — the server-side ring buffer is the source of truth.
+      const MAX = 2000;
+      while (viewer.childElementCount > MAX) {
+        viewer.removeChild(viewer.firstChild);
+      }
+      if (autoscroll.checked) viewer.scrollTop = viewer.scrollHeight;
+    } catch (_) { /* ignore transient fetch errors */ }
+  }
+
+  if (autoscroll.checked) viewer.scrollTop = viewer.scrollHeight;
+  setInterval(tick, 2000);
+})();

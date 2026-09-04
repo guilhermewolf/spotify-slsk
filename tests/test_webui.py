@@ -470,3 +470,110 @@ class TestInternalSettingsAreNotExposed:
         assert b"super-secret-value" not in body
         assert b"_ui_secret_key" not in body
         assert b"0.8" in body, "ordinary overrides must still render"
+class TestLiveObservability:
+    def test_activity_json_returns_snapshot(self, client):
+        from spotify_slsk import runtime_state
+        runtime_state.set_activity("idle", detail="from test")
+        r = client.get("/activity.json")
+        assert r.status_code == 200
+        data = r.get_json()
+        assert data["phase"] == "idle"
+        assert data["detail"] == "from test"
+        assert "age_seconds" in data
+
+    def test_logs_json_increments_seq(self, client):
+        import logging
+        from spotify_slsk import runtime_state
+        runtime_state._log_buffer.clear()
+        runtime_state._log_seq = 0
+        # Install handler so log calls land in the buffer regardless of root config.
+        handler = runtime_state.RingBufferHandler()
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logging.getLogger().addHandler(handler)
+        try:
+            logging.getLogger().warning("from test_logs_json")
+            r = client.get("/logs.json?since=0")
+            assert r.status_code == 200
+            data = r.get_json()
+            assert data["last_seq"] >= 1
+            assert any("from test_logs_json" in e["message"] for e in data["entries"])
+        finally:
+            logging.getLogger().removeHandler(handler)
+
+    def test_logs_page_renders(self, client):
+        r = client.get("/logs")
+        assert r.status_code == 200
+        assert b"log-viewer" in r.data
+
+    def test_dashboard_renders_activity_banner(self, client):
+        from spotify_slsk import runtime_state
+        runtime_state.set_activity("syncing", detail="testing")
+        r = client.get("/")
+        assert r.status_code == 200
+        assert b"activity-banner" in r.data
+        assert b"testing" in r.data
+
+    def test_dashboard_renders_recent_cycles(self, app_tmp, client):
+        import time as _time
+        with app_tmp.app_context():
+            conn = db.create_connection(app_tmp.config["DB_PATH"])
+            db.record_cycle(
+                conn,
+                started_at=_time.time(),
+                duration_seconds=1.0,
+                playlists_synced=1,
+                tracks_added=2,
+                tracks_downloaded=3,
+                tracks_failed=0,
+            )
+            conn.close()
+        r = client.get("/")
+        assert r.status_code == 200
+        assert b"Recent cycles" in r.data
+
+
+class TestExtraEndpoints:
+    def test_test_ntfy_without_env_flashes_error(self, client, monkeypatch):
+        monkeypatch.delenv("NTFY_URL", raising=False)
+        monkeypatch.delenv("NTFY_TOPIC", raising=False)
+        r = post(client, "/settings/test-ntfy", follow_redirects=True)
+        assert r.status_code == 200
+        assert b"not set" in r.data
+
+    def test_serve_file_rejects_traversal(self, client):
+        r = client.get("/file?rel=../../etc/passwd")
+        assert r.status_code == 404
+
+    def test_serve_file_rejects_missing_rel(self, client):
+        assert client.get("/file").status_code == 400
+
+    def test_serve_file_returns_audio(self, client, tmp_path, monkeypatch):
+        # Create a fake "downloaded" file under a tmp playlists root and verify
+        # the route streams it back. We shadow SLSKD_PLAYLISTS_DIR so the
+        # path-resolution logic accepts our temp tree.
+        monkeypatch.setenv("SLSKD_PLAYLISTS_DIR", str(tmp_path))
+        f = tmp_path / "pl_x" / "song.mp3"
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b"\xff\xfb\x90\x44")  # tiny MP3-ish header
+        r = client.get("/file?rel=pl_x/song.mp3")
+        assert r.status_code == 200
+        assert r.data == b"\xff\xfb\x90\x44"
+
+    def test_retag_404s_for_unknown_track(self, client):
+        r = post(client, "/track/nope/nope/retag", follow_redirects=False)
+        assert r.status_code == 404
+
+    def test_retag_flashes_when_file_missing(self, app_tmp, client):
+        with app_tmp.app_context():
+            conn = db.create_connection(app_tmp.config["DB_PATH"])
+            db.upsert_playlist_meta(conn, "pid1", "pl_x", "X", "s")
+            db.create_table(conn, "pl_x")
+            db.insert_track(conn, "pl_x", ("t1", "Song", "Artist", "Album"))
+            db.update_download_status(
+                conn, "t1", "pl_x", success=True, file_path="/no/such/file.mp3"
+            )
+            conn.close()
+        r = post(client, "/track/pid1/t1/retag", follow_redirects=True)
+        assert r.status_code == 200
+        assert b"missing" in r.data.lower()
+

@@ -113,6 +113,7 @@ Docker `HEALTHCHECK` compares `HEARTBEAT_FILE` mtime against `HEARTBEAT_STALE_SE
 - **`spotify_slsk/soulseek_api.py`** — `get_client()` lazy slskd factory, search waterfall (multi-query + CJK passthrough + early-stop on response count), candidate filtering (format allowlist + reported-bitrate floor + effective-bitrate floor via `_effective_mp3_kbps` + version-gate via `_version_mismatch`), sort (version tier > format > bitrate > peer upload speed), cleanup via `searches.delete` in `finally`. `refresh_from_db(conn)` reloads tunables at each cycle start; `_interruptible_sleep` honors the shared shutdown Event. Uses `rapidfuzz` for token-set scoring.
 - **`spotify_slsk/db.py`** — SQLite persistence. WAL mode + `busy_timeout=5000` + `PRAGMA user_version` migrations. Per-playlist dynamic tables (`pl_<sanitized_name>` + `pl_<…>_tried`) plus a global `playlists_meta` catalogue keyed by Spotify id and a global `settings` key-value bag. `get_setting(conn, key, default)` prefers DB, falls back to env, then default — so any env var becomes a mutable setting for free.
 - **`spotify_slsk/webui/`** — Flask dashboard (see next section).
+- **`spotify_slsk/runtime_state.py`** — in-process observability: thread-safe current-activity dict, a bounded log ring buffer (fed by a handler installed in `log_config`), and per-track slskd search history. All of it is per-process and resets on restart — deliberately not persisted.
 - **`spotify_slsk/utils.py`** — `sanitize_table_name`, `get_playlist_id`.
 - **`spotify_slsk/log_config.py`** — timezone-aware logging; `LIB_LOGLEVEL` (default WARNING) silences noisy third-party loggers independently of app `LOGLEVEL`.
 
@@ -130,8 +131,14 @@ Routes:
 - `GET /playlist/<id>` — track list with status filter + `?q=` search
 - `GET /track/<pid>/<tid>` — per-track state, history, rejected filenames
 - `GET /settings` — grouped, validated tunables
+- `GET /logs` · `GET /logs.json?since=&limit=` · `GET /activity.json` — live log tail and current daemon phase
+- `GET /file?rel=` — serves a downloaded file for the in-browser audio preview; `rel` is resolved against the playlists root and re-checked with `commonpath` after symlink normalisation
 - `GET /healthz` — JSON health (schema version, heartbeat age, reason)
-- `POST /playlists` · `POST /playlist/<id>/{toggle,delete,refresh}` · `POST /track/<pid>/<tid>/retry`
+- `POST /playlists` · `POST /playlist/<id>/{toggle,delete,refresh}` · `POST /track/<pid>/<tid>/retry` · `POST /track/<pid>/<tid>/retag` · `POST /settings/test-ntfy`
+
+**Two constraints any new UI code must respect:**
+1. **Every POST needs `csrf_token()` in its form** — the `before_request` guard rejects tokenless requests with 400.
+2. **No inline `<script>`** — the CSP is `script-src 'self'`. The theme toggle and the log tail live in `static/theme.js` and `static/logs.js` for exactly this reason. Inline handlers fail silently in the browser, not in tests.
 
 ### Security boundary
 
@@ -150,6 +157,9 @@ the confused deputy, so:
 - Session cookie is HttpOnly + SameSite=Lax; set `UI_COOKIE_SECURE=1` when a
   proxy terminates TLS (forcing it would break plain-http loopback).
 - CSP plus `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`.
+- **`/logs` exposes the daemon's log tail with no authentication**, like every
+  other route. Keep credentials out of log messages — that page is the easiest
+  way for them to leak if the UI is ever exposed beyond loopback.
 - **`.dockerignore` is load-bearing.** The Dockerfile does `COPY . /app/`;
   without it, a local `docker compose up --build` bakes `.env`, the production
   DB, the music library and slskd's keys into image layers. CI asserts none of
@@ -207,4 +217,4 @@ threaded through the download call chain. The real per-track cap is
 - **`slskd_api==0.1.5`** is pinned. Transfer-state substrings (`"completed, succeeded"`, `"failed"`) are matched; bumping may break `wait_for_completion`.
 - **SQLite WAL mode** means the DB file is always accompanied by `-wal` and `-shm` files. Backups must capture all three or run `PRAGMA wal_checkpoint(TRUNCATE)` first.
 - **Tracks removed from a Spotify playlist upstream are kept locally** — the library is append-only. `tests/test_pipeline.py` pins this so a change is deliberate.
-- **Schema version is 3.** Upgrading from an older DB is automatic and tested (`TestSchemaMigrations`): the ALTER TABLE guards in `_ensure_playlists_meta_table` handle v2 DBs, `create_table` adds `last_upgrade_check` to older per-playlist tables, and `CREATE TABLE IF NOT EXISTS` handles settings. The `tried_files` column on per-playlist tables is dead — nothing reads it; it is retained only so existing DBs need no migration.
+- **Schema version is 4.** Upgrading from an older DB is automatic and tested (`TestSchemaMigrations`): the ALTER TABLE guards in `_ensure_playlists_meta_table` handle v2 DBs, `create_table` adds `last_upgrade_check` to older per-playlist tables, `CREATE TABLE IF NOT EXISTS` handles settings, and v4 added `cycle_history` (one row per completed cycle, capped to ~200 rows by `db.record_cycle`). The `tried_files` column on per-playlist tables is dead — nothing reads it; it is retained only so existing DBs need no migration.
