@@ -6,6 +6,7 @@
 <p class="muted">Leave a field blank to fall back to the env default / built-in default. Changes take effect on the next cycle.</p>
 
 <form method="POST">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   {% for key, default, help_text in spec %}
   <label for="{{ key }}">
     <strong>{{ key }}</strong>

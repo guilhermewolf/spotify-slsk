@@ -23,6 +23,7 @@
 
 {% if not track.downloaded %}
 <form method="POST" action="{{ url_for('retry_track', playlist_id=playlist_id, track_id=track.id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <button type="submit">Retry now</button>
   <small class="muted">Clears attempts, suspension, and the rejected-filename history.</small>
 </form>

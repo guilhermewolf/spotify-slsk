@@ -34,6 +34,24 @@ def client(app_tmp):
     return app_tmp.test_client()
 
 
+def post(client, url, data=None, **kwargs):
+    """POST the way a real browser form does: carrying a valid CSRF token.
+
+    The mutating routes reject tokenless POSTs (see TestCsrfProtection). These
+    tests are legitimate clients, so they present a token rather than having
+    the protection relaxed for them.
+    """
+    with client.session_transaction() as sess:
+        token = sess.get("_csrf_token")
+        if not token:
+            token = "test-csrf-token"
+            sess["_csrf_token"] = token
+    payload = dict(data or {})
+    payload.setdefault("csrf_token", token)
+    return client.post(url, data=payload, **kwargs)
+
+
+
 class TestDashboard:
     def test_empty_dashboard_renders(self, client):
         r = client.get("/")
@@ -48,7 +66,7 @@ class TestDashboard:
 
 class TestPlaylistCrud:
     def test_add_invalid_url_flashes_error(self, client):
-        r = client.post(
+        r = post(client,
             "/playlists",
             data={"playlist_url": "not a url"},
             follow_redirects=True,
@@ -59,7 +77,7 @@ class TestPlaylistCrud:
     def test_add_valid_url_without_spotify_client(self, client):
         # spotify_client=None means add_playlist uses the id as the name
         url = "https://open.spotify.com/playlist/abc123"
-        r = client.post(
+        r = post(client,
             "/playlists",
             data={"playlist_url": url},
             follow_redirects=True,
@@ -74,10 +92,10 @@ class TestPlaylistCrud:
             db.create_table(conn, "pl_x")
             conn.close()
 
-        r = client.post("/playlist/pid1/toggle", follow_redirects=True)
+        r = post(client, "/playlist/pid1/toggle", follow_redirects=True)
         assert r.status_code == 200
 
-        r = client.post("/playlist/pid1/delete", follow_redirects=True)
+        r = post(client, "/playlist/pid1/delete", follow_redirects=True)
         assert r.status_code == 200
         assert b"removed" in r.data.lower()
 
@@ -93,7 +111,7 @@ class TestSettings:
         assert b"MIN_MATCH_SCORE" in r.data
 
     def test_save_and_read_back(self, client):
-        r = client.post(
+        r = post(client,
             "/settings",
             data={"MIN_MATCH_SCORE": "0.75", "SLSKD_PREFERRED_FORMATS": "flac"},
             follow_redirects=True,
@@ -106,12 +124,12 @@ class TestSettings:
 
     def test_blank_field_deletes_override(self, app_tmp, client):
         # set, then clear
-        client.post(
+        post(client,
             "/settings",
             data={"MIN_MATCH_SCORE": "0.9"},
             follow_redirects=True,
         )
-        client.post(
+        post(client,
             "/settings",
             data={"MIN_MATCH_SCORE": ""},
             follow_redirects=True,
@@ -138,7 +156,7 @@ class TestTrackDetail:
             db.add_tried_file(conn, "pl_x", "t1", "bad.mp3")
             conn.close()
 
-        client.post("/track/pid1/t1/retry", follow_redirects=True)
+        post(client, "/track/pid1/t1/retry", follow_redirects=True)
 
         with app_tmp.app_context():
             conn = db.create_connection(app_tmp.config["DB_PATH"])
@@ -174,7 +192,7 @@ class TestWakeCallback:
             db.insert_track(conn, "pl_x", ("t1", "Song", "Artist", "Album"))
             conn.close()
         client = app.test_client()
-        client.post("/track/pid1/t1/retry", follow_redirects=True)
+        post(client, "/track/pid1/t1/retry", follow_redirects=True)
         assert calls == [1]
 
     def test_refresh_invokes_wake(self):
@@ -187,7 +205,7 @@ class TestWakeCallback:
             db.create_table(conn, "pl_x")
             conn.close()
         client = app.test_client()
-        client.post("/playlist/pid1/refresh", follow_redirects=True)
+        post(client, "/playlist/pid1/refresh", follow_redirects=True)
         assert calls == [1]
 
     def test_toggle_disable_does_not_wake(self):
@@ -200,7 +218,7 @@ class TestWakeCallback:
             db.upsert_playlist_meta(conn, "pid1", "pl_x", "X", "s")  # enabled=1 by default
             conn.close()
         client = app.test_client()
-        client.post("/playlist/pid1/toggle", follow_redirects=True)  # disables it
+        post(client, "/playlist/pid1/toggle", follow_redirects=True)  # disables it
         assert calls == []
 
     def test_toggle_enable_wakes(self):
@@ -213,7 +231,7 @@ class TestWakeCallback:
             db.set_playlist_enabled(conn, "pid1", False)  # start disabled
             conn.close()
         client = app.test_client()
-        client.post("/playlist/pid1/toggle", follow_redirects=True)  # re-enables
+        post(client, "/playlist/pid1/toggle", follow_redirects=True)  # re-enables
         assert calls == [1]
 
     def test_missing_callback_is_noop(self):
@@ -230,5 +248,95 @@ class TestWakeCallback:
             db.insert_track(conn, "pl_x", ("t1", "Song", "Artist", "Album"))
             conn.close()
         client = app.test_client()
-        r = client.post("/track/pid1/t1/retry", follow_redirects=True)
+        r = post(client, "/track/pid1/t1/retry", follow_redirects=True)
         assert r.status_code == 200
+
+
+class TestCsrfProtection:
+    """The UI has no auth, so the browser is a confused deputy.
+
+    Any page the operator has open in another tab can POST to the dashboard's
+    origin. Loopback binding does not help — the browser is inside the trust
+    boundary — so every state-changing route requires a session-backed token.
+    """
+
+    MUTATING_ROUTES = [
+        ("/playlists", {"playlist_url": "https://open.spotify.com/playlist/abc"}),
+        ("/playlist/pid1/toggle", {}),
+        ("/playlist/pid1/delete", {}),
+        ("/playlist/pid1/refresh", {}),
+        ("/track/pid1/t1/retry", {}),
+        ("/settings", {"MIN_MATCH_SCORE": "0.9"}),
+    ]
+
+    @pytest.mark.parametrize("route,data", MUTATING_ROUTES)
+    def test_post_without_token_is_rejected(self, client, route, data):
+        r = client.post(route, data=data)
+        assert r.status_code == 400, f"{route} accepted a tokenless POST"
+
+    @pytest.mark.parametrize("route,data", MUTATING_ROUTES)
+    def test_post_with_wrong_token_is_rejected(self, client, route, data):
+        with client.session_transaction() as sess:
+            sess["_csrf_token"] = "the-real-token"
+        payload = dict(data)
+        payload["csrf_token"] = "attacker-guess"
+        r = client.post(route, data=payload)
+        assert r.status_code == 400, f"{route} accepted a forged token"
+
+    def test_delete_playlist_is_not_reachable_without_a_token(self, app_tmp, client):
+        """The concrete attack: a cross-site POST silently dropping a playlist."""
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        db.upsert_playlist_meta(conn, "pid1", "pl_x", "X", None)
+        conn.close()
+
+        r = client.post("/playlist/pid1/delete")
+        assert r.status_code == 400
+
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        assert len(db.list_playlists(conn)) == 1, "playlist was deleted by a forged POST"
+        conn.close()
+
+    def test_get_requests_need_no_token(self, client):
+        assert client.get("/").status_code == 200
+        assert client.get("/settings").status_code == 200
+
+    def test_token_is_rendered_into_forms(self, client):
+        r = client.get("/settings")
+        assert b'name="csrf_token"' in r.data
+
+
+class TestSecurityHeaders:
+    def test_headers_present(self, client):
+        r = client.get("/")
+        assert r.headers["X-Content-Type-Options"] == "nosniff"
+        assert r.headers["X-Frame-Options"] == "DENY"
+        assert "default-src 'self'" in r.headers["Content-Security-Policy"]
+
+    def test_csp_allows_no_third_party_script_origin(self, client):
+        """Assets are self-hosted, so the CSP must not need a CDN exemption."""
+        csp = client.get("/").headers["Content-Security-Policy"]
+        assert "script-src 'self'" in csp
+        assert "unpkg" not in csp and "jsdelivr" not in csp
+
+
+class TestSecretKeyPersistence:
+    def test_generated_key_survives_a_restart(self, app_tmp, monkeypatch):
+        """CSRF tokens live in the session; a new key per boot would 403 users."""
+        monkeypatch.delenv("UI_SECRET_KEY", raising=False)
+        db_path = app_tmp.config["DB_PATH"]
+        first = create_app(db_path, spotify_client=None).secret_key
+        second = create_app(db_path, spotify_client=None).secret_key
+        assert first == second and first
+
+    def test_env_var_wins_over_stored_key(self, app_tmp, monkeypatch):
+        monkeypatch.setenv("UI_SECRET_KEY", "operator-managed-key")
+        assert (
+            create_app(app_tmp.config["DB_PATH"], spotify_client=None).secret_key
+            == "operator-managed-key"
+        )
+
+    def test_secret_key_is_not_exposed_on_the_settings_page(self, app_tmp, client):
+        """It is stored in the settings table; it must not render there."""
+        create_app(app_tmp.config["DB_PATH"], spotify_client=None)
+        body = client.get("/settings").data
+        assert b"_ui_secret_key" not in body

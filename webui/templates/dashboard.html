@@ -5,6 +5,7 @@
 <article>
   <header><strong>Add a Spotify playlist</strong></header>
   <form method="POST" action="{{ url_for('add_playlist') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <label for="playlist_url">Spotify URL</label>
     <div style="display: flex; gap: 0.5em;">
       <input type="url" id="playlist_url" name="playlist_url"
@@ -38,10 +39,12 @@
     </div>
     <footer>
       <form class="inline-form" method="POST" action="{{ url_for('toggle_playlist', playlist_id=pl.playlist_id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <button type="submit" class="secondary outline">{{ 'Disable' if pl.enabled else 'Enable' }}</button>
       </form>
       <form class="inline-form" method="POST" action="{{ url_for('delete_playlist', playlist_id=pl.playlist_id) }}"
             onsubmit="return confirm('Remove this playlist from the daemon? Files on disk are kept.')">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <button type="submit" class="contrast outline">Remove</button>
       </form>
     </footer>
