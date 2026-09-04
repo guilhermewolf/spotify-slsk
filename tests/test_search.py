@@ -11,9 +11,11 @@ from spotify_slsk.soulseek_api import (
     _infer_bitrate_from_name,
     _is_ascii,
     _normalize_ext_list,
+    _normalize_query_text,
     _version_mismatch,
     _version_tier,
     clean_filename,
+    download_and_verify,
     extract_candidates,
     sort_candidates,
 )
@@ -471,3 +473,109 @@ class TestSearchAndDownloadFallthrough:
             artist="X", title="Y", conn=None, playlist_name="pl", track_id="t",
         )
         assert out is None
+
+
+class TestNormalizeQueryText:
+    """Hyphens, underscores, and slashes must become spaces — not be deleted."""
+
+    def test_hyphenated_compound_keeps_word_boundary(self):
+        # "Radio-Edit" must become "radio edit", NOT "radioedit", because
+        # slskd peers tag files as "(Radio Edit)" with a space.
+        assert _normalize_query_text("Radio-Edit") == "radio edit"
+
+    def test_full_title_with_hyphen_separator(self):
+        # Reproduces the prod failure: "Mind Twister - Radio-Edit" used to
+        # collapse to "mind twister  radioedit" (double space, joined word).
+        out = _normalize_query_text("Mind Twister - Radio-Edit")
+        assert out == "mind twister radio edit"
+
+    def test_strips_apostrophes_keeps_letters(self):
+        assert _normalize_query_text("Don't Stop") == "dont stop"
+
+    def test_underscores_become_spaces(self):
+        assert _normalize_query_text("foo_bar_baz") == "foo bar baz"
+
+    def test_collapses_runs_of_whitespace(self):
+        assert _normalize_query_text("  a   b  ") == "a b"
+
+    def test_empty_input(self):
+        assert _normalize_query_text("") == ""
+        assert _normalize_query_text(None) == ""
+
+
+class TestBuildSearchQueriesHyphens:
+    """Regression: hyphenated titles used to lose the word boundary."""
+
+    def test_radio_edit_hyphen_produces_spaced_tokens(self):
+        queries = _build_search_queries("Kolter", "Mind Twister - Radio-Edit")
+        # No query may contain "radioedit" as a single token.
+        for q in queries:
+            tokens = q.split()
+            assert "radioedit" not in tokens, f"hyphen collapse in query: {q!r}"
+        # The shorter title-only fallback should be cleanly tokenized.
+        assert "mind twister radio edit" in queries
+
+    def test_no_double_spaces_in_any_query(self):
+        queries = _build_search_queries("Kolter", "Mind Twister - Radio-Edit")
+        for q in queries:
+            assert "  " not in q, f"double space leaked: {q!r}"
+
+
+class TestDownloadAndVerifyTransientErrors:
+    """Exceptions from slskd_api shouldn't permanently blacklist a candidate.
+
+    add_tried_file is permanent until the track succeeds. A single JSON
+    decode error against an empty slskd response would otherwise ban a
+    perfectly good peer/file forever.
+    """
+
+    def _setup(self, monkeypatch):
+        # One usable candidate; everything passes filtering.
+        results = [{
+            "username": "u",
+            "uploadSpeed": 1000,
+            "files": [{
+                "filename": "Artist - Track.flac",
+                "size": 30_000_000,
+                "bitrate": 1411,
+                "length": 360,
+            }],
+        }]
+        # Stub get_client so transfers.enqueue raises (simulating the prod
+        # JSON decode error we saw against slskd).
+        class FakeClient:
+            class transfers:
+                @staticmethod
+                def enqueue(**kw):
+                    raise ValueError("Expecting value: line 1 column 1 (char 0)")
+        monkeypatch.setattr(soulseek_api, "get_client", lambda: FakeClient())
+
+        added = []
+        captured_tried = {"v": []}
+
+        def fake_get_tried_files(conn, pl, tid):
+            return list(captured_tried["v"])
+
+        def fake_add_tried_file(conn, pl, tid, fname):
+            added.append(fname)
+            captured_tried["v"].append(fname)
+
+        monkeypatch.setattr(soulseek_api, "get_tried_files", fake_get_tried_files)
+        monkeypatch.setattr(soulseek_api, "add_tried_file", fake_add_tried_file)
+        return results, added
+
+    def test_transient_api_error_does_not_blacklist(self, monkeypatch):
+        results, added = self._setup(monkeypatch)
+        out = download_and_verify(
+            search_results=results,
+            expected_title="Track",
+            expected_artist="Artist",
+            conn=None,
+            playlist_name="pl",
+            track_id="t1",
+        )
+        assert out is None  # download didn't succeed
+        assert added == [], (
+            "transient slskd error should NOT add candidate to tried_files; "
+            "got: " + repr(added)
+        )
