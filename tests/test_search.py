@@ -707,6 +707,21 @@ class TestDurationFilter:
         )
         assert out[0]["accepted"] is True
 
+    def test_extended_mix_may_run_longer_but_not_shorter(self, monkeypatch):
+        # Spotify often lists the radio edit; the version tiers prefer the
+        # Extended Mix, so a duration check must not reject the long cut.
+        monkeypatch.setattr(soulseek_api, "MAX_DURATION_DIFF_SECONDS", 15)
+
+        def judge(length):
+            return soulseek_api.evaluate_candidates(
+                [{"username": "u", "uploadSpeed": 1, "files": [{
+                    "filename": "Sem Jacobs - Blue Berries (Extended Mix).flac",
+                    "size": 40_000_000, "length": length}]}],
+                "Blue Berries", "Sem Jacobs", expected_duration_ms=180_000,
+            )[0]
+        assert judge(330)["accepted"] is True
+        assert judge(120)["reason"] == "duration 2:00 vs 3:00"
+
     def test_unknown_durations_are_not_rejected(self, monkeypatch):
         monkeypatch.setattr(soulseek_api, "MAX_DURATION_DIFF_SECONDS", 15)
         assert soulseek_api.evaluate_candidates(

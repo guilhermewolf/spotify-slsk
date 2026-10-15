@@ -365,6 +365,14 @@ def _version_tier(text: str) -> int:
     return 2
 
 
+def _duration_off(diff_seconds, longer_ok=False) -> bool:
+    """True when a file's length is outside MAX_DURATION_DIFF_SECONDS of the
+    expected one. A longer-cut version may run long but never short."""
+    if longer_ok and diff_seconds > 0:
+        return False
+    return abs(diff_seconds) > MAX_DURATION_DIFF_SECONDS
+
+
 def fmt_duration(seconds) -> str:
     """Seconds -> "m:ss"."""
     seconds = int(round(seconds or 0))
@@ -498,8 +506,20 @@ def filename_match(path, expected_title, expected_artist):
     stem = os.path.splitext(base)[0]
     folder_folded = _fold(" ".join(re.split(r"[\\/]", path or "")[:-1]))
     artist_names = _artist_names(expected_artist)
+    title_tokens = _expected_title_tokens(expected_title)
+    # A basename that repeats its album folder ("Artist_Album Name_01_Song")
+    # must still name the title outside that phrase: the folder-word exclusion
+    # below would otherwise let "If Love Is a Skill & Georgia_01_If Love Is a
+    # Skill" pass for "Georgia".
+    padded = f" {_fold(stem)} "
+    for folder in re.split(r"[\\/]", path or "")[:-1]:
+        phrase = _fold(folder)
+        if phrase and set(phrase.split()) != title_tokens and f" {phrase} " in padded:
+            padded = padded.replace(f" {phrase} ", " ")
+            if not title_tokens <= set(padded.split()):
+                return 0.0, "title words only in the album/folder name"
     coverage = _title_coverage(
-        _expected_title_tokens(expected_title), stem, artist_names,
+        title_tokens, stem, artist_names,
         set(folder_folded.split()),
     )
     base_folded = _fold(stem)
@@ -613,8 +633,12 @@ def evaluate_candidates(
                 MAX_DURATION_DIFF_SECONDS > 0
                 and expected_duration_ms
                 and length_sec
-                and abs(length_sec - expected_duration_ms / 1000)
-                > MAX_DURATION_DIFF_SECONDS
+                and _duration_off(
+                    length_sec - expected_duration_ms / 1000,
+                    # Extended/Original Mixes are the long cuts the version
+                    # tiers prefer; Spotify often lists the radio edit.
+                    longer_ok=_version_tier(base) < _version_tier(expected_title),
+                )
             ):
                 entry["reason"] = (
                     f"duration {fmt_duration(length_sec)} vs "

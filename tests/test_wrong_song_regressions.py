@@ -10,7 +10,7 @@ os.environ.setdefault("SLSKD_HOST_URL", "http://localhost")
 os.environ.setdefault("SLSKD_API_KEY", "x")
 
 from spotify_slsk import soulseek_api
-from spotify_slsk.soulseek_api import _remote_basename, extract_candidates
+from spotify_slsk.soulseek_api import _remote_basename, extract_candidates, filename_match
 
 
 def _results(*filenames, user="user1"):
@@ -40,6 +40,18 @@ class TestRemotePathSplitting:
         # supply the title tokens for a Rachmaninov "Ave Maria".
         path = "@@abc\\music\\Рахманинов\\Vespers (All-Night Vigil)\\06 Ave Maria.flac"
         assert extract_candidates(_results(path), "All Night", "AVE") == []
+
+    def test_album_phrase_in_basename_is_not_title_evidence(self):
+        # Live slskd result: album "If Love Is a Skill & Georgia" repeated in
+        # every basename let track 01 pass for "Georgia" (3:37 vs 3:50 was
+        # inside the duration tolerance too).
+        album = "music\\LP Giobbi\\If Love Is a Skill & Georgia\\"
+        wrong = album + "LP Giobbi_If Love Is a Skill & Georgia_01_If Love Is a Skill.flac"
+        right = album + "LP Giobbi_If Love Is a Skill & Georgia_02_Georgia.flac"
+        assert filename_match(wrong, "Georgia", "LP Giobbi")[1] is not None
+        assert filename_match(right, "Georgia", "LP Giobbi")[1] is None
+        # A single named after the track keeps working.
+        assert filename_match("m\\LP Giobbi\\Georgia\\01 - Georgia.flac", "Georgia", "LP Giobbi")[1] is None
 
     def test_candidate_keeps_full_path_for_enqueue(self):
         path = "music\\Mat Joe\\Mat Joe - Heart To Find.flac"
