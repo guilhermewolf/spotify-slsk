@@ -381,6 +381,8 @@ class TestSchemaMigrations:
         assert track is not None and track["duration_ms"] is None
         # Snapshot cleared so the next sync backfills durations.
         assert db.get_playlist_meta(conn, "pid")[0] is None
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "blocklist" in tables
         conn.close()
 
     def test_existing_rows_survive_reopening(self, tmp_path):
@@ -451,3 +453,19 @@ class TestCycleHistory:
         assert [r["duration_seconds"] for r in rows] == [7.0, 6.0, 5.0, 4.0, 3.0]
 
 
+
+
+class TestBlocklist:
+    def test_add_list_remove_and_predicate(self, tmp_path):
+        conn = db.create_connection(str(tmp_path / "b.db"))
+        assert db.add_blocklist(conn, "peer", "a.flac", 10, "transfer failed", "t1")
+        assert not db.add_blocklist(conn, "peer", "a.flac"), "duplicate must be ignored"
+        assert db.add_blocklist(conn, "villain", None, None, "banned")
+        assert db.is_blocklisted(conn, "peer", "a.flac")
+        assert not db.is_blocklisted(conn, "peer", "b.flac")
+        assert db.is_blocklisted(conn, "villain", "anything.flac"), "banned user covers all files"
+        rows = db.list_blocklist(conn)
+        assert [r["username"] for r in rows] == ["villain", "peer"], "newest first"
+        assert db.remove_blocklist(conn, rows[1]["id"])
+        assert not db.is_blocklisted(conn, "peer", "a.flac")
+        conn.close()

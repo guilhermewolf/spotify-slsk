@@ -267,6 +267,8 @@ class TestCsrfProtection:
         ("/playlist/pid1/refresh", {}),
         ("/track/pid1/t1/retry", {}),
         ("/settings", {"MIN_MATCH_SCORE": "0.9"}),
+        ("/blocklist/1/delete", {}),
+        ("/blocklist/ban-user", {"username": "x"}),
     ]
 
     @pytest.mark.parametrize("route,data", MUTATING_ROUTES)
@@ -597,3 +599,31 @@ class TestTrackSearchHistoryReasons:
         assert r.status_code == 200
         assert b"format not allowed: .wma" in r.data
         assert b"and 1 more" in r.data
+
+
+class TestBlocklistPage:
+    def test_ban_list_and_remove(self, app_tmp, client):
+        r = post(client, "/blocklist/ban-user", {"username": "villain", "reason": "fakes"},
+                 follow_redirects=True)
+        assert r.status_code == 200
+        assert b"villain" in r.data and b"whole user" in r.data
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        entry_id = db.list_blocklist(conn)[0]["id"]
+        conn.close()
+        post(client, f"/blocklist/{entry_id}/delete")
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        assert db.list_blocklist(conn) == []
+        conn.close()
+
+    def test_empty_username_is_refused(self, app_tmp, client):
+        post(client, "/blocklist/ban-user", {"username": "  "})
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        assert db.list_blocklist(conn) == []
+        conn.close()
+
+    def test_entries_are_autoescaped(self, app_tmp, client):
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        db.add_blocklist(conn, "<script>x</script>", "f", None, "r")
+        conn.close()
+        r = client.get("/blocklist")
+        assert b"<script>x</script>" not in r.data

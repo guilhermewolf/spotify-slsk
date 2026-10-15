@@ -17,6 +17,7 @@ from .db import (
     update_download_status,
     clear_tried_entries,
     add_tried_file,
+    add_blocklist,
     get_pending_tracks,
     get_playlist_meta,
     upsert_playlist_meta,
@@ -310,7 +311,12 @@ def _fallback_match_untagged(file_path, expected_track):
 
 
 def process_downloaded_file(
-    file_path, playlist_name, conn, reconcile: bool = False, expected_track=None
+    file_path,
+    playlist_name,
+    conn,
+    reconcile: bool = False,
+    expected_track=None,
+    source=None,
 ):
     """
     Process a file that is either freshly downloaded or already on disk.
@@ -322,6 +328,9 @@ def process_downloaded_file(
     `expected_track` is the Track the download was for. When given and the
     file has no title/artist tags, the filename + real duration are checked
     against it (see _fallback_match_untagged) instead of rejecting outright.
+
+    `source` is the slskd candidate the file came from; a rejected
+    download blocklists that peer file.
     """
     title, artist, album = extract_metadata_from_file(file_path)
 
@@ -336,7 +345,7 @@ def process_downloaded_file(
             _reject_and_log(
                 file_path, playlist_name, conn,
                 track_id=expected_track.id if expected_track is not None else None,
-                reason=reason, destructive=not reconcile,
+                reason=reason, destructive=not reconcile, source=source,
             )
             return False, None
         logging.info(
@@ -349,13 +358,13 @@ def process_downloaded_file(
         # Route through the robust scorer (via wrapper)
         match, score = find_closest_match(conn, playlist_name, title, artist)
         if not match:
-            _reject_and_log(file_path, playlist_name, conn, reason="no match", destructive=not reconcile)
+            _reject_and_log(file_path, playlist_name, conn, reason="no match", destructive=not reconcile, source=source)
             return False, None
 
         track_id, db_title, db_artist, db_album = match
         if score < MIN_MATCH_SCORE:
             logging.warning(f"⚠️ Low match score ({score:.2f}) for {title} by {artist}. Skipping update.")
-            _reject_and_log(file_path, playlist_name, conn, track_id=track_id, reason="low score", destructive=not reconcile)
+            _reject_and_log(file_path, playlist_name, conn, track_id=track_id, reason="low score", destructive=not reconcile, source=source)
             return False, None
 
     # Fall back to the Spotify-known album when the downloaded file has no
@@ -385,9 +394,10 @@ def process_downloaded_file(
     return False, None
 
 
-def _reject_and_log(file_path, playlist_name, conn, track_id=None, reason="unknown", destructive: bool = True):
+def _reject_and_log(file_path, playlist_name, conn, track_id=None, reason="unknown", destructive: bool = True, source=None):
     """
     On normal downloads we delete bad files; on reconcile we never delete.
+    A rejected download with a known slskd `source` is also blocklisted.
     """
     filename = os.path.basename(file_path)
 
@@ -404,6 +414,16 @@ def _reject_and_log(file_path, playlist_name, conn, track_id=None, reason="unkno
         add_tried_file(conn, playlist_name, track_id, filename)
     else:
         logging.debug(f"Skipping add_tried_file() because track ID is unknown for: {filename}")
+
+    if destructive and source:
+        add_blocklist(
+            conn,
+            source.get("user"),
+            source.get("filename"),
+            source.get("size"),
+            f"rejected after download: {reason}",
+            track_id,
+        )
 
 def _normalize_ext_list_env(var_name: str, default_csv: str) -> tuple:
     """
@@ -1047,7 +1067,8 @@ def handle_track_download(track, playlist_name, conn):
 
     if file_path:
         verified, _final_path = process_downloaded_file(
-            file_path, playlist_name, conn, expected_track=track
+            file_path, playlist_name, conn, expected_track=track,
+            source=soulseek_api.last_download,
         )
         if verified:
             clear_tried_entries(conn, playlist_name, track.id)
@@ -1093,7 +1114,8 @@ def try_upgrade_track(track, playlist_name, conn, current_path):
         return False
 
     verified, final_path = process_downloaded_file(
-        new_file, playlist_name, conn, expected_track=track
+        new_file, playlist_name, conn, expected_track=track,
+        source=soulseek_api.last_download,
     )
     if not verified or not final_path:
         return False

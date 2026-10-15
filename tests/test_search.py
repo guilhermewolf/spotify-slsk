@@ -692,3 +692,54 @@ class TestDurationFilter:
         assert soulseek_api.evaluate_candidates(
             self._results(100), "Lose Yourself", "Eminem", expected_duration_ms=None
         )[0]["accepted"]
+
+
+class TestBlocklistFiltering:
+    def _results(self):
+        return [
+            {"username": "bad", "uploadSpeed": 1, "files": [{
+                "filename": "Eminem - Lose Yourself.flac", "size": 1, "bitrate": 1411, "length": 300}]},
+            {"username": "good", "uploadSpeed": 1, "files": [{
+                "filename": "Eminem - Lose Yourself.flac", "size": 1, "bitrate": 1411, "length": 300}]},
+        ]
+
+    def test_blocklisted_file_is_rejected_with_reason(self):
+        out = soulseek_api.evaluate_candidates(
+            self._results(), "Lose Yourself", "Eminem",
+            is_blocked=lambda u, f: u == "bad",
+        )
+        assert [(c["user"], c["accepted"], c["reason"]) for c in out] == [
+            ("bad", False, "blocklisted"), ("good", True, None),
+        ]
+
+    def test_failed_transfer_blocklists_and_is_skipped_next_time(self, monkeypatch, tmp_path):
+        from spotify_slsk import db as _db
+
+        enqueued = []
+
+        class _Client:
+            class transfers:
+                @staticmethod
+                def enqueue(username, files):
+                    enqueued.append(username)
+
+        monkeypatch.setattr(soulseek_api, "get_client", lambda: _Client())
+
+        def _fail(candidate):
+            candidate["failure"] = "transfer failed"
+            return None
+
+        monkeypatch.setattr(soulseek_api, "wait_for_completion", _fail)
+        conn = _db.create_connection(str(tmp_path / "t.db"))
+        _db.create_table(conn, "pl_x")
+        _db.insert_track(conn, "pl_x", ("t1", "Lose Yourself", "Eminem", "Alb"))
+        results = self._results()[:1]
+        soulseek_api.download_and_verify(results, "Lose Yourself", "Eminem", conn, "pl_x", "t1")
+        assert _db.is_blocklisted(conn, "bad", "Eminem - Lose Yourself.flac")
+
+        # Retry clears _tried; the blocklist still keeps the peer file out.
+        _db.retry_track(conn, "pl_x", "t1")
+        enqueued.clear()
+        soulseek_api.download_and_verify(results, "Lose Yourself", "Eminem", conn, "pl_x", "t1")
+        assert enqueued == []
+        conn.close()

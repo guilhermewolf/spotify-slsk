@@ -28,6 +28,10 @@
              {% if active_page == 'dashboard' %}aria-current="page"{% endif %}>Dashboard</a>
         </li>
         <li>
+          <a href="{{ url_for('blocklist_page') }}"
+             {% if active_page == 'blocklist' %}aria-current="page"{% endif %}>Blocklist</a>
+        </li>
+        <li>
           <a href="{{ url_for('logs_page') }}"
              {% if active_page == 'logs' %}aria-current="page"{% endif %}>Logs</a>
         </li>

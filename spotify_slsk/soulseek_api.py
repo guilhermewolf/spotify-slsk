@@ -6,7 +6,7 @@ import re
 import slskd_api
 from rapidfuzz import fuzz
 
-from .db import get_tried_files, add_tried_file, get_setting
+from .db import get_tried_files, add_tried_file, get_setting, add_blocklist, load_blocklist
 from . import runtime_state
 
 DEFAULT_FORMATS = "flac,mp3,aiff,wav"
@@ -49,6 +49,11 @@ MAX_DURATION_DIFF_SECONDS = int(os.getenv("SLSKD_MAX_DURATION_DIFF_SECONDS", "15
 
 _client = None
 _shutdown_event = None
+# The candidate dict behind the most recent successful download_and_verify,
+# so the caller can attribute a post-download rejection to the peer file
+# (blocklist) and record where the file came from (history). Daemon-thread
+# only.
+last_download = None
 
 
 def refresh_from_db(conn) -> None:
@@ -344,6 +349,7 @@ def evaluate_candidates(
     min_artist_score=70,
     max_version_tier=None,
     expected_duration_ms=None,
+    is_blocked=None,
 ):
     """
     Judge every file in slskd search results against the expected track.
@@ -357,6 +363,8 @@ def evaluate_candidates(
     `max_version_tier`, when set, rejects anything not *strictly better*
     (used by the upgrade pass). `expected_duration_ms` (Spotify) rejects
     files whose reported length is more than MAX_DURATION_DIFF_SECONDS off.
+    `is_blocked(username, filename)` (see db.load_blocklist) rejects
+    blocklisted peer files and banned peers.
     """
     evaluated = []
     expected_title_norm = " ".join(expected_title.lower().replace("-", " ").split())
@@ -404,7 +412,9 @@ def evaluate_candidates(
             }
             evaluated.append(entry)
 
-            if ext not in PREFERRED_FORMATS:
+            if is_blocked is not None and is_blocked(user, base):
+                entry["reason"] = "blocklisted"
+            elif ext not in PREFERRED_FORMATS:
                 entry["reason"] = f"format not allowed: {ext or '(none)'}"
             # Reject MP3s whose reported/inferred bitrate is known-low.
             elif ext == ".mp3" and effective_bitrate is not None and effective_bitrate < 320:
@@ -557,7 +567,6 @@ def download_and_verify(
     `evaluated` lets a caller that already ran `evaluate_candidates` (to
     record rejection reasons) pass the result instead of recomputing it.
     """
-    client = get_client()
     if evaluated is None:
         evaluated = evaluate_candidates(
             search_results,
@@ -565,6 +574,7 @@ def download_and_verify(
             expected_artist,
             max_version_tier=max_version_tier,
             expected_duration_ms=expected_duration_ms,
+            is_blocked=load_blocklist(conn) if conn is not None else None,
         )
     candidates = [c for c in evaluated if c["accepted"]]
     if not candidates:
@@ -581,45 +591,74 @@ def download_and_verify(
             logging.info(f"Skipping previously tried file: {basename}")
             continue
 
-        logging.info(
-            f"Attempting download: {candidate['filename']} from {candidate['user']}"
-        )
-        try:
-            client.transfers.enqueue(
-                username=candidate["user"],
-                files=[
-                    {
-                        "filename": candidate["filename"],
-                        "size": candidate["size"],
-                    }
-                ],
-            )
-
-            file_path = wait_for_completion(candidate)
-            if file_path:
-                logging.info(f"Downloaded and verified: {file_path}")
-                if not _wait_for_external_processing(file_path):
-                    logging.warning(
-                        f"Post-download verification failed for: {basename}"
-                    )
-                    add_tried_file(conn, playlist_name, track_id, basename)
-                    continue
-                return file_path
-            logging.warning(f"Download failed or was not confirmed: {basename}")
-            add_tried_file(conn, playlist_name, track_id, basename)
-        except Exception as e:
-            # Don't blacklist on this path: an exception here is usually a
-            # transient slskd-API hiccup (JSON decode against an empty body,
-            # connection reset, etc.), not a "this peer rejected the file"
-            # signal. add_tried_file is permanent until the track succeeds,
-            # so a single bad response would permanently ban a perfectly
-            # good candidate. Let the next cycle retry naturally — bounded
-            # by MAX_ATTEMPTS_BEFORE_SUSPEND on the track itself.
-            logging.error(
-                f"Error downloading {basename} from {candidate['user']}: {e}"
-            )
+        file_path = grab_candidate(candidate, conn, playlist_name, track_id)
+        if file_path:
+            return file_path
 
     logging.warning("Exhausted all download attempts.")
+    return None
+
+
+def _shutting_down() -> bool:
+    return _shutdown_event is not None and _shutdown_event.is_set()
+
+
+def grab_candidate(candidate, conn, playlist_name, track_id):
+    """Enqueue one candidate, wait for it, and return the local path or None.
+
+    A failed transfer or a file that never appears is remembered in the
+    track's `_tried` table AND blocklisted for every track. On success the
+    candidate is stashed in `last_download`.
+    """
+    global last_download
+    basename = os.path.basename(candidate["filename"])
+    logging.info(
+        f"Attempting download: {candidate['filename']} from {candidate['user']}"
+    )
+    try:
+        get_client().transfers.enqueue(
+            username=candidate["user"],
+            files=[
+                {
+                    "filename": candidate["filename"],
+                    "size": candidate["size"],
+                }
+            ],
+        )
+
+        file_path = wait_for_completion(candidate)
+        if file_path:
+            logging.info(f"Downloaded and verified: {file_path}")
+            if _wait_for_external_processing(file_path):
+                last_download = candidate
+                return file_path
+            logging.warning(f"Post-download verification failed for: {basename}")
+            failure = "file did not appear after download"
+        else:
+            logging.warning(f"Download failed or was not confirmed: {basename}")
+            failure = candidate.get("failure") or "transfer failed"
+        add_tried_file(conn, playlist_name, track_id, basename)
+        # A shutdown mid-transfer says nothing about the peer.
+        if not _shutting_down():
+            add_blocklist(
+                conn,
+                candidate["user"],
+                candidate["filename"],
+                candidate.get("size"),
+                failure,
+                track_id,
+            )
+    except Exception as e:
+        # Don't blacklist on this path: an exception here is usually a
+        # transient slskd-API hiccup (JSON decode against an empty body,
+        # connection reset, etc.), not a "this peer rejected the file"
+        # signal. add_tried_file is permanent until the track succeeds,
+        # so a single bad response would permanently ban a perfectly
+        # good candidate. Let the next cycle retry naturally — bounded
+        # by MAX_ATTEMPTS_BEFORE_SUSPEND on the track itself.
+        logging.error(
+            f"Error downloading {basename} from {candidate['user']}: {e}"
+        )
     return None
 
 
@@ -641,9 +680,12 @@ def search_and_download(
     fixes the case where slskd returns N junk responses for a long
     artist+title query but a shorter query would have surfaced good matches.
     """
+    global last_download
+    last_download = None
     queries = _build_search_queries(artist, title, album)
     if not queries:
         return None
+    is_blocked = load_blocklist(conn) if conn is not None else None
     for query in queries:
         results = _run_one_search(query, timeout)
         evaluated = (
@@ -653,6 +695,7 @@ def search_and_download(
                 artist,
                 max_version_tier=max_version_tier,
                 expected_duration_ms=duration_ms,
+                is_blocked=is_blocked,
             )
             if results
             else []
@@ -709,6 +752,7 @@ def wait_for_completion(candidate, timeout=300):
 
     if not transfer_id:
         logging.error(f"Transfer ID not found for {candidate['filename']}")
+        candidate["failure"] = "transfer not found in slskd"
         return None
 
     start = time.time()
@@ -730,14 +774,17 @@ def wait_for_completion(candidate, timeout=300):
                         logging.warning(
                             f"File not confirmed after download: {filename}"
                         )
+                        candidate["failure"] = "file not found after download"
                         return None
                     if any(w in state for w in ("failed", "aborted", "errored")):
                         logging.warning(
                             f"Transfer failed: {file['filename']} — state: {state}"
                         )
+                        candidate["failure"] = f"transfer {state}"
                         return None
         if time.time() - start > timeout:
             logging.warning(f"Transfer timeout for {candidate['filename']}")
+            candidate["failure"] = "transfer timed out"
             return None
         if _interruptible_sleep(2):
             return None

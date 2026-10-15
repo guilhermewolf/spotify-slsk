@@ -427,3 +427,28 @@ class TestUntaggedFallback:
             str(src), "pl_x", conn, reconcile=True, expected_track=self._track()
         )
         assert ok is False and src.exists()
+
+
+class TestRejectionBlocklists:
+    def test_rejected_download_blocklists_its_source(self, conn, monkeypatch, sandbox_dirs):
+        downloads, _ = sandbox_dirs
+        _seed(conn)
+        _stub_metadata(monkeypatch, "Something Totally Different", "Other Artist")
+        bad = downloads / "x.flac"
+        bad.write_bytes(b"audio")
+        source = {"user": "peer", "filename": "@@a\\x.flac", "size": 5}
+
+        app.process_downloaded_file(str(bad), "pl_x", conn, source=source)
+
+        assert db.is_blocklisted(conn, "peer", "@@a\\x.flac")
+
+    def test_reconcile_never_blocklists(self, conn, monkeypatch, sandbox_dirs):
+        downloads, _ = sandbox_dirs
+        _seed(conn)
+        _stub_metadata(monkeypatch, None, None)
+        f = downloads / "x.flac"
+        f.write_bytes(b"audio")
+        app.process_downloaded_file(
+            str(f), "pl_x", conn, reconcile=True, source={"user": "peer", "filename": "x"}
+        )
+        assert db.list_blocklist(conn) == []

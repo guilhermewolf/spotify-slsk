@@ -540,6 +540,34 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
             url_for("track_detail", playlist_id=playlist_id, track_id=track_id)
         )
 
+    # ---- blocklist ----------------------------------------------------
+
+    @app.route("/blocklist")
+    def blocklist_page():
+        return render_template(
+            "blocklist.html", entries=db.list_blocklist(g.conn, limit=500)
+        )
+
+    @app.route("/blocklist/<int:entry_id>/delete", methods=["POST"])
+    def blocklist_delete(entry_id):
+        if db.remove_blocklist(g.conn, entry_id):
+            flash("Removed from the blocklist.", "success")
+        else:
+            flash("Blocklist entry not found.", "error")
+        return redirect(url_for("blocklist_page"))
+
+    @app.route("/blocklist/ban-user", methods=["POST"])
+    def blocklist_ban_user():
+        username = (request.form.get("username") or "").strip()
+        reason = (request.form.get("reason") or "").strip()[:200] or "banned manually"
+        if not username or len(username) > 200:
+            flash("Enter a Soulseek username.", "error")
+        elif db.add_blocklist(g.conn, username, None, None, reason):
+            flash(f'Banned "{username}". Their files are skipped from now on.', "success")
+        else:
+            flash(f'"{username}" is already banned.', "error")
+        return redirect(url_for("blocklist_page"))
+
     # ---- settings -----------------------------------------------------
 
     @app.route("/settings", methods=["GET", "POST"])
