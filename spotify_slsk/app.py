@@ -17,6 +17,7 @@ from .db import (
     clear_tried_entries,
     add_tried_file,
     get_pending_tracks,
+    get_track,
     get_playlist_meta,
     upsert_playlist_meta,
     list_playlists,
@@ -250,9 +251,33 @@ def find_closest_db_match(conn, table_name: str, file_title: str, file_artist: s
 
     return (*best_row, best_score, best_reason)
 
-def process_downloaded_file(file_path, playlist_name, conn, reconcile: bool = False):
+def _match_requested_track(conn, table_name, track_id, title, artist):
+    """Score the file's tags against the one track that was requested.
+
+    Returns ((id, name, artists, album), score) or (None, 0.0) if the row is
+    gone. Never falls back to another row: picking the best row of the whole
+    playlist assigned wrong files to *other* tracks while the requested one
+    stayed pending and was downloaded again.
+    """
+    row = get_track(conn, table_name, track_id)
+    if not row:
+        logging.warning(f"Requested track {track_id} not found in {table_name}")
+        return None, 0.0
+    score, reason = score_track_match(title, artist, row["name"], row["artists"])
+    logging.info(
+        f"Verify '{title}' by '{artist}' against requested '{row['name']}' by "
+        f"'{row['artists']}': score={score:.2f} ({reason})"
+    )
+    return (row["id"], row["name"], row["artists"], row["album"]), score
+
+
+def process_downloaded_file(file_path, playlist_name, conn, reconcile: bool = False, track_id=None):
     """
     Process a file that is either freshly downloaded or already on disk.
+
+    track_id: the track this file was downloaded for. When given, the file is
+      verified against that track only. Without it (reconciling an unknown
+      file) the best-scoring row of the playlist is used.
 
     When reconcile=True:
       - Never delete files on mismatch.
@@ -262,11 +287,13 @@ def process_downloaded_file(file_path, playlist_name, conn, reconcile: bool = Fa
 
     if not title or not artist:
         logging.warning(f"❌ Missing metadata for {file_path}. Skipping tagging and DB update.")
-        _reject_and_log(file_path, playlist_name, conn, reason="invalid metadata", destructive=not reconcile)
+        _reject_and_log(file_path, playlist_name, conn, track_id=track_id, reason="invalid metadata", destructive=not reconcile)
         return False, None
 
-    # Route through the robust scorer (via wrapper)
-    match, score = find_closest_match(conn, playlist_name, title, artist)
+    if track_id is not None:
+        match, score = _match_requested_track(conn, playlist_name, track_id, title, artist)
+    else:
+        match, score = find_closest_match(conn, playlist_name, title, artist)
     if not match:
         _reject_and_log(file_path, playlist_name, conn, reason="no match", destructive=not reconcile)
         return False, None
@@ -964,7 +991,9 @@ def handle_track_download(track, playlist_name, conn):
     )
 
     if file_path:
-        verified, _final_path = process_downloaded_file(file_path, playlist_name, conn)
+        verified, _final_path = process_downloaded_file(
+            file_path, playlist_name, conn, track_id=track.id
+        )
         if verified:
             clear_tried_entries(conn, playlist_name, track.id)
             return True
@@ -1007,7 +1036,9 @@ def try_upgrade_track(track, playlist_name, conn, current_path):
         logging.info(f"[upgrade] No better-tier candidate for '{track.name}'")
         return False
 
-    verified, final_path = process_downloaded_file(new_file, playlist_name, conn)
+    verified, final_path = process_downloaded_file(
+        new_file, playlist_name, conn, track_id=track.id
+    )
     if not verified or not final_path:
         return False
 
