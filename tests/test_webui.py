@@ -95,9 +95,24 @@ class TestPlaylistCrud:
         r = post(client, "/playlist/pid1/toggle", follow_redirects=True)
         assert r.status_code == 200
 
+        # Without the confirm step nothing is deleted.
         r = post(client, "/playlist/pid1/delete", follow_redirects=True)
+        assert b"not confirmed" in r.data
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        assert db.get_playlist_meta(conn, "pid1")[1] == "pl_x"
+        conn.close()
+
+        r = post(client, "/playlist/pid1/delete", {"confirm": "1"}, follow_redirects=True)
         assert r.status_code == 200
         assert b"removed" in r.data.lower()
+
+    def test_dashboard_remove_uses_no_inline_handler(self, app_tmp, client):
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        db.upsert_playlist_meta(conn, "pid1", "pl_x", "X", "snap")
+        conn.close()
+        html = client.get("/").data
+        assert b"onsubmit" not in html and b"onclick" not in html
+        assert b'name="confirm" value="1"' in html
 
     def test_playlist_detail_404s_for_unknown(self, client):
         r = client.get("/playlist/does-not-exist")

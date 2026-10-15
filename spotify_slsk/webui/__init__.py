@@ -505,6 +505,11 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
 
     @app.route("/playlist/<playlist_id>/delete", methods=["POST"])
     def delete_playlist(playlist_id):
+        # Dropping the rows is irreversible: require the explicit second
+        # step from the dashboard's confirm disclosure.
+        if request.form.get("confirm") != "1":
+            flash("Removal not confirmed; nothing was deleted.", "error")
+            return redirect(url_for("dashboard"))
         if db.remove_playlist(g.conn, playlist_id):
             flash("Playlist removed. Files on disk were kept.", "success")
         else:

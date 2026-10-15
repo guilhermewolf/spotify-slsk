@@ -92,10 +92,15 @@
             {{ 'Pause syncing' if pl.enabled else 'Resume syncing' }}
           </button>
         </form>
-        <form method="POST" action="{{ url_for('delete_playlist', playlist_id=pl.playlist_id) }}"
-              onsubmit="return confirm('Stop tracking this playlist?\n\nIts database rows are dropped. Files already downloaded stay on disk.')">
+        {# No-JS confirm: the CSP blocks inline onsubmit handlers, so the old
+           confirm() never ran. The route also requires confirm=1. #}
+        <form method="POST" action="{{ url_for('delete_playlist', playlist_id=pl.playlist_id) }}">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-          <button type="submit" class="outline danger">Remove</button>
+          <details class="confirm">
+            <summary role="button" class="outline danger">Remove…</summary>
+            <p>Stop tracking this playlist? Its database rows are dropped. Files already downloaded stay on disk.</p>
+            <button type="submit" name="confirm" value="1" class="danger">Yes, remove</button>
+          </details>
         </form>
       </div>
     </article>
