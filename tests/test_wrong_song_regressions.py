@@ -181,3 +181,62 @@ class TestVersionSymmetry:
         assert len(extract_candidates(
             _results("Dub FX - Love Someone.flac"), "Love Someone", "Dub FX"
         )) == 1
+
+
+from spotify_slsk.app import _titles_token_equivalent, score_track_match  # noqa: E402
+
+MIN_MATCH = 0.62  # app default
+
+# (file title tag, file artist tag, expected title, expected artist)
+WRONG_TAGS = [
+    ("We Shall Sing All Night", "HOYO-MiX", "All Night", "InsertFX"),
+    ("Nutbush City Limits", "Tina Turner", "The City", "Jake Dile"),
+    ("That's Really Super Supergirl", "Andy Partridge", "Really Really", "Super Flu"),
+    ("A Real Bad Dream", "Kris Kross", "Dream", "Kris m"),
+    ("Eyes On Fire (Bibi Remix)", "Blue Foundation; Michael Bibi", "Your Eyes", "Eudi"),
+    ("Pour the Milk", "Robbie Doherty", "The Scoop", "Format:B"),
+    ("Come Together", "Öwnboss", "Together", "Hollaphonic"),
+    ("Low Rider (Kyle Watson Remix)", "War",
+     "Odyssey - Kyle Watson Remix", "Justin Martin"),
+    ("Dustup (Original Mix)", "Noisia", "Dustup - Mefjus Remix", "Noisia"),
+    ("Cold Outside", "Toxic Wraith", "Cold Outside - Kris m Remix", "Toxic Wraith"),
+    ("Cold Outside (Other Remix)", "Toxic Wraith",
+     "Cold Outside - Kris m Remix", "Toxic Wraith"),
+    ("Heart To Find (Dub)", "Mat Joe", "Heart To Find", "Mat Joe"),
+    ("Heart To Find (Instrumental)", "Mat Joe", "Heart To Find", "Mat Joe"),
+    ("A Real Bad Dream", "Kris m", "Dream", "Kris m"),
+]
+
+RIGHT_TAGS = [
+    ("Get Lucky", "Daft Punk feat. Pharrell Williams",
+     "Get Lucky (feat. Pharrell Williams)", "Daft Punk, Pharrell Williams"),
+    ("Get Lucky", "Daft Punk ft. Pharrell Williams", "Get Lucky", "Daft Punk"),
+    ("Song", "Artist1 & Artist2", "Song", "Artist1, Artist2"),
+    ("Heart To Find (Extended Mix)", "Mat Joe", "Heart To Find", "Mat Joe"),
+    ("Heart To Find (Original Mix)", "Mat Joe", "Heart To Find", "Mat Joe"),
+    ("Heart To Find (Radio Edit)", "Mat Joe", "Heart To Find", "Mat Joe"),
+    ("Heart To Find - Extended Mix", "Mat Joe", "Heart To Find", "Mat Joe"),
+    ("HEART TO FIND!", "MAT JOE", "Heart To Find", "Mat Joe"),
+    ("群青", "YOASOBI", "群青", "YOASOBI"),
+    ("Here Comes The Sun", "The Beatles", "Here Comes The Sun - Remastered 2019",
+     "The Beatles"),
+    ("Cold Outside (Kris M Remix)", "Toxic Wraith",
+     "Cold Outside - Kris m Remix", "Toxic Wraith"),
+]
+
+
+class TestScoreTrackMatchRegressions:
+    @pytest.mark.parametrize("ft,fa,dt,da", WRONG_TAGS)
+    def test_wrong_song_below_threshold(self, ft, fa, dt, da):
+        score, reason = score_track_match(ft, fa, dt, da)
+        assert score < MIN_MATCH, reason
+
+    @pytest.mark.parametrize("ft,fa,dt,da", RIGHT_TAGS)
+    def test_right_song_above_threshold(self, ft, fa, dt, da):
+        score, reason = score_track_match(ft, fa, dt, da)
+        assert score >= MIN_MATCH, reason
+
+    def test_two_word_titles_need_more_than_one_shared_word(self):
+        assert not _titles_token_equivalent("Your Eyes", "Eyes On Fire")
+        assert not _titles_token_equivalent("I Love You", "You")
+        assert not _titles_token_equivalent("Dream", "A Real Bad Dream")
