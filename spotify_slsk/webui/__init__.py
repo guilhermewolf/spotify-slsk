@@ -560,7 +560,8 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
     def interactive_search_start(playlist_id, track_id):
         _, track = _track_or_404(playlist_id, track_id)
         key = (playlist_id, track_id)
-        if not runtime_state.start_interactive_search(key):
+        token = runtime_state.start_interactive_search(key)
+        if token is None:
             flash("A search for this track is already running.", "error")
         else:
             # Snapshot the blocklist here: the search thread gets no DB.
@@ -575,10 +576,10 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
                         duration_ms=track["duration_ms"],
                         is_blocked=is_blocked,
                     )
-                    runtime_state.finish_interactive_search(key, results=results)
+                    runtime_state.finish_interactive_search(key, token, results=results)
                 except Exception as e:
                     logging.exception("Interactive search failed")
-                    runtime_state.finish_interactive_search(key, error=str(e))
+                    runtime_state.finish_interactive_search(key, token, error=str(e))
 
             threading.Thread(target=_run, daemon=True, name="interactive-search").start()
             flash("Searching slskd. Results appear below as soon as it finishes.", "success")

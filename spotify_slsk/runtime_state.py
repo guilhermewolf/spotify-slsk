@@ -201,29 +201,37 @@ def _expired(entry: dict, now: float) -> bool:
     return now - entry["finished"] > INTERACTIVE_TTL_SECONDS
 
 
-def start_interactive_search(key) -> bool:
-    """Claim the slot for ``key``. False if a search is already running."""
+def start_interactive_search(key):
+    """Claim the slot for ``key``. Returns an ownership token to pass to
+    finish_interactive_search, or None if a search is already running.
+
+    A search that went stale (INTERACTIVE_STALE_SECONDS) is replaced; its
+    thread may still report back later, and the token is what makes that
+    late finish a no-op instead of overwriting the newer search."""
     now = time.time()
     with _interactive_lock:
         for k in [k for k, e in _interactive.items() if _expired(e, now)]:
             del _interactive[k]
         current = _interactive.get(key)
         if current is not None and current["status"] == "running":
-            return False
+            return None
+        token = object()
         _interactive[key] = {
+            "token": token,
             "status": "running",
             "started": now,
             "finished": None,
             "results": [],
             "error": None,
         }
-        return True
+        return token
 
 
-def finish_interactive_search(key, results=None, error=None) -> None:
+def finish_interactive_search(key, token, results=None, error=None) -> None:
+    """Record the outcome — only if ``token`` still owns the slot."""
     with _interactive_lock:
         entry = _interactive.get(key)
-        if entry is None:
+        if entry is None or entry["token"] is not token:
             return
         entry.update(
             status="error" if error else "done",
@@ -242,7 +250,9 @@ def get_interactive_search(key):
         if _expired(entry, time.time()):
             del _interactive[key]
             return None
-        return dict(entry)
+        snap = dict(entry)
+        snap.pop("token")
+        return snap
 
 
 # --- manual grabs: web UI -> daemon thread ---------------------------------

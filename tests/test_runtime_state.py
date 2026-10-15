@@ -171,17 +171,33 @@ class TestLoggingWiring:
 class TestInteractiveSearchState:
     def test_one_search_per_key_and_expiry(self, monkeypatch):
         key = ("pid", "t-int")
-        assert runtime_state.start_interactive_search(key)
-        assert not runtime_state.start_interactive_search(key), "second concurrent search refused"
+        token = runtime_state.start_interactive_search(key)
+        assert token is not None
+        assert runtime_state.start_interactive_search(key) is None, "second concurrent search refused"
         assert runtime_state.get_interactive_search(key)["status"] == "running"
-        runtime_state.finish_interactive_search(key, results=[{"x": 1}])
+        runtime_state.finish_interactive_search(key, token, results=[{"x": 1}])
         snap = runtime_state.get_interactive_search(key)
         assert snap["status"] == "done" and snap["results"] == [{"x": 1}]
-        assert runtime_state.start_interactive_search(key), "a finished search can be re-run"
-        runtime_state.finish_interactive_search(key, error="boom")
+        token = runtime_state.start_interactive_search(key)
+        assert token is not None, "a finished search can be re-run"
+        runtime_state.finish_interactive_search(key, token, error="boom")
         later = runtime_state.time.time() + runtime_state.INTERACTIVE_TTL_SECONDS + 1
         monkeypatch.setattr(runtime_state.time, "time", lambda: later)
         assert runtime_state.get_interactive_search(key) is None
+
+    def test_stale_thread_cannot_finish_a_newer_search(self, monkeypatch):
+        key = ("pid", "t-stale")
+        runtime_state._interactive.pop(key, None)
+        old = runtime_state.start_interactive_search(key)
+        # The first thread hangs past the stale limit; a new search replaces it.
+        later = runtime_state.time.time() + runtime_state.INTERACTIVE_STALE_SECONDS + 1
+        monkeypatch.setattr(runtime_state.time, "time", lambda: later)
+        new = runtime_state.start_interactive_search(key)
+        assert new is not None and new is not old
+        runtime_state.finish_interactive_search(key, old, results=[{"stale": 1}])
+        assert runtime_state.get_interactive_search(key)["status"] == "running"
+        runtime_state.finish_interactive_search(key, new, results=[{"fresh": 1}])
+        assert runtime_state.get_interactive_search(key)["results"] == [{"fresh": 1}]
 
     def test_grab_queue_drains(self):
         runtime_state.pop_manual_grabs()
