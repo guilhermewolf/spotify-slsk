@@ -290,6 +290,10 @@ button.danger:focus {
 .badge-retrying   { background: var(--ss-retry-bg); color: var(--ss-retry); }
 .badge-suspended  { background: var(--ss-suspended-bg); color: var(--ss-suspended); }
 .badge-disabled   { background: var(--ss-pending-bg); color: var(--ss-pending); }
+.badge-event-imported, .badge-event-upgraded { background: var(--ss-ok-bg); color: var(--ss-ok); }
+.badge-event-grabbed, .badge-event-retried { background: var(--ss-pending-bg); color: var(--ss-pending); }
+.badge-event-download_failed, .badge-event-import_rejected { background: var(--ss-suspended-bg); color: var(--ss-suspended); }
+.badge-event-deleted_file { background: var(--ss-retry-bg); color: var(--ss-retry); }
 
 /* ---- filters -------------------------------------------------------- */
 

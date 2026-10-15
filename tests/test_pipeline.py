@@ -452,3 +452,50 @@ class TestRejectionBlocklists:
             str(f), "pl_x", conn, reconcile=True, source={"user": "peer", "filename": "x"}
         )
         assert db.list_blocklist(conn) == []
+
+
+class TestHistoryEvents:
+    def test_import_and_rejection_are_recorded(self, conn, monkeypatch, sandbox_dirs):
+        downloads, _ = sandbox_dirs
+        _seed(conn)
+        db.upsert_playlist_meta(conn, "pid", "pl_x", "X", "s")
+        _stub_metadata(monkeypatch, "Something Totally Different", "Other Artist")
+        bad = downloads / "bad.flac"
+        bad.write_bytes(b"audio")
+        app.process_downloaded_file(str(bad), "pl_x", conn, source={"user": "peer", "filename": "bad.flac"})
+
+        _stub_metadata(monkeypatch, "Heart To Find", "Mat Joe")
+        good = downloads / "good.flac"
+        good.write_bytes(b"audio")
+        app.process_downloaded_file(str(good), "pl_x", conn, source={"user": "peer2", "filename": "good.flac"})
+
+        events = [(r["event"], r["playlist_id"]) for r in db.list_history(conn)]
+        assert events == [
+            ("imported", "pid"), ("deleted_file", "pid"), ("import_rejected", "pid"),
+        ]
+        assert db.list_history(conn, event="imported")[0]["data"]["username"] == "peer2"
+
+    def test_reconcile_records_nothing(self, conn, monkeypatch, sandbox_dirs):
+        downloads, _ = sandbox_dirs
+        _seed(conn)
+        _stub_metadata(monkeypatch, None, None)
+        f = downloads / "x.flac"
+        f.write_bytes(b"audio")
+        app.process_downloaded_file(str(f), "pl_x", conn, reconcile=True)
+        assert db.list_history(conn) == []
+
+    def test_nothing_acceptable_records_download_failed(self, conn, monkeypatch):
+        from spotify_slsk import soulseek_api
+        monkeypatch.setattr(soulseek_api, "_run_one_search", lambda q, timeout=60: [])
+        soulseek_api.search_and_download("Mat Joe", "Heart To Find", conn, "pl_x", "t1")
+        rows = db.list_history(conn)
+        assert [r["event"] for r in rows] == ["download_failed"]
+        assert rows[0]["data"]["reason"].startswith("no acceptable candidate")
+
+    def test_upgrade_pass_finding_nothing_is_not_a_failure(self, conn, monkeypatch):
+        from spotify_slsk import soulseek_api
+        monkeypatch.setattr(soulseek_api, "_run_one_search", lambda q, timeout=60: [])
+        soulseek_api.search_and_download(
+            "Mat Joe", "Heart To Find", conn, "pl_x", "t1", max_version_tier=1
+        )
+        assert db.list_history(conn) == []

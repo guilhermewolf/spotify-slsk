@@ -382,7 +382,7 @@ class TestSchemaMigrations:
         # Snapshot cleared so the next sync backfills durations.
         assert db.get_playlist_meta(conn, "pid")[0] is None
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert "blocklist" in tables
+        assert {"blocklist", "history"} <= tables
         conn.close()
 
     def test_existing_rows_survive_reopening(self, tmp_path):
@@ -469,3 +469,37 @@ class TestBlocklist:
         assert db.remove_blocklist(conn, rows[1]["id"])
         assert not db.is_blocklisted(conn, "peer", "a.flac")
         conn.close()
+
+
+class TestHistory:
+    def test_record_list_filter_and_paginate(self, tmp_path):
+        conn = db.create_connection(str(tmp_path / "h.db"))
+        db.upsert_playlist_meta(conn, "pid", "pl_x", "X", None)
+        db.record_history(conn, "grabbed", table_name="pl_x", track_id="t1", username="u", bitrate=None)
+        db.record_history(conn, "download_failed", table_name="pl_x", track_id="t1", reason="transfer failed")
+        db.record_history(conn, "retried", playlist_id="other", track_id="t2")
+
+        rows = db.list_history(conn)
+        assert [r["event"] for r in rows] == ["retried", "download_failed", "grabbed"]
+        assert rows[2]["playlist_id"] == "pid", "table_name resolves to playlist_id"
+        assert rows[2]["data"] == {"username": "u"}, "None values are dropped"
+        assert [r["event"] for r in db.list_history(conn, playlist_id="pid")] == [
+            "download_failed", "grabbed"]
+        assert [r["event"] for r in db.list_history(conn, event="grabbed")] == ["grabbed"]
+        assert [r["event"] for r in db.list_history(conn, before_id=rows[1]["id"])] == ["grabbed"]
+        assert db.latest_failures(conn) == {"t1": "transfer failed"}
+        conn.close()
+
+    def test_prune_keeps_recent(self, tmp_path):
+        conn = db.create_connection(str(tmp_path / "h.db"))
+        db.record_history(conn, "grabbed", track_id="new")
+        with conn:
+            conn.execute(
+                "INSERT INTO history (ts, event, track_id) VALUES (datetime('now','-100 days'), 'grabbed', 'old')"
+            )
+        db.prune_history(conn, 90)
+        assert [r["track_id"] for r in db.list_history(conn)] == ["new"]
+        conn.close()
+
+    def test_none_conn_is_a_noop(self):
+        db.record_history(None, "grabbed")

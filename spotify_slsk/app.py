@@ -18,6 +18,8 @@ from .db import (
     clear_tried_entries,
     add_tried_file,
     add_blocklist,
+    record_history,
+    prune_history,
     get_pending_tracks,
     get_playlist_meta,
     upsert_playlist_meta,
@@ -51,15 +53,20 @@ MIN_MATCH_SCORE = float(os.getenv("MIN_MATCH_SCORE", "0.62"))
 CYCLE_INTERVAL_SECONDS = int(os.getenv("CYCLE_INTERVAL_SECONDS", "300"))
 CYCLE_ERROR_BACKOFF_SECONDS = int(os.getenv("CYCLE_ERROR_BACKOFF_SECONDS", "60"))
 HEARTBEAT_FILE = os.getenv("HEARTBEAT_FILE", "/tmp/heartbeat")
+HISTORY_RETENTION_DAYS = int(os.getenv("HISTORY_RETENTION_DAYS", "90"))
 
 
 def _reload_settings(conn):
     """Pull live tunables from the DB so UI changes take effect next cycle."""
-    global MIN_MATCH_SCORE
+    global MIN_MATCH_SCORE, HISTORY_RETENTION_DAYS
     try:
         MIN_MATCH_SCORE = float(get_setting(conn, "MIN_MATCH_SCORE", "0.62"))
     except (TypeError, ValueError) as e:
         logging.warning(f"Bad MIN_MATCH_SCORE in DB; keeping previous: {e}")
+    try:
+        HISTORY_RETENTION_DAYS = int(get_setting(conn, "HISTORY_RETENTION_DAYS", "90"))
+    except (TypeError, ValueError) as e:
+        logging.warning(f"Bad HISTORY_RETENTION_DAYS in DB; keeping previous: {e}")
     _slsk_refresh_from_db(conn)
 
 _shutdown = threading.Event()
@@ -354,7 +361,9 @@ def process_downloaded_file(
         track_id = expected_track.id
         title, artist, album = expected_track.name, expected_track.artist, None
         db_album = expected_track.album
+        match_method = "filename+duration"
     else:
+        match_method = "tags"
         # Route through the robust scorer (via wrapper)
         match, score = find_closest_match(conn, playlist_name, title, artist)
         if not match:
@@ -388,6 +397,14 @@ def process_downloaded_file(
 
     if final_path:
         update_download_status(conn, track_id, playlist_name, success=True, file_path=final_path)
+        if not reconcile:
+            record_history(
+                conn, "imported", table_name=playlist_name, track_id=track_id,
+                path=final_path,
+                match=match_method,
+                username=(source or {}).get("user"),
+                filename=(source or {}).get("filename"),
+            )
         return True, final_path
 
     logging.error(f"❌ Failed to move {file_path} to playlist folder.")
@@ -402,9 +419,19 @@ def _reject_and_log(file_path, playlist_name, conn, track_id=None, reason="unkno
     filename = os.path.basename(file_path)
 
     if destructive:
+        record_history(
+            conn, "import_rejected", table_name=playlist_name, track_id=track_id,
+            reason=reason, path=file_path,
+            username=(source or {}).get("user"),
+            filename=(source or {}).get("filename"),
+        )
         try:
             os.remove(file_path)
             logging.info(f"🧹 Deleted file due to {reason}: {file_path}")
+            record_history(
+                conn, "deleted_file", table_name=playlist_name, track_id=track_id,
+                path=file_path, reason=reason,
+            )
         except Exception as e:
             logging.error(f"❌ Failed to delete file {file_path}: {e}")
     else:
@@ -1131,11 +1158,19 @@ def try_upgrade_track(track, playlist_name, conn, current_path):
         ):
             os.remove(current_path)
             logging.info(f"[upgrade] Replaced {current_path} -> {final_path}")
+            record_history(
+                conn, "deleted_file", table_name=playlist_name, track_id=track.id,
+                path=current_path, reason="replaced by upgrade",
+            )
         else:
             logging.info(f"[upgrade] Wrote upgraded file: {final_path}")
     except OSError as e:
         logging.warning(f"[upgrade] Could not delete old file {current_path}: {e}")
 
+    record_history(
+        conn, "upgraded", table_name=playlist_name, track_id=track.id,
+        old_path=current_path, path=final_path,
+    )
     clear_tried_entries(conn, playlist_name, track.id)
     return True
 
@@ -1288,6 +1323,7 @@ def main():
         while not _shutdown.is_set():
             _touch_heartbeat()
             _reload_settings(conn)
+            prune_history(conn, HISTORY_RETENTION_DAYS)
             playlists = list_playlists(conn, only_enabled=True)
             if sp is None:
                 # No Spotify credentials. Idle rather than spin: syncing is

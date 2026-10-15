@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import logging
@@ -164,6 +165,27 @@ def _ensure_blocklist_table(conn: sqlite3.Connection) -> None:
         logging.error(f"Error ensuring blocklist: {e}")
 
 
+def _ensure_history_table(conn: sqlite3.Connection) -> None:
+    """Persistent event log (schema v5): grabbed, imported, download_failed,
+    import_rejected, upgraded, retried, deleted_file. Pruned by age via
+    prune_history."""
+    try:
+        with conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS history ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "ts TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+                "event TEXT NOT NULL, "
+                "playlist_id TEXT, "
+                "track_id TEXT, "
+                "data_json TEXT)"
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_history_track ON history (track_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_history_ts ON history (ts)")
+    except sqlite3.Error as e:
+        logging.error(f"Error ensuring history: {e}")
+
+
 def create_connection(db_file):
     try:
         conn = sqlite3.connect(db_file, timeout=30)
@@ -172,6 +194,7 @@ def create_connection(db_file):
         _ensure_settings_table(conn)
         _ensure_cycle_history_table(conn)
         _ensure_blocklist_table(conn)
+        _ensure_history_table(conn)
         _ensure_schema_version(conn)
 
         # sqlite3.connect() succeeds on a corrupt or non-SQLite file — the
@@ -861,3 +884,108 @@ def load_blocklist(conn):
 
 def is_blocklisted(conn, username, filename) -> bool:
     return load_blocklist(conn)(username, filename)
+
+
+# ---- history --------------------------------------------------------------
+
+HISTORY_EVENTS = (
+    "grabbed",
+    "imported",
+    "download_failed",
+    "import_rejected",
+    "upgraded",
+    "retried",
+    "deleted_file",
+)
+FAILURE_EVENTS = ("download_failed", "import_rejected")
+
+
+def record_history(conn, event, *, playlist_id=None, table_name=None, track_id=None, **data):
+    """Append one history event. `table_name` resolves to its playlist_id
+    when the id isn't given. None-valued data keys are dropped. Never
+    raises — history is an audit aid, not something to fail a download on.
+    """
+    if conn is None:
+        return
+    try:
+        if playlist_id is None and table_name:
+            row = conn.execute(
+                "SELECT playlist_id FROM playlists_meta WHERE table_name = ? LIMIT 1",
+                (table_name,),
+            ).fetchone()
+            playlist_id = row[0] if row else None
+        payload = {k: v for k, v in data.items() if v is not None}
+        with conn:
+            conn.execute(
+                "INSERT INTO history (event, playlist_id, track_id, data_json) "
+                "VALUES (?, ?, ?, ?)",
+                (event, playlist_id, track_id, json.dumps(payload) if payload else None),
+            )
+    except (sqlite3.Error, TypeError, ValueError) as e:
+        logging.error(f"Could not record history event {event}: {e}")
+
+
+def list_history(conn, *, event=None, playlist_id=None, track_id=None, before_id=None, limit=200):
+    """Newest first. Each row has `data` parsed from data_json."""
+    sql = "SELECT id, ts, event, playlist_id, track_id, data_json FROM history"
+    where, args = [], []
+    for col, val in (("event", event), ("playlist_id", playlist_id), ("track_id", track_id)):
+        if val:
+            where.append(f"{col} = ?")
+            args.append(val)
+    if before_id:
+        where.append("id < ?")
+        args.append(before_id)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(limit)
+    try:
+        rows = conn.execute(sql, args).fetchall()
+    except sqlite3.Error as e:
+        logging.warning(f"Could not list history: {e}")
+        return []
+    out = []
+    for r in rows:
+        try:
+            data = json.loads(r[5]) if r[5] else {}
+        except ValueError:
+            data = {}
+        out.append({
+            "id": r[0], "ts": r[1], "event": r[2],
+            "playlist_id": r[3], "track_id": r[4], "data": data,
+        })
+    return out
+
+
+def latest_failures(conn) -> dict:
+    """{track_id: reason} from each track's most recent failure event."""
+    try:
+        rows = conn.execute(
+            "SELECT track_id, data_json FROM history WHERE id IN ("
+            "SELECT MAX(id) FROM history WHERE event IN (?, ?) "
+            "AND track_id IS NOT NULL GROUP BY track_id)",
+            FAILURE_EVENTS,
+        ).fetchall()
+    except sqlite3.Error as e:
+        logging.warning(f"Could not read latest failures: {e}")
+        return {}
+    out = {}
+    for tid, data_json in rows:
+        try:
+            out[tid] = (json.loads(data_json) if data_json else {}).get("reason")
+        except ValueError:
+            out[tid] = None
+    return out
+
+
+def prune_history(conn, retention_days: int) -> None:
+    """Delete events older than `retention_days`. Indexed on ts, so cheap."""
+    try:
+        with conn:
+            conn.execute(
+                "DELETE FROM history WHERE ts < datetime('now', ?)",
+                (f"-{int(retention_days)} days",),
+            )
+    except sqlite3.Error as e:
+        logging.warning(f"Could not prune history: {e}")

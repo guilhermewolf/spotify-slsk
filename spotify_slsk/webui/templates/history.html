@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% set active_page = 'history' %}
+{% block title %}History · spotify-slsk{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>History</h1>
+    <p class="subtle">Grabs, imports, failures and retries, newest first. Kept for HISTORY_RETENTION_DAYS.</p>
+  </div>
+</div>
+
+<form class="filter-form" method="GET" action="{{ url_for('history_page') }}">
+  <select name="event" aria-label="Event">
+    <option value="">All events</option>
+    {% for e in events %}
+    <option value="{{ e }}" {% if e == event %}selected{% endif %}>{{ e|replace('_', ' ') }}</option>
+    {% endfor %}
+  </select>
+  <select name="playlist" aria-label="Playlist">
+    <option value="">All playlists</option>
+    {% for p in playlists %}
+    <option value="{{ p.playlist_id }}" {% if p.playlist_id == playlist_id %}selected{% endif %}>{{ p.name }}</option>
+    {% endfor %}
+  </select>
+  <button type="submit" class="secondary outline">Filter</button>
+</form>
+
+{% if rows %}
+  {% set show_track = true %}
+  {% include "_history_rows.html" %}
+  {% if older_id %}
+  <p>
+    <a role="button" class="secondary outline"
+       href="{{ url_for('history_page', event=event, playlist=playlist_id, before_id=older_id) }}">Older &rarr;</a>
+  </p>
+  {% endif %}
+{% else %}
+<div class="empty">
+  <h2>No history yet</h2>
+  <p>Events appear here as the daemon grabs, imports and rejects files.</p>
+</div>
+{% endif %}
+
+{% endblock %}

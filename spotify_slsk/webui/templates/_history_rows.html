@@ -1,0 +1,39 @@
+{# Rows of history events. Expects `rows`; `show_track` adds a track column. #}
+<div class="table-wrap">
+  <table class="track-table">
+    <thead>
+      <tr>
+        <th scope="col">When</th>
+        <th scope="col">Event</th>
+        {% if show_track %}<th scope="col">Track</th>{% endif %}
+        <th scope="col">Details</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for h in rows %}
+      <tr>
+        <td class="nowrap subtle">{{ h.ts }}</td>
+        <td class="nowrap"><span class="badge badge-event-{{ h.event }}">{{ h.event|replace('_', ' ') }}</span></td>
+        {% if show_track %}
+        <td>
+          {% if h.track_label %}
+            <a href="{{ url_for('track_detail', playlist_id=h.playlist_id, track_id=h.track_id) }}">{{ h.track_label }}</a>
+          {% else %}<span class="subtle">{{ h.track_id or '—' }}</span>{% endif %}
+        </td>
+        {% endif %}
+        <td>
+          {% if h.data.reason %}<div>{{ h.data.reason }}</div>{% endif %}
+          {% if h.data.filename %}<code>{{ h.data.filename }}</code>{% elif h.data.path %}<code>{{ h.data.path }}</code>{% endif %}
+          <div class="subtle">
+            {% if h.data.username %}from {{ h.data.username }}{% endif %}
+            {% if h.data.format %} · {{ h.data.format }}{% endif %}
+            {% if h.data.bitrate %} · {{ h.data.bitrate }} kbps{% endif %}
+            {% if h.data.source == 'manual' %} · manual{% endif %}
+            {% if h.data.match %} · matched by {{ h.data.match }}{% endif %}
+          </div>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>

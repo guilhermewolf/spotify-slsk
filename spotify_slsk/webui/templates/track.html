@@ -117,6 +117,13 @@
 </div>
 {% endif %}
 
+{% if history %}
+<h2 style="font-size:1.05rem;margin-top:2rem;">History</h2>
+{% set rows = history %}
+{% set show_track = false %}
+{% include "_history_rows.html" %}
+{% endif %}
+
 {% if track.tried %}
 <h2 style="font-size:1.05rem;margin-top:2rem;">Rejected files</h2>
 <p class="subtle">

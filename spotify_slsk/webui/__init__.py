@@ -166,6 +166,7 @@ SETTINGS_SPEC = [
     ("SLSKD_EARLY_STOP_RESPONSES", "20", "Stop the slskd search once this many peers replied", "int1"),
     ("SLSKD_MAX_DURATION_DIFF_SECONDS", "15", "Reject candidates whose length differs from Spotify's by more than this many seconds; also the tolerance for accepting an untagged download by filename + duration. 0 disables both", "int0"),
     ("SLSKD_WAIT_TIMEOUT", "60", "Seconds to wait for a downloaded file to appear on disk", "int1"),
+    ("HISTORY_RETENTION_DAYS", "90", "Delete history events older than this many days", "int1"),
     ("UPGRADE_CHECK_INTERVAL_HOURS", "168", "Re-search downloaded tracks for a better version_tier (Extended Mix > Original Mix); 0 disables", "int0"),
 ]
 
@@ -442,6 +443,7 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
             playlist_name=playlist_name,
             track=track,
             search_history=runtime_state.get_search_history(track_id),
+            history=db.list_history(g.conn, track_id=track_id, limit=50),
         )
 
     # ---- playlist mutations -------------------------------------------
@@ -531,6 +533,7 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
         if not table_name:
             abort(404)
         db.retry_track(g.conn, table_name, track_id)
+        db.record_history(g.conn, "retried", playlist_id=playlist_id, track_id=track_id)
         _wake()
         flash(
             "Cleared attempts and rejected-file history. Cycle starting now.",
@@ -538,6 +541,41 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
         )
         return redirect(
             url_for("track_detail", playlist_id=playlist_id, track_id=track_id)
+        )
+
+    # ---- history ------------------------------------------------------
+
+    @app.route("/history")
+    def history_page():
+        event = request.args.get("event") or None
+        if event not in db.HISTORY_EVENTS:
+            event = None
+        playlist_id = request.args.get("playlist") or None
+        try:
+            before_id = int(request.args.get("before_id", "")) or None
+        except ValueError:
+            before_id = None
+        limit = 200
+        rows = db.list_history(
+            g.conn, event=event, playlist_id=playlist_id, before_id=before_id, limit=limit
+        )
+        playlists = db.list_playlists(g.conn)
+        tables = {p["playlist_id"]: p["table_name"] for p in playlists}
+        names = {}
+        for row in rows:
+            key = (row["playlist_id"], row["track_id"])
+            if key not in names and key[0] in tables and key[1]:
+                t = db.get_track(g.conn, tables[key[0]], key[1])
+                names[key] = f"{t['name']} — {t['artists']}" if t else None
+            row["track_label"] = names.get(key)
+        return render_template(
+            "history.html",
+            rows=rows,
+            events=db.HISTORY_EVENTS,
+            playlists=playlists,
+            event=event,
+            playlist_id=playlist_id,
+            older_id=rows[-1]["id"] if len(rows) == limit else None,
         )
 
     # ---- blocklist ----------------------------------------------------

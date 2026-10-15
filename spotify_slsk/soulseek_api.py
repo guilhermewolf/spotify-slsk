@@ -6,7 +6,14 @@ import re
 import slskd_api
 from rapidfuzz import fuzz
 
-from .db import get_tried_files, add_tried_file, get_setting, add_blocklist, load_blocklist
+from .db import (
+    get_tried_files,
+    add_tried_file,
+    get_setting,
+    add_blocklist,
+    load_blocklist,
+    record_history,
+)
 from . import runtime_state
 
 DEFAULT_FORMATS = "flac,mp3,aiff,wav"
@@ -603,12 +610,23 @@ def _shutting_down() -> bool:
     return _shutdown_event is not None and _shutdown_event.is_set()
 
 
-def grab_candidate(candidate, conn, playlist_name, track_id):
+def _candidate_history(candidate) -> dict:
+    return {
+        "username": candidate.get("user"),
+        "filename": candidate.get("filename"),
+        "format": (candidate.get("ext") or "").lstrip(".") or None,
+        "bitrate": candidate.get("bitrate"),
+        "size": candidate.get("size"),
+    }
+
+
+def grab_candidate(candidate, conn, playlist_name, track_id, source="auto"):
     """Enqueue one candidate, wait for it, and return the local path or None.
 
     A failed transfer or a file that never appears is remembered in the
     track's `_tried` table AND blocklisted for every track. On success the
-    candidate is stashed in `last_download`.
+    candidate is stashed in `last_download`. `source` ("auto"/"manual") is
+    recorded in history.
     """
     global last_download
     basename = os.path.basename(candidate["filename"])
@@ -631,6 +649,10 @@ def grab_candidate(candidate, conn, playlist_name, track_id):
             logging.info(f"Downloaded and verified: {file_path}")
             if _wait_for_external_processing(file_path):
                 last_download = candidate
+                record_history(
+                    conn, "grabbed", table_name=playlist_name, track_id=track_id,
+                    source=source, **_candidate_history(candidate),
+                )
                 return file_path
             logging.warning(f"Post-download verification failed for: {basename}")
             failure = "file did not appear after download"
@@ -640,6 +662,11 @@ def grab_candidate(candidate, conn, playlist_name, track_id):
         add_tried_file(conn, playlist_name, track_id, basename)
         # A shutdown mid-transfer says nothing about the peer.
         if not _shutting_down():
+            record_history(
+                conn, "download_failed", table_name=playlist_name,
+                track_id=track_id, reason=failure, source=source,
+                **_candidate_history(candidate),
+            )
             add_blocklist(
                 conn,
                 candidate["user"],
@@ -686,6 +713,7 @@ def search_and_download(
     if not queries:
         return None
     is_blocked = load_blocklist(conn) if conn is not None else None
+    results_total = accepted_total = 0
     for query in queries:
         results = _run_one_search(query, timeout)
         evaluated = (
@@ -709,6 +737,8 @@ def search_and_download(
             result_count=len(results) if results else 0,
             **summarize_evaluation(evaluated),
         )
+        results_total += len(results) if results else 0
+        accepted_total += sum(1 for c in evaluated if c["accepted"])
         if not results:
             continue
         file_path = download_and_verify(
@@ -723,6 +753,13 @@ def search_and_download(
         )
         if file_path:
             return file_path
+    # Failed grabs record their own events; this covers "nothing usable".
+    # The upgrade pass (max_version_tier) finding nothing is not a failure.
+    if accepted_total == 0 and max_version_tier is None:
+        record_history(
+            conn, "download_failed", table_name=playlist_name, track_id=track_id,
+            reason=f"no acceptable candidate ({results_total} results)",
+        )
     return None
 
 

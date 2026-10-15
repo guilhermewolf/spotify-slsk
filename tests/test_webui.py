@@ -627,3 +627,29 @@ class TestBlocklistPage:
         conn.close()
         r = client.get("/blocklist")
         assert b"<script>x</script>" not in r.data
+
+
+class TestHistoryPage:
+    def _seed(self, app_tmp):
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        db.upsert_playlist_meta(conn, "pid1", "pl_x", "X", "s")
+        db.create_table(conn, "pl_x")
+        db.insert_track(conn, "pl_x", ("t1", "Song", "Artist", "Album"))
+        db.record_history(conn, "grabbed", playlist_id="pid1", track_id="t1", username="peer", filename="f.flac")
+        db.record_history(conn, "download_failed", playlist_id="pid1", track_id="t1", reason="transfer timed out")
+        conn.close()
+
+    def test_lists_and_filters(self, app_tmp, client):
+        self._seed(app_tmp)
+        r = client.get("/history")
+        assert r.status_code == 200
+        assert b"transfer timed out" in r.data and b"Song" in r.data
+        r = client.get("/history?event=grabbed")
+        assert b"transfer timed out" not in r.data and b"f.flac" in r.data
+        assert client.get("/history?event=bogus&before_id=x").status_code == 200
+
+    def test_retry_records_history_and_track_page_shows_it(self, app_tmp, client):
+        self._seed(app_tmp)
+        post(client, "/track/pid1/t1/retry")
+        r = client.get("/track/pid1/t1")
+        assert b"retried" in r.data and b"transfer timed out" in r.data
