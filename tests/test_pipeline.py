@@ -9,7 +9,7 @@ import os
 
 import pytest
 
-from spotify_slsk import app
+from spotify_slsk import app, config
 from spotify_slsk import db
 
 
@@ -79,7 +79,7 @@ class TestProcessDownloadedFileRejects:
         downloads, _ = sandbox_dirs
         _seed(conn)
         _stub_metadata(monkeypatch, "Something Totally Different", "Other Artist")
-        monkeypatch.setattr(app, "MIN_MATCH_SCORE", 0.62)
+        monkeypatch.setattr(config, "MIN_MATCH_SCORE", 0.62)
         bad = downloads / "Other Artist - Something Totally Different.flac"
         bad.write_bytes(b"audio")
 
@@ -367,13 +367,12 @@ class TestUntaggedFallback:
         return Track("t1", "Heart To Find", "Mat Joe", "Alb", "pl_x", duration_ms=duration_ms)
 
     def _setup(self, conn, monkeypatch, sandbox_dirs, filename, length):
-        from spotify_slsk import soulseek_api
         downloads, playlists = sandbox_dirs
         _seed(conn)
         _stub_metadata(monkeypatch, None, None)
         monkeypatch.setattr(app, "_audio_length_seconds", lambda p: length)
-        monkeypatch.setattr(soulseek_api, "MAX_DURATION_DIFF_SECONDS", 15)
-        monkeypatch.setattr(app, "MIN_MATCH_SCORE", 0.62)
+        monkeypatch.setattr(config, "MAX_DURATION_DIFF_SECONDS", 15)
+        monkeypatch.setattr(config, "MIN_MATCH_SCORE", 0.62)
         src = downloads / filename
         src.write_bytes(b"audio")
         return src, playlists
@@ -479,11 +478,10 @@ class TestRejectionBlocklists:
         assert db.is_blocklisted(conn, "peer", "@@a\\x.flac")
 
     def test_truncated_file_blocklists_its_source(self, conn, monkeypatch, sandbox_dirs):
-        from spotify_slsk import soulseek_api
         downloads, _ = sandbox_dirs
         _seed(conn)
         _stub_metadata(monkeypatch, "Heart To Find", "Mat Joe")
-        monkeypatch.setattr(soulseek_api, "MAX_DURATION_DIFF_SECONDS", 15)
+        monkeypatch.setattr(config, "MAX_DURATION_DIFF_SECONDS", 15)
         monkeypatch.setattr(app, "_audio_length_seconds", lambda p: 30.0)
         bad = downloads / "Mat Joe - Heart To Find.flac"
         bad.write_bytes(b"audio")

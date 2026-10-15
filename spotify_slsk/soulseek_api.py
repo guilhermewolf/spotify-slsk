@@ -9,50 +9,11 @@ import slskd_api
 from .db import (
     get_tried_files,
     add_tried_file,
-    get_setting,
     add_blocklist,
     load_blocklist,
     record_history,
 )
-from . import runtime_state
-
-DEFAULT_FORMATS = "flac,mp3,aiff,wav"
-
-
-def _normalize_ext_list(env_val: str):
-    """
-    Return a normalized, ordered list of extensions like ['.flac', '.mp3', ...],
-    accepting inputs with or without leading dots and removing duplicates.
-    """
-    items = []
-    seen = set()
-    for raw in env_val.split(","):
-        fmt = raw.strip().strip('"').strip("'").lower()
-        if not fmt:
-            continue
-        if not fmt.startswith("."):
-            fmt = "." + fmt
-        if fmt not in seen:
-            seen.add(fmt)
-            items.append(fmt)
-    return items
-
-
-PREFERRED_FORMATS = _normalize_ext_list(os.getenv("SLSKD_PREFERRED_FORMATS", DEFAULT_FORMATS))
-DOWNLOAD_DIR = os.getenv("SLSKD_DOWNLOADS_DIR", "/downloads")
-EXTERNAL_PROCESS_WAIT_TIMEOUT = int(os.getenv("SLSKD_WAIT_TIMEOUT", "60"))
-MIN_PEER_UPLOAD_SPEED = int(os.getenv("SLSKD_MIN_PEER_UPLOAD_SPEED", "0"))
-# MP3s whose effective bitrate (size*8/duration/1000) falls below this are
-# rejected even if their reported bitrate claims 320 — catches upsampled fakes.
-# Independent of the fixed rule in extract_candidates: an MP3 whose reported
-# or filename-inferred bitrate is known and below 320 is always rejected.
-MIN_EFFECTIVE_MP3_KBPS = int(os.getenv("SLSKD_MIN_EFFECTIVE_MP3_KBPS", "280"))
-# Cut the slskd search short once we have this many responses. slskd will
-# keep collecting responses for the full searchTimeout window otherwise.
-EARLY_STOP_RESPONSES = int(os.getenv("SLSKD_EARLY_STOP_RESPONSES", "20"))
-# Reject a candidate whose slskd-reported length differs from Spotify's
-# duration by more than this many seconds. 0 disables the check.
-MAX_DURATION_DIFF_SECONDS = int(os.getenv("SLSKD_MAX_DURATION_DIFF_SECONDS", "15"))
+from . import config, runtime_state
 
 _client = None
 _shutdown_event = None
@@ -61,39 +22,6 @@ _shutdown_event = None
 # (blocklist) and record where the file came from (history). Daemon-thread
 # only.
 last_download = None
-
-
-def refresh_from_db(conn) -> None:
-    """Reload UI-editable tunables from the DB. Called at each cycle start.
-
-    Infrastructure values (SLSKD_HOST_URL, DOWNLOAD_DIR, SLSKD_URL_BASE)
-    stay env-only because they're deploy-time concerns.
-    """
-    global PREFERRED_FORMATS, MIN_PEER_UPLOAD_SPEED, MIN_EFFECTIVE_MP3_KBPS
-    global EARLY_STOP_RESPONSES, EXTERNAL_PROCESS_WAIT_TIMEOUT
-    global MAX_DURATION_DIFF_SECONDS
-
-    PREFERRED_FORMATS = _normalize_ext_list(
-        get_setting(conn, "SLSKD_PREFERRED_FORMATS", DEFAULT_FORMATS)
-    )
-    try:
-        MIN_PEER_UPLOAD_SPEED = int(
-            get_setting(conn, "SLSKD_MIN_PEER_UPLOAD_SPEED", "0")
-        )
-        MIN_EFFECTIVE_MP3_KBPS = int(
-            get_setting(conn, "SLSKD_MIN_EFFECTIVE_MP3_KBPS", "280")
-        )
-        EARLY_STOP_RESPONSES = int(
-            get_setting(conn, "SLSKD_EARLY_STOP_RESPONSES", "20")
-        )
-        EXTERNAL_PROCESS_WAIT_TIMEOUT = int(
-            get_setting(conn, "SLSKD_WAIT_TIMEOUT", "60")
-        )
-        MAX_DURATION_DIFF_SECONDS = int(
-            get_setting(conn, "SLSKD_MAX_DURATION_DIFF_SECONDS", "15")
-        )
-    except (TypeError, ValueError) as e:
-        logging.warning(f"Bad numeric setting during refresh; using previous values: {e}")
 
 
 def set_shutdown_event(event) -> None:
@@ -211,8 +139,8 @@ def _run_one_search(query: str, timeout: int = 60, client=None) -> list:
         # capping is the only sane way to cut per-search latency.
         search = client.searches.search_text(
             searchText=query,
-            minimumPeerUploadSpeed=MIN_PEER_UPLOAD_SPEED,
-            responseLimit=EARLY_STOP_RESPONSES,
+            minimumPeerUploadSpeed=config.MIN_PEER_UPLOAD_SPEED,
+            responseLimit=config.EARLY_STOP_RESPONSES,
         )
         search_id = search.get("id")
         if not search_id:
@@ -366,11 +294,11 @@ def _version_tier(text: str) -> int:
 
 
 def _duration_off(diff_seconds, longer_ok=False) -> bool:
-    """True when a file's length is outside MAX_DURATION_DIFF_SECONDS of the
+    """True when a file's length is outside config.MAX_DURATION_DIFF_SECONDS of the
     expected one. A longer-cut version may run long but never short."""
     if longer_ok and diff_seconds > 0:
         return False
-    return abs(diff_seconds) > MAX_DURATION_DIFF_SECONDS
+    return abs(diff_seconds) > config.MAX_DURATION_DIFF_SECONDS
 
 
 def fmt_duration(seconds) -> str:
@@ -559,7 +487,7 @@ def evaluate_candidates(
 
     `max_version_tier`, when set, rejects anything not *strictly better*
     (used by the upgrade pass). `expected_duration_ms` (Spotify) rejects
-    files whose reported length is more than MAX_DURATION_DIFF_SECONDS off.
+    files whose reported length is more than config.MAX_DURATION_DIFF_SECONDS off.
     `is_blocked(username, filename)` (see db.load_blocklist) rejects
     blocklisted peer files and banned peers. Title/artist/version use the
     strict rules in `filename_match`.
@@ -614,7 +542,7 @@ def evaluate_candidates(
 
             if is_blocked is not None and is_blocked(user, filename):
                 entry["reason"] = "blocklisted"
-            elif ext not in PREFERRED_FORMATS:
+            elif ext not in config.PREFERRED_FORMATS:
                 entry["reason"] = f"format not allowed: {ext or '(none)'}"
             # Reject MP3s whose reported/inferred bitrate is known-low.
             elif ext == ".mp3" and effective_bitrate is not None and effective_bitrate < 320:
@@ -624,13 +552,13 @@ def evaluate_candidates(
             elif (
                 ext == ".mp3"
                 and effective_mp3 is not None
-                and effective_mp3 < MIN_EFFECTIVE_MP3_KBPS
+                and effective_mp3 < config.MIN_EFFECTIVE_MP3_KBPS
             ):
                 entry["reason"] = (
-                    f"effective bitrate {effective_mp3} < {MIN_EFFECTIVE_MP3_KBPS}"
+                    f"effective bitrate {effective_mp3} < {config.MIN_EFFECTIVE_MP3_KBPS}"
                 )
             elif (
-                MAX_DURATION_DIFF_SECONDS > 0
+                config.MAX_DURATION_DIFF_SECONDS > 0
                 and expected_duration_ms
                 and length_sec
                 and _duration_off(
@@ -692,9 +620,9 @@ def sort_candidates(candidates):
     """
     def fmt_rank(ext: str) -> int:
         return (
-            PREFERRED_FORMATS.index(ext)
-            if ext in PREFERRED_FORMATS
-            else len(PREFERRED_FORMATS)
+            config.PREFERRED_FORMATS.index(ext)
+            if ext in config.PREFERRED_FORMATS
+            else len(config.PREFERRED_FORMATS)
         )
 
     def bitrate_rank(bps_k) -> int:
@@ -751,7 +679,7 @@ def find_file_in_downloads(filename, base_dir=None):
     incomplete directory is never searched: a hit there is still being
     written."""
     if base_dir is None:
-        base_dir = DOWNLOAD_DIR
+        base_dir = config.DOWNLOAD_DIR
     for root, dirs, files in os.walk(base_dir):
         dirs[:] = [d for d in dirs if d != "incomplete"]
         if filename in files:
@@ -1083,7 +1011,7 @@ def _wait_for_external_processing(file_path):
         return False
 
     start = time.time()
-    while time.time() - start < EXTERNAL_PROCESS_WAIT_TIMEOUT:
+    while time.time() - start < config.EXTERNAL_PROCESS_WAIT_TIMEOUT:
         if os.path.exists(file_path):
             logging.info(f"File confirmed at: {file_path}")
             return True

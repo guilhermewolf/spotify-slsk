@@ -32,7 +32,7 @@ from .db import (
     record_cycle,
 )
 from .log_config import setup_logging
-from . import runtime_state
+from . import config, runtime_state
 from mutagen import File as MutagenFile
 from mutagen.id3 import ID3, TIT2, TPE1, TALB
 from mutagen.flac import FLAC
@@ -46,7 +46,6 @@ from .soulseek_api import (
     search_and_download,
     get_client as get_slskd_client,
     set_shutdown_event as _slsk_set_shutdown_event,
-    refresh_from_db as _slsk_refresh_from_db,
     _version_tier,
     _version_keywords,
     _version_mismatch,
@@ -60,26 +59,6 @@ from .soulseek_api import (
 from .models import Track
 
 
-MIN_MATCH_SCORE = float(os.getenv("MIN_MATCH_SCORE", "0.62"))
-CYCLE_INTERVAL_SECONDS = int(os.getenv("CYCLE_INTERVAL_SECONDS", "300"))
-CYCLE_ERROR_BACKOFF_SECONDS = int(os.getenv("CYCLE_ERROR_BACKOFF_SECONDS", "60"))
-HEARTBEAT_FILE = os.getenv("HEARTBEAT_FILE", "/tmp/heartbeat")
-HISTORY_RETENTION_DAYS = int(os.getenv("HISTORY_RETENTION_DAYS", "90"))
-
-
-def _reload_settings(conn):
-    """Pull live tunables from the DB so UI changes take effect next cycle."""
-    global MIN_MATCH_SCORE, HISTORY_RETENTION_DAYS
-    try:
-        MIN_MATCH_SCORE = float(get_setting(conn, "MIN_MATCH_SCORE", "0.62"))
-    except (TypeError, ValueError) as e:
-        logging.warning(f"Bad MIN_MATCH_SCORE in DB; keeping previous: {e}")
-    try:
-        HISTORY_RETENTION_DAYS = max(1, int(get_setting(conn, "HISTORY_RETENTION_DAYS", "90")))
-    except (TypeError, ValueError) as e:
-        logging.warning(f"Bad HISTORY_RETENTION_DAYS in DB; keeping previous: {e}")
-    _slsk_refresh_from_db(conn)
-
 _shutdown = threading.Event()
 # Set by wake_now() to break the inter-cycle sleep early. Cleared at the
 # top of each cycle loop iteration after the wait returns.
@@ -89,7 +68,7 @@ _wake_event = threading.Event()
 def _touch_heartbeat():
     """Update the heartbeat file so Docker HEALTHCHECK can detect a wedged loop."""
     try:
-        with open(HEARTBEAT_FILE, "w") as f:
+        with open(config.HEARTBEAT_FILE, "w") as f:
             f.write(str(time.time()))
     except Exception:
         logging.debug("Could not write heartbeat file", exc_info=True)
@@ -110,15 +89,13 @@ def wake_now() -> None:
     """Break the cycle sleep early so the next cycle starts immediately.
 
     Called by the webui after state-changing actions (retry, refresh,
-    enable/add) so the user doesn't wait up to CYCLE_INTERVAL_SECONDS for
+    enable/add) so the user doesn't wait up to config.CYCLE_INTERVAL_SECONDS for
     the change to be observable. Idempotent — repeated calls within the
     same sleep window collapse to one wake-up.
     """
     _wake_event.set()
 
 
-PREFERRED_FORMATS = os.getenv("SLSKD_PREFERRED_FORMATS", "mp3,flac,aiff,wav,m4a,ogg")
-AUDIO_EXTS = tuple(f".{ext.strip().lower()}" for ext in PREFERRED_FORMATS.split(","))
 # Neutral release words only. Version words (dub, vip, club mix, instrumental,
 # a named mix) are kept: stripping them collapsed different recordings into
 # one. score_track_match compares versions explicitly via _version_matches.
@@ -245,7 +222,7 @@ def score_track_match(file_title: str, file_artist: str, db_title: str, db_artis
     Returns (score, reason). Score in [0..1]. Reason is a short string for debugging.
 
     An artist overlap and the same version are hard requirements: a title-only
-    match used to score 0.90 (0.88 for remixes), far above MIN_MATCH_SCORE,
+    match used to score 0.90 (0.88 for remixes), far above config.MIN_MATCH_SCORE,
     which accepted "Your Eyes" for "Eyes On Fire" by someone else.
     """
     title_sim = _similar(file_title, db_title)
@@ -318,7 +295,7 @@ def _fallback_match_untagged(file_path, expected_track, source=None):
     local basename plus its parent folder. Unknown durations, or a disabled
     duration check (0), mean no. Returns (ok, reason).
     """
-    tolerance = soulseek_api.MAX_DURATION_DIFF_SECONDS
+    tolerance = config.MAX_DURATION_DIFF_SECONDS
     if tolerance <= 0:
         return False, "missing tags (duration check disabled)"
     if not expected_track.duration_ms:
@@ -399,9 +376,9 @@ def process_downloaded_file(
         track_id = expected_track.id
 
     advertised = (source or {}).get("length")
-    if advertised and not reconcile and soulseek_api.MAX_DURATION_DIFF_SECONDS > 0:
+    if advertised and not reconcile and config.MAX_DURATION_DIFF_SECONDS > 0:
         actual = _audio_length_seconds(file_path)
-        if actual is not None and abs(actual - advertised) > soulseek_api.MAX_DURATION_DIFF_SECONDS:
+        if actual is not None and abs(actual - advertised) > config.MAX_DURATION_DIFF_SECONDS:
             reason = (
                 f"duration {soulseek_api.fmt_duration(actual)} vs advertised "
                 f"{soulseek_api.fmt_duration(advertised)} (truncated or corrupt)"
@@ -446,7 +423,7 @@ def process_downloaded_file(
             return False, None
 
         track_id, db_title, db_artist, db_album = match
-        if score < MIN_MATCH_SCORE:
+        if score < config.MIN_MATCH_SCORE:
             logging.warning(f"⚠️ Low match score ({score:.2f}) for {title} by {artist}. Skipping update.")
             _reject_and_log(file_path, playlist_name, conn, track_id=track_id, reason="low score", destructive=not reconcile, source=source)
             return False, None
@@ -533,25 +510,6 @@ def _reject_and_log(file_path, playlist_name, conn, track_id=None, reason="unkno
             track_id,
         )
 
-def _normalize_ext_list_env(var_name: str, default_csv: str) -> tuple:
-    """
-    Normalize env formats into a tuple of extensions like ('.flac', '.mp3', ...),
-    accepting values with or without leading dots and stripping quotes & spaces.
-    """
-    raw = os.getenv(var_name, default_csv)
-    items = []
-    seen = set()
-    for token in raw.split(","):
-        fmt = token.strip().strip('"').strip("'").lower()
-        if not fmt:
-            continue
-        if not fmt.startswith("."):
-            fmt = "." + fmt
-        if fmt not in seen:
-            seen.add(fmt)
-            items.append(fmt)
-    return tuple(items)
-
 def startup_check(conn, table_name: str):
     """
     Smart, scoped startup reconciliation for ONE playlist table (table_name).
@@ -562,7 +520,7 @@ def startup_check(conn, table_name: str):
 
     # Use preferred formats from ENV (e.g., "flac,mp3")
     PREFERRED_FORMATS = os.getenv("SLSKD_PREFERRED_FORMATS", "mp3,flac,aiff,wav,m4a,ogg")
-    AUDIO_EXTS = _normalize_ext_list_env("SLSKD_PREFERRED_FORMATS", "mp3,flac,aiff,wav,m4a,ogg")
+    AUDIO_EXTS = tuple(config.normalize_ext_list(PREFERRED_FORMATS))
 
     if not os.path.isdir(playlist_dir):
         logging.info(f"[startup] Skipping {table_name}: no folder at {playlist_dir}")
@@ -1437,7 +1395,7 @@ def main():
         sp = setup_spotify_client()
         if sp is not None:
             _migrate_env_playlists(conn, sp)
-        _reload_settings(conn)
+        config.reload(conn)
 
         # Bring the dashboard up before waiting on slskd. Previously the
         # slskd wait ran first and raised on timeout, so an slskd outage took
@@ -1480,8 +1438,8 @@ def main():
 
         while not _shutdown.is_set():
             _touch_heartbeat()
-            _reload_settings(conn)
-            prune_history(conn, HISTORY_RETENTION_DAYS)
+            config.reload(conn)
+            prune_history(conn, config.HISTORY_RETENTION_DAYS)
             playlists = list_playlists(conn, only_enabled=True)
             if sp is None:
                 # No Spotify credentials. Idle rather than spin: syncing is
@@ -1521,7 +1479,7 @@ def main():
                             cycle_totals[k] += counters.get(k, 0)
             except Exception:
                 logging.exception("Cycle failed; backing off and retrying")
-                if _shutdown.wait(CYCLE_ERROR_BACKOFF_SECONDS):
+                if _shutdown.wait(config.CYCLE_ERROR_BACKOFF_SECONDS):
                     break
                 continue
             # Only record cycles that did real work — empty-playlist ticks
@@ -1542,9 +1500,9 @@ def main():
             # cycle is preserved and shortcuts the next sleep.
             runtime_state.set_activity(
                 "idle",
-                detail=f"Sleeping up to {CYCLE_INTERVAL_SECONDS}s until next cycle",
+                detail=f"Sleeping up to {config.CYCLE_INTERVAL_SECONDS}s until next cycle",
             )
-            if _wake_event.wait(CYCLE_INTERVAL_SECONDS):
+            if _wake_event.wait(config.CYCLE_INTERVAL_SECONDS):
                 _wake_event.clear()
                 if _shutdown.is_set():
                     break

@@ -8,7 +8,7 @@ import threading
 
 import pytest
 
-from spotify_slsk import app
+from spotify_slsk import app, config
 
 
 @pytest.fixture(autouse=True)
@@ -124,7 +124,7 @@ class TestSlskdHealthWait:
     def test_block_until_healthy_keeps_heartbeat_fresh(self, monkeypatch, tmp_path):
         """A dependency outage is not our outage — don't let Docker restart us."""
         heartbeat = tmp_path / "heartbeat"
-        monkeypatch.setattr(app, "HEARTBEAT_FILE", str(heartbeat))
+        monkeypatch.setattr(config, "HEARTBEAT_FILE", str(heartbeat))
         monkeypatch.setattr(app, "wait_for_slskd_healthy", lambda *a, **k: False)
 
         threading.Timer(0.05, app._shutdown.set).start()
@@ -142,7 +142,7 @@ class TestHeartbeatDuringWork:
         unhealthy and restarted mid-download.
         """
         heartbeat = tmp_path / "heartbeat"
-        monkeypatch.setattr(app, "HEARTBEAT_FILE", str(heartbeat))
+        monkeypatch.setattr(config, "HEARTBEAT_FILE", str(heartbeat))
 
         touches = []
         real_touch = app._touch_heartbeat
@@ -212,20 +212,19 @@ class TestShutdownResponsiveness:
 class TestHeartbeatFile:
     def test_touch_writes_a_timestamp(self, monkeypatch, tmp_path):
         heartbeat = tmp_path / "hb"
-        monkeypatch.setattr(app, "HEARTBEAT_FILE", str(heartbeat))
+        monkeypatch.setattr(config, "HEARTBEAT_FILE", str(heartbeat))
         app._touch_heartbeat()
         assert float(heartbeat.read_text()) > 0
 
     def test_touch_never_raises_on_unwritable_path(self, monkeypatch, tmp_path):
         # A wedged heartbeat must not itself crash the cycle.
-        monkeypatch.setattr(
-            app, "HEARTBEAT_FILE", str(tmp_path / "no-such-dir" / "hb")
+        monkeypatch.setattr(config, "HEARTBEAT_FILE", str(tmp_path / "no-such-dir" / "hb")
         )
         app._touch_heartbeat()  # must not raise
 
     def test_uses_configured_path(self, monkeypatch, tmp_path):
         target = tmp_path / "custom-heartbeat"
-        monkeypatch.setattr(app, "HEARTBEAT_FILE", str(target))
+        monkeypatch.setattr(config, "HEARTBEAT_FILE", str(target))
         app._touch_heartbeat()
         assert os.path.exists(target)
 

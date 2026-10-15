@@ -12,7 +12,6 @@ from spotify_slsk.soulseek_api import (
     _has_version_marker,
     _infer_bitrate_from_name,
     _is_ascii,
-    _normalize_ext_list,
     _normalize_query_text,
     _version_mismatch,
     _version_tier,
@@ -21,18 +20,19 @@ from spotify_slsk.soulseek_api import (
     extract_candidates,
     sort_candidates,
 )
-from spotify_slsk import soulseek_api
+from spotify_slsk import config, soulseek_api
+from spotify_slsk.config import normalize_ext_list
 
 
 class TestNormalizeExtList:
     def test_basic(self):
-        assert _normalize_ext_list("flac,mp3") == [".flac", ".mp3"]
+        assert normalize_ext_list("flac,mp3") == [".flac", ".mp3"]
 
     def test_with_dots_and_whitespace(self):
-        assert _normalize_ext_list(" .FLAC , mp3 ") == [".flac", ".mp3"]
+        assert normalize_ext_list(" .FLAC , mp3 ") == [".flac", ".mp3"]
 
     def test_dedupes_preserving_order(self):
-        assert _normalize_ext_list("mp3,flac,mp3") == [".mp3", ".flac"]
+        assert normalize_ext_list("mp3,flac,mp3") == [".mp3", ".flac"]
 
 
 class TestIsAscii:
@@ -686,7 +686,7 @@ class TestDurationFilter:
         }]}]
 
     def test_rejects_when_too_far_off(self, monkeypatch):
-        monkeypatch.setattr(soulseek_api, "MAX_DURATION_DIFF_SECONDS", 15)
+        monkeypatch.setattr(config, "MAX_DURATION_DIFF_SECONDS", 15)
         out = soulseek_api.evaluate_candidates(
             self._results(190), "Lose Yourself", "Eminem", expected_duration_ms=242_000
         )
@@ -694,14 +694,14 @@ class TestDurationFilter:
         assert out[0]["reason"] == "duration 3:10 vs 4:02"
 
     def test_accepts_within_tolerance(self, monkeypatch):
-        monkeypatch.setattr(soulseek_api, "MAX_DURATION_DIFF_SECONDS", 15)
+        monkeypatch.setattr(config, "MAX_DURATION_DIFF_SECONDS", 15)
         out = soulseek_api.evaluate_candidates(
             self._results(250), "Lose Yourself", "Eminem", expected_duration_ms=242_000
         )
         assert out[0]["accepted"] is True
 
     def test_zero_disables(self, monkeypatch):
-        monkeypatch.setattr(soulseek_api, "MAX_DURATION_DIFF_SECONDS", 0)
+        monkeypatch.setattr(config, "MAX_DURATION_DIFF_SECONDS", 0)
         out = soulseek_api.evaluate_candidates(
             self._results(100), "Lose Yourself", "Eminem", expected_duration_ms=242_000
         )
@@ -710,7 +710,7 @@ class TestDurationFilter:
     def test_extended_mix_may_run_longer_but_not_shorter(self, monkeypatch):
         # Spotify often lists the radio edit; the version tiers prefer the
         # Extended Mix, so a duration check must not reject the long cut.
-        monkeypatch.setattr(soulseek_api, "MAX_DURATION_DIFF_SECONDS", 15)
+        monkeypatch.setattr(config, "MAX_DURATION_DIFF_SECONDS", 15)
 
         def judge(length):
             return soulseek_api.evaluate_candidates(
@@ -723,7 +723,7 @@ class TestDurationFilter:
         assert judge(120)["reason"] == "duration 2:00 vs 3:00"
 
     def test_unknown_durations_are_not_rejected(self, monkeypatch):
-        monkeypatch.setattr(soulseek_api, "MAX_DURATION_DIFF_SECONDS", 15)
+        monkeypatch.setattr(config, "MAX_DURATION_DIFF_SECONDS", 15)
         assert soulseek_api.evaluate_candidates(
             self._results(None), "Lose Yourself", "Eminem", expected_duration_ms=242_000
         )[0]["accepted"]
@@ -981,7 +981,7 @@ class TestCompletedFileGrace:
         )
 
     def test_waits_for_the_file_to_leave_incomplete(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(soulseek_api, "DOWNLOAD_DIR", str(tmp_path))
+        monkeypatch.setattr(config, "DOWNLOAD_DIR", str(tmp_path))
         (tmp_path / "incomplete").mkdir()
         (tmp_path / "incomplete" / "a.flac").write_bytes(b"x")
         sleeps = []
@@ -1000,7 +1000,7 @@ class TestCompletedFileGrace:
         assert len(sleeps) == 3
 
     def test_gives_up_after_grace_and_on_shutdown(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(soulseek_api, "DOWNLOAD_DIR", str(tmp_path))
+        monkeypatch.setattr(config, "DOWNLOAD_DIR", str(tmp_path))
         clock = [1000.0]
         monkeypatch.setattr(soulseek_api.time, "time", lambda: clock[0])
 

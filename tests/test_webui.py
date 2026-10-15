@@ -365,7 +365,7 @@ class TestSecretKeyPersistence:
 class TestSettingsValidation:
     """A setting that silently fails to apply is worse than no setting.
 
-    _reload_settings keeps the previous value when a stored value won't
+    config.reload keeps the previous value when a stored value won't
     parse, so an unvalidated save reported success for a value the daemon
     then ignored forever.
     """

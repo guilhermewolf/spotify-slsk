@@ -31,6 +31,7 @@ import requests
 from .. import db
 from .. import runtime_state
 from .. import soulseek_api
+from ..config import SETTINGS_SPEC, validate_setting
 from ..soulseek_api import fmt_duration
 from ..utils import get_playlist_id, sanitize_table_name
 
@@ -153,64 +154,6 @@ def _human_bytes(n: int) -> str:
         if n < 1024:
             return f"{n:.1f} {unit}"
     return f"{n:.1f} PiB"
-
-
-# (key, default, help text, kind). `kind` drives validation on save — an
-# unvalidated setting is worse than no setting: the daemon's _reload_settings
-# silently keeps the previous value on a bad parse, so the UI would report
-# "Saved" for a value that never takes effect.
-SETTINGS_SPEC = [
-    ("MIN_MATCH_SCORE", "0.62", "Accept threshold for downloaded-file -> DB match (0.0-1.0)", "ratio"),
-    ("SLSKD_PREFERRED_FORMATS", "flac,mp3,aiff,wav", "Comma-separated, ordered — first format wins ties", "formats"),
-    ("SLSKD_MIN_PEER_UPLOAD_SPEED", "0", "Passed to slskd; bytes/sec", "int0"),
-    ("SLSKD_MIN_EFFECTIVE_MP3_KBPS", "280", "Floor (kbps) for an MP3's effective bitrate, computed from file size and duration; catches 128 kbps files retagged as 320. Separate from the fixed 320 rule: an MP3 whose reported (or filename-inferred) bitrate is below 320 is always rejected, whatever this is set to", "int0"),
-    ("SLSKD_EARLY_STOP_RESPONSES", "20", "Stop the slskd search once this many peers replied", "int1"),
-    ("SLSKD_MAX_DURATION_DIFF_SECONDS", "15", "Reject candidates whose length differs from Spotify's by more than this many seconds; also the tolerance for accepting an untagged download by filename + duration. 0 disables both", "int0"),
-    ("SLSKD_WAIT_TIMEOUT", "60", "Seconds to wait for a downloaded file to appear on disk", "int1"),
-    ("HISTORY_RETENTION_DAYS", "90", "Delete history events older than this many days", "int1"),
-    ("UPGRADE_CHECK_INTERVAL_HOURS", "168", "Re-search downloaded tracks for a better version_tier (Extended Mix > Original Mix); 0 disables", "int0"),
-]
-
-# Formats the tagging/'extract metadata' code in app.py can actually handle.
-_KNOWN_FORMATS = {"flac", "mp3", "aiff", "wav", "m4a", "ogg"}
-
-
-def validate_setting(kind: str, value: str):
-    """Return (normalised_value, error). Exactly one is non-None."""
-    if kind == "ratio":
-        try:
-            parsed = float(value)
-        except ValueError:
-            return None, "must be a number between 0 and 1"
-        if not 0.0 <= parsed <= 1.0:
-            return None, "must be between 0 and 1"
-        return str(parsed), None
-
-    if kind in ("int0", "int1"):
-        minimum = 0 if kind == "int0" else 1
-        try:
-            parsed = int(value)
-        except ValueError:
-            return None, f"must be a whole number >= {minimum}"
-        if parsed < minimum:
-            return None, f"must be >= {minimum}"
-        return str(parsed), None
-
-    if kind == "formats":
-        items = [f.strip().lstrip(".").lower() for f in value.split(",")]
-        items = [f for f in items if f]
-        if not items:
-            return None, "needs at least one format"
-        unknown = [f for f in items if f not in _KNOWN_FORMATS]
-        if unknown:
-            return None, (
-                f"unsupported format(s): {', '.join(unknown)}. "
-                f"Known: {', '.join(sorted(_KNOWN_FORMATS))}"
-            )
-        return ",".join(items), None
-
-    return value, None
-
 
 
 # Reserved settings key holding the generated Flask secret. It is not in
