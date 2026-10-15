@@ -5,7 +5,17 @@ import logging
 import os
 import threading
 
-from flask import Blueprint, abort, flash, g, redirect, render_template, request, url_for
+from flask import (
+    Blueprint,
+    abort,
+    flash,
+    g,
+    redirect,
+    render_template,
+    request,
+    url_for,
+)
+from flask.typing import ResponseReturnValue
 
 from .. import db, runtime_state
 from ..importer.tags import write_tags
@@ -16,7 +26,7 @@ bp = Blueprint("tracks", __name__)
 
 
 @bp.route("/track/<playlist_id>/<track_id>")
-def track_detail(playlist_id, track_id):
+def track_detail(playlist_id: str, track_id: str) -> ResponseReturnValue:
     _, table_name, playlist_name, _ = db.get_playlist_meta(g.conn, playlist_id)
     if not table_name:
         abort(404)
@@ -42,7 +52,7 @@ def track_detail(playlist_id, track_id):
 # ---- track mutations ----------------------------------------------
 
 @bp.route("/track/<playlist_id>/<track_id>/retry", methods=["POST"])
-def retry_track(playlist_id, track_id):
+def retry_track(playlist_id: str, track_id: str) -> ResponseReturnValue:
     _, table_name, _, _ = db.get_playlist_meta(g.conn, playlist_id)
     if not table_name:
         abort(404)
@@ -72,7 +82,7 @@ def _track_or_404(playlist_id, track_id):
 
 
 @bp.route("/track/<playlist_id>/<track_id>/search", methods=["POST"])
-def interactive_search_start(playlist_id, track_id):
+def interactive_search_start(playlist_id: str, track_id: str) -> ResponseReturnValue:
     _, track = _track_or_404(playlist_id, track_id)
     key = (playlist_id, track_id)
     token = runtime_state.start_interactive_search(key)
@@ -105,7 +115,7 @@ def interactive_search_start(playlist_id, track_id):
 
 
 @bp.route("/track/<playlist_id>/<track_id>/search")
-def interactive_search_results(playlist_id, track_id):
+def interactive_search_results(playlist_id: str, track_id: str) -> ResponseReturnValue:
     _track_or_404(playlist_id, track_id)
     return render_template(
         "_interactive.html",
@@ -116,7 +126,7 @@ def interactive_search_results(playlist_id, track_id):
 
 
 @bp.route("/track/<playlist_id>/<track_id>/grab", methods=["POST"])
-def interactive_grab(playlist_id, track_id):
+def interactive_grab(playlist_id: str, track_id: str) -> ResponseReturnValue:
     table_name, track = _track_or_404(playlist_id, track_id)
     back = url_for("tracks.track_detail", playlist_id=playlist_id, track_id=track_id)
     search = runtime_state.get_interactive_search((playlist_id, track_id))
@@ -160,7 +170,7 @@ def interactive_grab(playlist_id, track_id):
 # ---- track maintenance --------------------------------------------
 
 @bp.route("/track/<playlist_id>/<track_id>/retag", methods=["POST"])
-def retag_track(playlist_id, track_id):
+def retag_track(playlist_id: str, track_id: str) -> ResponseReturnValue:
     _, table_name, _, _ = db.get_playlist_meta(g.conn, playlist_id)
     if not table_name:
         abort(404)

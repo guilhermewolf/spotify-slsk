@@ -1,14 +1,23 @@
 """Blocklist of peer files and whole peers."""
+from __future__ import annotations
+
 import logging
 import sqlite3
+from typing import Any
 
-
-
+from ..models import IsBlocked
 
 # ---- blocklist ------------------------------------------------------------
 
 
-def add_blocklist(conn, username, filename=None, size=None, reason=None, track_id=None):
+def add_blocklist(
+    conn: sqlite3.Connection,
+    username: str | None,
+    filename: str | None = None,
+    size: int | None = None,
+    reason: str | None = None,
+    track_id: str | None = None,
+) -> bool:
     """Blocklist one peer file, or the whole peer when `filename` is None.
     A duplicate (username, filename) is ignored. Returns True if added."""
     if not username:
@@ -33,7 +42,7 @@ def add_blocklist(conn, username, filename=None, size=None, reason=None, track_i
         return False
 
 
-def list_blocklist(conn, limit: int = 500) -> list:
+def list_blocklist(conn: sqlite3.Connection, limit: int = 500) -> list[dict[str, Any]]:
     """Newest first."""
     try:
         rows = conn.execute(
@@ -45,10 +54,10 @@ def list_blocklist(conn, limit: int = 500) -> list:
         logging.warning(f"Could not list blocklist: {e}")
         return []
     keys = ("id", "username", "filename", "size", "reason", "track_id", "created_at")
-    return [dict(zip(keys, r)) for r in rows]
+    return [dict(zip(keys, r, strict=True)) for r in rows]
 
 
-def remove_blocklist(conn, entry_id) -> bool:
+def remove_blocklist(conn: sqlite3.Connection, entry_id: int) -> bool:
     try:
         with conn:
             cur = conn.execute("DELETE FROM blocklist WHERE id = ?", (entry_id,))
@@ -58,7 +67,7 @@ def remove_blocklist(conn, entry_id) -> bool:
         return False
 
 
-def load_blocklist(conn):
+def load_blocklist(conn: sqlite3.Connection) -> IsBlocked:
     """Return a predicate is_blocked(username, filename) over a snapshot of
     the table — one query per search instead of one per file."""
     try:
@@ -71,5 +80,5 @@ def load_blocklist(conn):
     return lambda username, filename: username in banned or (username, filename) in files
 
 
-def is_blocklisted(conn, username, filename) -> bool:
+def is_blocklisted(conn: sqlite3.Connection, username: str | None, filename: str | None) -> bool:
     return load_blocklist(conn)(username, filename)

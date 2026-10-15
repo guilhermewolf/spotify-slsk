@@ -15,14 +15,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
           cache: pip
       - name: Install runtime + dev dependencies
         run: make install PYTHON=python
       - name: Syntax-check all Python sources
         run: make compile PYTHON=python
-      - name: Ruff (errors only)
+      - name: Ruff
         run: make lint PYTHON=python
+      - name: Mypy
+        run: make typecheck PYTHON=python
       - name: Pytest
         run: make test PYTHON=python
       - name: Dependency vulnerability audit
@@ -41,7 +43,7 @@ jobs:
           docker run --rm --entrypoint sh spotify-slsk:local -c '
             set -e
             [ "$(id -u)" = "1000" ] || { echo "image runs as $(id -u), expected 1000"; exit 1; }
-            python -c "import spotify_slsk.app, spotify_slsk.webui"
+            python -c "import spotify_slsk.daemon, spotify_slsk.webui"
             echo "image OK"
           '
       - name: Verify no secrets or media were baked into the image

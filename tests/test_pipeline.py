@@ -9,13 +9,10 @@ import os
 
 import pytest
 
-from spotify_slsk import config
-from spotify_slsk import daemon
+from spotify_slsk import config, daemon, db
 from spotify_slsk.importer import process as importer_process
-from spotify_slsk.library import acquire
-from spotify_slsk.library import reconcile
+from spotify_slsk.library import acquire, reconcile
 from spotify_slsk.spotify import sync as spotify_sync
-from spotify_slsk import db
 
 
 @pytest.fixture

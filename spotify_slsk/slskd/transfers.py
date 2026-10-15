@@ -1,10 +1,14 @@
 """slskd downloads: enqueue a candidate, follow its transfer, find the file."""
+from __future__ import annotations
+
 import logging
 import os
+import sqlite3
 import time
 
 from .. import config
 from ..db import add_blocklist, add_tried_file, record_history
+from ..models import Candidate
 from . import client as slskd_client
 from .models import Transfer, TransferOutcome, remote_basename
 
@@ -21,7 +25,7 @@ last_download = None
 COMPLETION_GRACE_SECONDS = 30
 
 
-def find_file_in_downloads(filename, base_dir=None):
+def find_file_in_downloads(filename: str, base_dir: str | None = None) -> str | None:
     """Path of a *finished* download named `filename`, or None. slskd's
     incomplete directory is never searched: a hit there is still being
     written."""
@@ -56,7 +60,13 @@ def _candidate_history(candidate) -> dict:
     }
 
 
-def grab_candidate(candidate, conn, playlist_name, track_id, source="auto"):
+def grab_candidate(
+    candidate: Candidate,
+    conn: sqlite3.Connection,
+    playlist_name: str,
+    track_id: str,
+    source: str = "auto",
+) -> str | None:
     """Enqueue one candidate, wait for it, and return the local path or None.
 
     Any failure is remembered in the track's `_tried` table and history.
@@ -133,7 +143,7 @@ def grab_candidate(candidate, conn, playlist_name, track_id, source="auto"):
     return None
 
 
-def wait_for_completion(candidate, timeout=300):
+def wait_for_completion(candidate: Candidate, timeout: float = 300) -> str | None:
     client = slskd_client.get_client()
     logging.debug(f"Waiting for transfer of {candidate['filename']} to complete...")
     transfer_id = None

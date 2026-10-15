@@ -1,12 +1,14 @@
 """cycle_history: one row per completed daemon cycle."""
+from __future__ import annotations
+
 import logging
 import sqlite3
-
-
+from datetime import UTC
+from typing import Any
 
 
 def record_cycle(
-    conn,
+    conn: sqlite3.Connection,
     *,
     started_at: float,
     duration_seconds: float,
@@ -22,8 +24,8 @@ def record_cycle(
     bound on long-running deployments.
     """
     try:
-        from datetime import datetime, timezone
-        ts = datetime.fromtimestamp(started_at, tz=timezone.utc).isoformat()
+        from datetime import datetime
+        ts = datetime.fromtimestamp(started_at, tz=UTC).isoformat()
         with conn:
             conn.execute(
                 "INSERT INTO cycle_history "
@@ -48,7 +50,7 @@ def record_cycle(
         logging.error(f"Error recording cycle history: {e}")
 
 
-def list_cycles(conn, limit: int = 20) -> list:
+def list_cycles(conn: sqlite3.Connection, limit: int = 20) -> list[dict[str, Any]]:
     """Return the most recent cycles, newest first."""
     try:
         rows = conn.execute(

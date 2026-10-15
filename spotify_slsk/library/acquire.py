@@ -1,16 +1,21 @@
 """Getting a track: search slskd, grab, import - for a pending track, or to
 replace an existing file with a better version (the upgrade pass).
 """
+from __future__ import annotations
+
 import logging
 import os
+import sqlite3
 
 from ..db import clear_tried_entries, get_track, record_history, update_download_status
 from ..importer.process import process_downloaded_file
 from ..matching.normalize import version_tier
+from ..models import Track
 from ..slskd import transfers
 from ..slskd.search import search_and_download
 
-def handle_track_download(track, playlist_name, conn):
+
+def handle_track_download(track: Track, playlist_name: str, conn: sqlite3.Connection) -> bool:
     """Search slskd (with query fall-through) and download the best match."""
     file_path = search_and_download(
         artist=track.artist,
@@ -35,7 +40,9 @@ def handle_track_download(track, playlist_name, conn):
     return False
 
 
-def try_upgrade_track(track, playlist_name, conn, current_path):
+def try_upgrade_track(
+    track: Track, playlist_name: str, conn: sqlite3.Connection, current_path: str | None
+) -> bool:
     """If slskd has a *strictly better* version_tier, swap the file in place.
 
     Failure semantics differ from a fresh download: we never call

@@ -3,61 +3,61 @@
 Split by table family; every public name is re-exported here so callers
 keep using ``from spotify_slsk import db`` / ``db.<name>``.
 """
+from .blocklist import (
+    add_blocklist,
+    is_blocklisted,
+    list_blocklist,
+    load_blocklist,
+    remove_blocklist,
+)
 from .connection import (
     SCHEMA_VERSION,
     create_connection,
 )
-from .playlists import (
-    get_playlist_meta,
-    upsert_playlist_meta,
-    rename_playlist_meta,
-    list_playlists,
-    set_playlist_enabled,
-    remove_playlist,
-)
-from .settings import (
-    get_setting,
-    set_setting,
-    delete_setting,
-    list_settings,
-)
 from .cycles import (
-    record_cycle,
     list_cycles,
-)
-from .tracks import (
-    playlist_stats,
-    list_tracks,
-    get_track,
-    retry_track,
-    create_table,
-    insert_track,
-    backfill_durations,
-    fetch_all_tracks,
-    MAX_ATTEMPTS_BEFORE_SUSPEND,
-    update_download_status,
-    create_tried_table,
-    get_tried_files,
-    add_tried_file,
-    clear_tried_entries,
-    get_pending_tracks,
-    get_upgrade_candidates,
-    mark_upgrade_checked,
-)
-from .blocklist import (
-    add_blocklist,
-    list_blocklist,
-    remove_blocklist,
-    load_blocklist,
-    is_blocklisted,
+    record_cycle,
 )
 from .history import (
-    HISTORY_EVENTS,
     FAILURE_EVENTS,
-    record_history,
-    list_history,
+    HISTORY_EVENTS,
     latest_failures,
+    list_history,
     prune_history,
+    record_history,
+)
+from .playlists import (
+    get_playlist_meta,
+    list_playlists,
+    remove_playlist,
+    rename_playlist_meta,
+    set_playlist_enabled,
+    upsert_playlist_meta,
+)
+from .settings import (
+    delete_setting,
+    get_setting,
+    list_settings,
+    set_setting,
+)
+from .tracks import (
+    MAX_ATTEMPTS_BEFORE_SUSPEND,
+    add_tried_file,
+    backfill_durations,
+    clear_tried_entries,
+    create_table,
+    create_tried_table,
+    fetch_all_tracks,
+    get_pending_tracks,
+    get_track,
+    get_tried_files,
+    get_upgrade_candidates,
+    insert_track,
+    list_tracks,
+    mark_upgrade_checked,
+    playlist_stats,
+    retry_track,
+    update_download_status,
 )
 
 __all__ = [

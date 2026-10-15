@@ -3,7 +3,15 @@ from __future__ import annotations
 
 import os
 
-from flask import Blueprint, abort, jsonify, render_template, request, send_from_directory
+from flask import (
+    Blueprint,
+    abort,
+    jsonify,
+    render_template,
+    request,
+    send_from_directory,
+)
+from flask.typing import ResponseReturnValue
 
 from .. import runtime_state
 from .helpers import health_snapshot
@@ -14,7 +22,7 @@ bp = Blueprint("system", __name__)
 # ---- file serving (audio preview) ---------------------------------
 
 @bp.route("/file")
-def serve_file():
+def serve_file() -> ResponseReturnValue:
     """Serve a downloaded audio file for the in-browser <audio> element.
 
     ``rel`` is the path *relative to the playlists root* — that's what
@@ -43,7 +51,7 @@ def serve_file():
 # ---- live observability ------------------------------------------
 
 @bp.route("/logs")
-def logs_page():
+def logs_page() -> ResponseReturnValue:
     snapshot = runtime_state.get_logs(since=0, limit=500)
     return render_template(
         "logs.html",
@@ -53,7 +61,7 @@ def logs_page():
 
 
 @bp.route("/logs.json")
-def logs_json():
+def logs_json() -> ResponseReturnValue:
     try:
         since = int(request.args.get("since", "0"))
     except (TypeError, ValueError):
@@ -66,11 +74,11 @@ def logs_json():
 
 
 @bp.route("/activity.json")
-def activity_json():
+def activity_json() -> ResponseReturnValue:
     return jsonify(runtime_state.get_activity())
 
 
 @bp.route("/healthz")
-def healthz():
+def healthz() -> ResponseReturnValue:
     snapshot = health_snapshot()
     return jsonify(snapshot), 200 if snapshot["ok"] else 503

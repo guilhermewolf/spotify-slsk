@@ -16,6 +16,7 @@ from flask import (
     request,
     url_for,
 )
+from flask.typing import ResponseReturnValue
 
 from .. import db, runtime_state
 from ..spotify.client import fetch_playlist_name
@@ -26,7 +27,7 @@ bp = Blueprint("playlists", __name__)
 
 
 @bp.route("/")
-def dashboard():
+def dashboard() -> ResponseReturnValue:
     playlists = db.list_playlists(g.conn)
     playlists_root = os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists")
     totals = {
@@ -54,7 +55,7 @@ def dashboard():
 
 
 @bp.route("/playlist/<playlist_id>")
-def playlist_detail(playlist_id):
+def playlist_detail(playlist_id: str) -> ResponseReturnValue:
     _, table_name, name, last_synced = db.get_playlist_meta(g.conn, playlist_id)
     if not table_name:
         abort(404)
@@ -97,7 +98,7 @@ def playlist_detail(playlist_id):
 # ---- playlist mutations -------------------------------------------
 
 @bp.route("/playlists", methods=["POST"])
-def add_playlist():
+def add_playlist() -> ResponseReturnValue:
     url = (request.form.get("playlist_url") or "").strip()
     pid = get_playlist_id(url)
     if not pid:
@@ -137,7 +138,7 @@ def add_playlist():
 
 
 @bp.route("/playlist/<playlist_id>/toggle", methods=["POST"])
-def toggle_playlist(playlist_id):
+def toggle_playlist(playlist_id: str) -> ResponseReturnValue:
     row = g.conn.execute(
         "SELECT enabled FROM playlists_meta WHERE playlist_id = ?",
         (playlist_id,),
@@ -152,7 +153,7 @@ def toggle_playlist(playlist_id):
 
 
 @bp.route("/playlist/<playlist_id>/delete", methods=["POST"])
-def delete_playlist(playlist_id):
+def delete_playlist(playlist_id: str) -> ResponseReturnValue:
     # Dropping the rows is irreversible: require the explicit second
     # step from the dashboard's confirm disclosure.
     if request.form.get("confirm") != "1":
@@ -166,7 +167,7 @@ def delete_playlist(playlist_id):
 
 
 @bp.route("/playlist/<playlist_id>/refresh", methods=["POST"])
-def refresh_playlist(playlist_id):
+def refresh_playlist(playlist_id: str) -> ResponseReturnValue:
     # Wipe the stored snapshot so the next cycle re-fetches from Spotify
     # even if the playlist hasn't changed upstream.
     try:

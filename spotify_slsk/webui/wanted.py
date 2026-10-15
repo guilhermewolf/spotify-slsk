@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from flask import Blueprint, flash, g, redirect, render_template, request, url_for
+from flask.typing import ResponseReturnValue
 
 from .. import db
 from .helpers import wake_daemon
@@ -26,7 +27,7 @@ def _wanted_tracks():
 
 
 @bp.route("/wanted")
-def wanted_page():
+def wanted_page() -> ResponseReturnValue:
     all_tracks = _wanted_tracks()
     playlist_id = request.args.get("playlist") or None
     query = (request.args.get("q") or "").strip()
@@ -56,7 +57,7 @@ def wanted_page():
 
 
 @bp.route("/wanted/search", methods=["POST"])
-def wanted_search():
+def wanted_search() -> ResponseReturnValue:
     if request.form.get("all") == "1":
         targets = [(t["playlist_id"], t["table_name"], t["id"]) for t in _wanted_tracks()]
     else:
@@ -88,7 +89,7 @@ def wanted_search():
 # ---- history ------------------------------------------------------
 
 @bp.route("/history")
-def history_page():
+def history_page() -> ResponseReturnValue:
     event = request.args.get("event") or None
     if event not in db.HISTORY_EVENTS:
         event = None
@@ -128,14 +129,14 @@ def history_page():
 # ---- blocklist ----------------------------------------------------
 
 @bp.route("/blocklist")
-def blocklist_page():
+def blocklist_page() -> ResponseReturnValue:
     return render_template(
         "blocklist.html", entries=db.list_blocklist(g.conn, limit=500)
     )
 
 
 @bp.route("/blocklist/<int:entry_id>/delete", methods=["POST"])
-def blocklist_delete(entry_id):
+def blocklist_delete(entry_id: int) -> ResponseReturnValue:
     if db.remove_blocklist(g.conn, entry_id):
         flash("Removed from the blocklist.", "success")
     else:
@@ -144,7 +145,7 @@ def blocklist_delete(entry_id):
 
 
 @bp.route("/blocklist/ban-user", methods=["POST"])
-def blocklist_ban_user():
+def blocklist_ban_user() -> ResponseReturnValue:
     username = (request.form.get("username") or "").strip()
     reason = (request.form.get("reason") or "").strip()[:200] or "banned manually"
     if not username or len(username) > 200:

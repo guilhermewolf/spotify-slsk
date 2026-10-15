@@ -5,6 +5,7 @@ import os
 
 import requests
 from flask import Blueprint, flash, g, redirect, render_template, request, url_for
+from flask.typing import ResponseReturnValue
 
 from .. import db
 from ..config import SETTINGS_SPEC, validate_setting
@@ -16,11 +17,12 @@ bp = Blueprint("settings", __name__)
 # ---- settings -----------------------------------------------------
 
 @bp.route("/settings", methods=["GET", "POST"])
-def settings():
+def settings() -> ResponseReturnValue:
     if request.method == "POST":
         # Validate everything before writing anything, so a form with one
         # bad field doesn't half-apply.
-        cleaned, errors = {}, []
+        cleaned: dict[str, str | None] = {}
+        errors: list[str] = []
         for key, _default, _help, kind in SETTINGS_SPEC:
             val = (request.form.get(key) or "").strip()
             if not val:
@@ -70,7 +72,7 @@ def settings():
 # ---- ntfy probe ---------------------------------------------------
 
 @bp.route("/settings/test-ntfy", methods=["POST"])
-def test_ntfy():
+def test_ntfy() -> ResponseReturnValue:
     """Fire one ntfy notification using the configured URL+topic."""
     ntfy_url = os.getenv("NTFY_URL", "").strip()
     ntfy_topic = os.getenv("NTFY_TOPIC", "").strip()

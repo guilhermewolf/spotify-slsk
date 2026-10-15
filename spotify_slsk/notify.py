@@ -3,7 +3,8 @@ import logging
 
 import requests
 
-def send_ntfy_notification(url, topic, message):
+
+def send_ntfy_notification(url: str | None, topic: str | None, message: str) -> None:
     # ntfy is optional. Without this guard an unconfigured deployment POSTs to
     # the literal URL "None/None" on every playlist of every cycle, which
     # raises, gets swallowed, and logs an ERROR — forever.

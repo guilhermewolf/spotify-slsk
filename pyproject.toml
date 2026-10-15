@@ -1,0 +1,50 @@
+[project]
+name = "spotify-slsk"
+version = "0.1.0"
+description = "Sync Spotify playlists into a local music library via slskd (Soulseek)."
+readme = "README.md"
+requires-python = ">=3.12"
+# Pinned in requirements.txt, which is the lock the Dockerfile, Makefile and
+# pip-audit use. These ranges only document what the code needs.
+dependencies = [
+    "Flask>=3.1",
+    "mutagen>=1.48",
+    "pytz",
+    "requests>=2.32",
+    "slskd-api>=0.2.4,<0.3",
+    "spotipy>=2.26",
+]
+
+[project.scripts]
+spotify-slsk = "spotify_slsk.daemon:main"
+
+[tool.setuptools.packages.find]
+include = ["spotify_slsk*"]
+
+[tool.setuptools.package-data]
+"spotify_slsk.webui" = ["templates/*.html", "static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+extend-exclude = [".venv", "graphify-out", "Lidarr", "slsk_app", "data", "playlists", "downloads"]
+
+[tool.ruff.lint]
+# pycodestyle errors/warnings, pyflakes, isort, bugbear, pyupgrade.
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "E501",   # long log/f-strings read better unwrapped
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["spotify_slsk"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+check_untyped_defs = true
+files = ["spotify_slsk"]

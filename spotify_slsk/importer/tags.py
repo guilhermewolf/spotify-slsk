@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
 from mutagen import File as MutagenFile
 from mutagen.aiff import AIFF
@@ -15,7 +16,7 @@ from mutagen.id3 import ID3, TALB, TIT2, TPE1
 from mutagen.mp3 import MP3
 
 
-def audio_length_seconds(file_path):
+def audio_length_seconds(file_path: str) -> float | None:
     """Actual audio duration via mutagen, or None if unreadable."""
     try:
         mf = MutagenFile(file_path)
@@ -26,7 +27,9 @@ def audio_length_seconds(file_path):
     return None
 
 
-def extract_metadata_from_file(file_path):
+def extract_metadata_from_file(file_path: str) -> tuple[str | None, str | None, str | None]:
+    # mutagen's per-format classes share no useful static type.
+    audio: Any
     try:
         ext = os.path.splitext(file_path)[1].lower()
 
@@ -79,6 +82,7 @@ def write_tags(path: str, title: str | None, artist: str | None, album: str | No
     artist = artist or ""
     album = album or ""
     ext = os.path.splitext(path)[1].lower()
+    audio: Any
 
     if ext == ".mp3":
         audio = MP3(path, ID3=ID3)

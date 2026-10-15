@@ -5,9 +5,12 @@ This is the only place that deletes a downloaded file (_reject_and_log
 with destructive=True); the startup reconcile passes reconcile=True
 so it never does.
 """
+from __future__ import annotations
+
 import logging
 import os
 import shutil
+import sqlite3
 
 from .. import config
 from ..db import (
@@ -19,8 +22,10 @@ from ..db import (
 )
 from ..matching.candidates import filename_match
 from ..matching.tracks import find_closest_match, score_track_match
+from ..models import Candidate, Track
 from ..utils import fmt_duration
 from .tags import audio_length_seconds, extract_metadata_from_file, tag_audio_file
+
 
 def _fallback_match_untagged(file_path, expected_track, source=None):
     """Decide whether an untagged download is the track we asked slskd for.
@@ -79,14 +84,14 @@ def _match_requested_track(conn, table_name, track_id, title, artist):
 
 
 def process_downloaded_file(
-    file_path,
-    playlist_name,
-    conn,
+    file_path: str,
+    playlist_name: str,
+    conn: sqlite3.Connection,
     reconcile: bool = False,
-    track_id=None,
-    expected_track=None,
-    source=None,
-):
+    track_id: str | None = None,
+    expected_track: Track | None = None,
+    source: Candidate | None = None,
+) -> tuple[bool, str | None]:
     """
     Process a file that is either freshly downloaded or already on disk.
 
@@ -149,6 +154,7 @@ def process_downloaded_file(
         logging.info(
             f"Untagged file accepted by filename + duration: {file_path}"
         )
+        assert expected_track is not None  # ok is only True on the expected_track path
         title, artist, album = expected_track.name, expected_track.artist, None
         db_album = expected_track.album
         match_method = "filename+duration"
@@ -182,6 +188,7 @@ def process_downloaded_file(
     except Exception:
         already_in_library = False
 
+    final_path: str | None
     if already_in_library:
         final_path = file_path
     else:
@@ -251,7 +258,7 @@ def _reject_and_log(file_path, playlist_name, conn, track_id=None, reason="unkno
         )
 
 
-def move_track_to_playlist_folder(track_path: str, playlist_name: str) -> str:
+def move_track_to_playlist_folder(track_path: str, playlist_name: str) -> str | None:
     try:
         # Use the correct base path
         base_dir = os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists")

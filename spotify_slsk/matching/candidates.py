@@ -5,11 +5,16 @@ MP3 rule, effective-bitrate floor, duration, blocklist) and then the strict
 wrong-song rules in `filename_match`; `sort_candidates` orders the accepted
 ones (version tier > format > bitrate > peer upload speed).
 """
+from __future__ import annotations
+
 import logging
 import os
 import re
+from collections.abc import Iterable
+from typing import Any
 
 from .. import config
+from ..models import Candidate, IsBlocked
 from ..slskd.models import SearchResponse, remote_basename
 from ..utils import fmt_duration
 from .normalize import (
@@ -25,7 +30,8 @@ from .normalize import (
     version_tier,
 )
 
-def clean_filename(filename):
+
+def clean_filename(filename: str) -> str:
     """
     Clean a filename for fuzzy matching: replace brackets/parens with spaces
     (keep their content), normalize separators, drop the extension and
@@ -130,7 +136,7 @@ def _title_coverage(expected_tokens, stem, artist_names, folder_tokens) -> float
     return len(expected_tokens) / (len(expected_tokens) + len(extras))
 
 
-def filename_match(path, expected_title, expected_artist):
+def filename_match(path: str, expected_title: str, expected_artist: str) -> tuple[float, str | None]:
     """Judge a peer path's name against the expected track with the strict
     wrong-song rules. Returns (title_coverage, reason); reason is None when
     the name is this track.
@@ -179,13 +185,13 @@ def filename_match(path, expected_title, expected_artist):
 
 
 def evaluate_candidates(
-    search_results,
-    expected_title,
-    expected_artist,
-    max_version_tier=None,
-    expected_duration_ms=None,
-    is_blocked=None,
-):
+    search_results: Iterable[SearchResponse | dict[str, Any]],
+    expected_title: str,
+    expected_artist: str,
+    max_version_tier: int | None = None,
+    expected_duration_ms: int | None = None,
+    is_blocked: IsBlocked | None = None,
+) -> list[Candidate]:
     """
     Judge every file in slskd search results against the expected track.
 
@@ -228,7 +234,7 @@ def evaluate_candidates(
             effective_mp3 = (
                 _effective_mp3_kbps(size_bytes, length_sec) if ext == ".mp3" else None
             )
-            entry = {
+            entry: Candidate = {
                 "user": user,
                 "user_upload_speed": user_upload_speed,
                 # Full peer path: slskd needs it to enqueue the transfer, and
@@ -301,7 +307,11 @@ def evaluate_candidates(
     return evaluated
 
 
-def extract_candidates(search_results, expected_title, expected_artist):
+def extract_candidates(
+    search_results: Iterable[SearchResponse | dict[str, Any]],
+    expected_title: str,
+    expected_artist: str,
+) -> list[Candidate]:
     """Return only the accepted candidates from `evaluate_candidates`."""
     return [
         c
@@ -310,7 +320,7 @@ def extract_candidates(search_results, expected_title, expected_artist):
     ]
 
 
-def summarize_evaluation(evaluated, limit=50):
+def summarize_evaluation(evaluated: list[Candidate], limit: int = 50) -> dict[str, Any]:
     """Compact form of an evaluation for the per-track search history."""
     rejected = [c for c in evaluated if not c["accepted"]]
     return {
@@ -323,7 +333,7 @@ def summarize_evaluation(evaluated, limit=50):
     }
 
 
-def sort_candidates(candidates):
+def sort_candidates(candidates: Iterable[Candidate]) -> list[Candidate]:
     """
     Sort by DJ-version tier (Extended Mix > Original Mix > other), then by
     preferred extension, then bitrate desc (unknown last), then peer upload

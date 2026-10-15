@@ -8,9 +8,7 @@ import threading
 
 import pytest
 
-from spotify_slsk import config
-from spotify_slsk import daemon
-from spotify_slsk import notify
+from spotify_slsk import config, daemon, notify
 from spotify_slsk.slskd import client as slskd_client
 from spotify_slsk.spotify import client as spotify_client
 from spotify_slsk.spotify import sync as spotify_sync
@@ -280,6 +278,7 @@ def test_spotify_token_cache_goes_to_the_configured_path(monkeypatch, tmp_path):
 
 def test_sqlite_connect_is_not_logged_at_info(tmp_path, caplog):
     import logging
+
     from spotify_slsk import db
     with caplog.at_level(logging.INFO):
         db.create_connection(str(tmp_path / "x.db")).close()

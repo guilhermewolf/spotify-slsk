@@ -1,11 +1,15 @@
 """The playlists_meta catalogue: one row per Spotify playlist."""
+from __future__ import annotations
+
 import logging
 import sqlite3
+from typing import Any
+
+# (snapshot_id, table_name, name, last_synced); all None when unknown.
+PlaylistMeta = tuple[str | None, str | None, str | None, str | None]
 
 
-
-
-def get_playlist_meta(conn, playlist_id):
+def get_playlist_meta(conn: sqlite3.Connection, playlist_id: str) -> PlaylistMeta:
     """Return (snapshot_id, table_name, name, last_synced) or a 4-tuple of None."""
     try:
         row = conn.execute(
@@ -19,7 +23,13 @@ def get_playlist_meta(conn, playlist_id):
         return (None, None, None, None)
 
 
-def upsert_playlist_meta(conn, playlist_id, table_name, name, snapshot_id):
+def upsert_playlist_meta(
+    conn: sqlite3.Connection,
+    playlist_id: str,
+    table_name: str,
+    name: str,
+    snapshot_id: str | None,
+) -> None:
     """Insert a playlist or update its syncable fields.
 
     `added_at` is set only on first insert (via COALESCE below); subsequent
@@ -44,7 +54,7 @@ def upsert_playlist_meta(conn, playlist_id, table_name, name, snapshot_id):
         logging.error(f"Error upserting playlists_meta for {playlist_id}: {e}")
 
 
-def rename_playlist_meta(conn, playlist_id, table_name, name) -> None:
+def rename_playlist_meta(conn: sqlite3.Connection, playlist_id: str, table_name: str, name: str) -> None:
     """Point an existing catalogue row at its real table/name without
     touching snapshot_id or last_synced."""
     try:
@@ -57,7 +67,7 @@ def rename_playlist_meta(conn, playlist_id, table_name, name) -> None:
         logging.error(f"Error renaming playlists_meta for {playlist_id}: {e}")
 
 
-def list_playlists(conn, only_enabled: bool = False):
+def list_playlists(conn: sqlite3.Connection, only_enabled: bool = False) -> list[dict[str, Any]]:
     """Return a list of dicts describing every known playlist."""
     try:
         sql = (
@@ -85,7 +95,7 @@ def list_playlists(conn, only_enabled: bool = False):
         return []
 
 
-def set_playlist_enabled(conn, playlist_id: str, enabled: bool) -> None:
+def set_playlist_enabled(conn: sqlite3.Connection, playlist_id: str, enabled: bool) -> None:
     try:
         with conn:
             conn.execute(
@@ -96,7 +106,7 @@ def set_playlist_enabled(conn, playlist_id: str, enabled: bool) -> None:
         logging.error(f"Could not toggle playlist {playlist_id}: {e}")
 
 
-def remove_playlist(conn, playlist_id: str) -> bool:
+def remove_playlist(conn: sqlite3.Connection, playlist_id: str) -> bool:
     """Drop the playlist from the catalogue AND drop its per-playlist tables.
 
     Returns True if a row was removed. Leaves files on disk — removing them

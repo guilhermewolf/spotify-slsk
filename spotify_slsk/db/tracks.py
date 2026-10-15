@@ -1,14 +1,15 @@
 """Per-playlist track tables (pl_<name>) and their _tried companions."""
+from __future__ import annotations
+
 import logging
 import sqlite3
+from typing import Any
 
 from ..models import Track
-
 from .connection import _add_duration_column
 
 
-
-def playlist_stats(conn, table_name: str) -> dict:
+def playlist_stats(conn: sqlite3.Connection, table_name: str) -> dict[str, int]:
     """Return counts the dashboard needs for one playlist.
 
     Missing tables (deleted playlist still listed in an older in-flight page)
@@ -62,7 +63,7 @@ def _track_status(downloaded, attempts, suspended_until, now):
     return "pending"
 
 
-def list_tracks(conn, table_name: str) -> list:
+def list_tracks(conn: sqlite3.Connection, table_name: str) -> list[dict[str, Any]]:
     """Return one dict per track in the playlist, with a derived status."""
     try:
         rows = conn.execute(
@@ -92,7 +93,7 @@ def list_tracks(conn, table_name: str) -> list:
         return []
 
 
-def get_track(conn, table_name: str, track_id: str):
+def get_track(conn: sqlite3.Connection, table_name: str, track_id: str) -> dict[str, Any] | None:
     """Return one track dict or None."""
     try:
         r = conn.execute(
@@ -122,7 +123,7 @@ def get_track(conn, table_name: str, track_id: str):
         return None
 
 
-def retry_track(conn, table_name: str, track_id: str) -> None:
+def retry_track(conn: sqlite3.Connection, table_name: str, track_id: str) -> None:
     """Clear suspended_until + attempts and wipe the tried-files history so
     the track is picked up fresh on the next cycle."""
     try:
@@ -139,7 +140,7 @@ def retry_track(conn, table_name: str, track_id: str) -> None:
     except sqlite3.Error as e:
         logging.error(f"Could not retry track {track_id} in {table_name}: {e}")
 
-def create_table(conn, playlist_name):
+def create_table(conn: sqlite3.Connection, playlist_name: str) -> None:
     """Create a table dynamically based on the sanitized playlist name"""
     table_name = playlist_name
     try:
@@ -176,7 +177,7 @@ def create_table(conn, playlist_name):
     except sqlite3.Error as e:
         logging.error(f"Error creating table {table_name}: {e}")
 
-def insert_track(conn, playlist_name, track):
+def insert_track(conn: sqlite3.Connection, playlist_name: str, track: tuple[Any, ...]) -> None:
     """Insert (id, name, artists, album[, duration_ms]); existing ids are kept."""
     table_name = playlist_name
     track = tuple(track) + (None,) * (5 - len(track))
@@ -188,7 +189,9 @@ def insert_track(conn, playlist_name, track):
     except sqlite3.Error as e:
         logging.error(f"Error inserting track into {table_name}: {e}")
 
-def backfill_durations(conn, table_name, durations) -> None:
+def backfill_durations(
+    conn: sqlite3.Connection, table_name: str, durations: list[tuple[str, int | None]]
+) -> None:
     """Fill duration_ms for rows that don't have it yet. `durations` is
     an iterable of (track_id, duration_ms)."""
     try:
@@ -202,7 +205,7 @@ def backfill_durations(conn, table_name, durations) -> None:
         logging.error(f"Error backfilling durations in {table_name}: {e}")
 
 
-def fetch_all_tracks(conn, playlist_name):
+def fetch_all_tracks(conn: sqlite3.Connection, playlist_name: str) -> list[tuple[Any, ...]]:
     table_name = playlist_name
     cursor = conn.cursor()
     try:
@@ -215,7 +218,13 @@ def fetch_all_tracks(conn, playlist_name):
 MAX_ATTEMPTS_BEFORE_SUSPEND = 2
 
 
-def update_download_status(conn, track_id, table_name, success=False, file_path=None):
+def update_download_status(
+    conn: sqlite3.Connection,
+    track_id: str | None,
+    table_name: str,
+    success: bool = False,
+    file_path: str | None = None,
+) -> None:
     try:
         with conn:
             cursor = conn.cursor()
@@ -253,7 +262,7 @@ def update_download_status(conn, track_id, table_name, success=False, file_path=
     except sqlite3.Error as e:
         logging.error(f"Error updating track status for {track_id} in {table_name}: {e}")
 
-def create_tried_table(conn, playlist_name):
+def create_tried_table(conn: sqlite3.Connection, playlist_name: str) -> None:
     tried_table_name = f"{playlist_name}_tried"
     try:
         with conn:
@@ -267,7 +276,7 @@ def create_tried_table(conn, playlist_name):
     except sqlite3.Error as e:
         logging.error(f"Error creating tried table {tried_table_name}: {e}")
 
-def get_tried_files(conn, table_name, track_id):
+def get_tried_files(conn: sqlite3.Connection, table_name: str, track_id: str) -> list[str]:
     tried_table_name = f"{table_name}_tried"
     cursor = conn.cursor()
     cursor.execute(
@@ -278,7 +287,7 @@ def get_tried_files(conn, table_name, track_id):
     return [row[0] for row in rows] if rows else []
 
 
-def add_tried_file(conn, table_name, track_id, file_path):
+def add_tried_file(conn: sqlite3.Connection, table_name: str, track_id: str, file_path: str) -> None:
     tried_table_name = f"{table_name}_tried"
     try:
         with conn:
@@ -291,7 +300,7 @@ def add_tried_file(conn, table_name, track_id, file_path):
         logging.error(f"Failed to insert into {tried_table_name} for {track_id}: {e}")
 
 
-def clear_tried_entries(conn, playlist_name, track_id):
+def clear_tried_entries(conn: sqlite3.Connection, playlist_name: str, track_id: str) -> None:
     """Wipe the rejected-filename history for one track.
 
     The history lives in the `_tried` companion table — the same place
@@ -313,7 +322,7 @@ def clear_tried_entries(conn, playlist_name, track_id):
         )
 
 
-def get_pending_tracks(conn, playlist_name: str) -> list:
+def get_pending_tracks(conn: sqlite3.Connection, playlist_name: str) -> list[Track]:
     cursor = conn.cursor()
     try:
         cursor.execute(f"""
@@ -332,7 +341,9 @@ def get_pending_tracks(conn, playlist_name: str) -> list:
         return []
 
 
-def get_upgrade_candidates(conn, playlist_name: str, interval_hours: int) -> list:
+def get_upgrade_candidates(
+    conn: sqlite3.Connection, playlist_name: str, interval_hours: int
+) -> list[tuple[Track, str]]:
     """Return downloaded tracks whose last upgrade-check is stale or absent.
 
     Throttling lives at the row level so a 200-track library doesn't fire
@@ -360,7 +371,7 @@ def get_upgrade_candidates(conn, playlist_name: str, interval_hours: int) -> lis
         return []
 
 
-def mark_upgrade_checked(conn, playlist_name: str, track_id: str) -> None:
+def mark_upgrade_checked(conn: sqlite3.Connection, playlist_name: str, track_id: str) -> None:
     """Stamp last_upgrade_check so the throttle window starts now.
 
     Called whether or not an upgrade was found — a fruitless check still

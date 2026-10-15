@@ -1,12 +1,13 @@
 """Key-value settings bag: DB value, else env, else default."""
+from __future__ import annotations
+
 import logging
 import os
 import sqlite3
+from typing import Any
 
 
-
-
-def get_setting(conn, key: str, default=None):
+def get_setting(conn: sqlite3.Connection, key: str, default: Any = None) -> Any:
     """Look up a setting: DB value wins, else env var by the same key,
     else `default`. Always returns a str (or None if no value anywhere).
     """
@@ -24,7 +25,7 @@ def get_setting(conn, key: str, default=None):
     return default
 
 
-def set_setting(conn, key: str, value) -> None:
+def set_setting(conn: sqlite3.Connection, key: str, value: Any) -> None:
     """Write a DB override for a setting. Pass None to delete the override."""
     if value is None:
         delete_setting(conn, key)
@@ -42,7 +43,7 @@ def set_setting(conn, key: str, value) -> None:
         logging.error(f"Could not write setting {key}: {e}")
 
 
-def delete_setting(conn, key: str) -> None:
+def delete_setting(conn: sqlite3.Connection, key: str) -> None:
     """Drop the DB override so env/code default takes over again."""
     try:
         with conn:
@@ -51,7 +52,7 @@ def delete_setting(conn, key: str) -> None:
         logging.error(f"Could not delete setting {key}: {e}")
 
 
-def list_settings(conn) -> dict:
+def list_settings(conn: sqlite3.Connection) -> dict[str, str]:
     """Return all DB-stored settings as a plain dict."""
     try:
         rows = conn.execute("SELECT key, value FROM settings").fetchall()

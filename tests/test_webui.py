@@ -503,6 +503,7 @@ class TestLiveObservability:
 
     def test_logs_json_increments_seq(self, client):
         import logging
+
         from spotify_slsk import runtime_state
         runtime_state._log_buffer.clear()
         runtime_state._log_seq = 0
@@ -695,6 +696,7 @@ class TestInteractiveSearchUI:
 
     def _search(self, app_tmp, client, monkeypatch):
         import time as _time
+
         from spotify_slsk import runtime_state
         from spotify_slsk.slskd import search as slskd_search
 

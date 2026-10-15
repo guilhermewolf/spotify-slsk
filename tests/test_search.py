@@ -6,6 +6,9 @@ import pytest
 os.environ.setdefault("SLSKD_HOST_URL", "http://localhost")
 os.environ.setdefault("SLSKD_API_KEY", "x")
 
+from spotify_slsk import config
+from spotify_slsk.config import normalize_ext_list
+from spotify_slsk.matching import candidates as matching_candidates
 from spotify_slsk.matching.candidates import (
     _effective_mp3_kbps,
     _infer_bitrate_from_name,
@@ -18,19 +21,16 @@ from spotify_slsk.matching.normalize import (
     version_mismatch,
     version_tier,
 )
+from spotify_slsk.slskd import client as slskd_client
+from spotify_slsk.slskd import models as slskd_models
+from spotify_slsk.slskd import search as slskd_search
+from spotify_slsk.slskd import transfers as slskd_transfers
 from spotify_slsk.slskd.search import (
     _build_search_queries,
     _is_ascii,
     _normalize_query_text,
     download_and_verify,
 )
-from spotify_slsk import config
-from spotify_slsk.matching import candidates as matching_candidates
-from spotify_slsk.slskd import client as slskd_client
-from spotify_slsk.slskd import models as slskd_models
-from spotify_slsk.slskd import search as slskd_search
-from spotify_slsk.slskd import transfers as slskd_transfers
-from spotify_slsk.config import normalize_ext_list
 
 
 class TestNormalizeExtList:
@@ -857,7 +857,7 @@ class TestBlocklistPolicy:
             class _Client:
                 class transfers:
                     @staticmethod
-                    def get_downloads(user):
+                    def get_downloads(user, payload=payload):
                         return payload
 
             monkeypatch.setattr(slskd_client, "get_client", lambda: _Client())

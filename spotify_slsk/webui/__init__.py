@@ -28,7 +28,6 @@ from ..utils import fmt_duration
 from . import playlists, settings, system, tracks, wanted
 from .helpers import health_snapshot, human_bytes
 
-
 # Reserved settings key holding the generated Flask secret. It is not in
 # SETTINGS_SPEC, so it never appears on the settings page.
 _SECRET_KEY_SETTING = "_ui_secret_key"

@@ -5,16 +5,21 @@ and of the DB's track rows (the web UI only queues requests - see
 ``runtime_state.enqueue_manual_grab`` and ``wake_now``). The startup order
 in ``main()`` is load-bearing; CLAUDE.md explains each step.
 """
+from __future__ import annotations
+
 import logging
 import os
 import signal
+import sqlite3
 import threading
 import time
 
+import spotipy
+
 from . import config, runtime_state
 from .db import (
-    create_connection,
     clear_tried_entries,
+    create_connection,
     get_pending_tracks,
     get_playlist_meta,
     get_setting,
@@ -75,7 +80,7 @@ def wake_now() -> None:
     _wake_event.set()
 
 
-def block_until_slskd_healthy(host, api_key, retry_seconds=60):
+def block_until_slskd_healthy(host: str, api_key: str | None, retry_seconds: float = 60) -> bool:
     """Keep waiting for slskd, staying alive and heartbeating while we do.
 
     Cycles must not start before slskd is reachable: every download would
@@ -101,7 +106,13 @@ def block_until_slskd_healthy(host, api_key, retry_seconds=60):
     return False
 
 
-def process_playlist(sp, conn, playlist_id, ntfy_url, ntfy_topic):
+def process_playlist(
+    sp: spotipy.Spotify,
+    conn: sqlite3.Connection,
+    playlist_id: str,
+    ntfy_url: str | None,
+    ntfy_topic: str | None,
+) -> dict[str, int]:
     """Sync + download for one playlist. Returns per-playlist counters
     (tracks_added/downloaded/failed) so the caller can aggregate them
     into a cycle_history row.
@@ -246,7 +257,7 @@ def _process_manual_grabs(conn):
             verified, final_path = process_downloaded_file(
                 file_path, table_name, conn, expected_track=track, source=candidate
             )
-            if not verified:
+            if not verified or not final_path:  # verified implies a path
                 continue
             clear_tried_entries(conn, table_name, track.id)
             # The import is verified against this track only, but re-read the
@@ -282,7 +293,7 @@ def _run_startup_reconciliation(sp, conn):
             )
 
 
-def main():
+def main() -> None:
     # Persist the Spotipy auth token across restarts on the data volume
     # (read by setup_spotify_client's cache handler).
     os.environ.setdefault("SPOTIPY_CACHE_PATH", "/app/data/.spotipy-cache")

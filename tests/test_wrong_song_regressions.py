@@ -10,10 +10,10 @@ os.environ.setdefault("SLSKD_HOST_URL", "http://localhost")
 os.environ.setdefault("SLSKD_API_KEY", "x")
 
 from spotify_slsk.matching import candidates as matching_candidates
+from spotify_slsk.matching.candidates import extract_candidates, filename_match
 from spotify_slsk.slskd import client as slskd_client
 from spotify_slsk.slskd import search as slskd_search
 from spotify_slsk.slskd import transfers as slskd_transfers
-from spotify_slsk.matching.candidates import extract_candidates, filename_match
 from spotify_slsk.slskd.models import remote_basename
 
 

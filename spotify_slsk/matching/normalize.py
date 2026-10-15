@@ -38,7 +38,7 @@ ARTIST_SPLIT_RE = re.compile(
 )
 
 
-def fold(text) -> str:
+def fold(text: str | None) -> str:
     """Lowercase, strip accents, collapse every non-alphanumeric run to a
     space, and spell "rmx" as "remix"."""
     t = unicodedata.normalize("NFKD", text or "")
@@ -46,7 +46,7 @@ def fold(text) -> str:
     return " ".join("remix" if w == "rmx" else w for w in re.findall(r"[^\W_]+", t))
 
 
-def expected_title_tokens(title) -> set:
+def expected_title_tokens(title: str | None) -> set[str]:
     """Words a file must contain to be this title. Featured artists, neutral
     release words and bare numbers (years) are not required."""
     folded = fold(FEAT_RE.sub(" ", title or "")).split()
@@ -54,7 +54,7 @@ def expected_title_tokens(title) -> set:
     return core or {t for t in folded if not t.isdigit()} or set(folded)
 
 
-def credited_names(artist_str) -> list:
+def credited_names(artist_str: str | None) -> list[str]:
     """The full credit plus each credited artist, folded, "The " dropped."""
     names = []
     for part in [artist_str or ""] + ARTIST_SPLIT_RE.split(artist_str or ""):
@@ -66,7 +66,7 @@ def credited_names(artist_str) -> list:
     return names
 
 
-def artist_in(name, folded_text) -> bool:
+def artist_in(name: str, folded_text: str) -> bool:
     """Whole-name match: the artist's words as a contiguous run, never a
     single shared word ("kris m" is not in "kris kross")."""
     if f" {name} " in f" {folded_text} ":
@@ -95,7 +95,7 @@ _NEUTRAL_QUALIFIERS = frozenset({
 })
 
 
-def version_keywords(text, artist="") -> frozenset:
+def version_keywords(text: str | None, artist: str = "") -> frozenset[str]:
     """Version keywords in `text`, ignoring words of the credited artists
     (so an artist called "Dub FX" doesn't make every file a dub)."""
     t = " " + fold(text) + " "
@@ -108,7 +108,7 @@ def version_keywords(text, artist="") -> frozenset:
     return frozenset(found)
 
 
-def has_version_marker(text: str):
+def has_version_marker(text: str) -> str | None:
     found = version_keywords(text)
     return next((kw for kw in VERSION_KEYWORDS if kw in found), None)
 

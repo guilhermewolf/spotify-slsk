@@ -1,7 +1,9 @@
 import logging
 import os
-import pytz
 from datetime import datetime
+
+import pytz
+
 
 class TimezoneFormatter(logging.Formatter):
     def __init__(self, fmt=None, datefmt=None, tz=None):
@@ -23,7 +25,7 @@ _NOISY_LIBRARIES = (
 )
 
 
-def setup_logging():
+def setup_logging() -> None:
     """
     Configure root logging:
       - App-code level from $LOGLEVEL (default INFO).

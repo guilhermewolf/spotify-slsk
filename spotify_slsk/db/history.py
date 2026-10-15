@@ -1,10 +1,10 @@
 """Append-only event history (grabs, imports, failures, upgrades)."""
+from __future__ import annotations
+
 import json
 import logging
 import sqlite3
-
-
-
+from typing import Any
 
 # ---- history --------------------------------------------------------------
 
@@ -20,7 +20,15 @@ HISTORY_EVENTS = (
 FAILURE_EVENTS = ("download_failed", "import_rejected")
 
 
-def record_history(conn, event, *, playlist_id=None, table_name=None, track_id=None, **data):
+def record_history(
+    conn: sqlite3.Connection | None,
+    event: str,
+    *,
+    playlist_id: str | None = None,
+    table_name: str | None = None,
+    track_id: str | None = None,
+    **data: Any,
+) -> None:
     """Append one history event. `table_name` resolves to its playlist_id
     when the id isn't given. None-valued data keys are dropped. Never
     raises — history is an audit aid, not something to fail a download on.
@@ -45,10 +53,19 @@ def record_history(conn, event, *, playlist_id=None, table_name=None, track_id=N
         logging.error(f"Could not record history event {event}: {e}")
 
 
-def list_history(conn, *, event=None, playlist_id=None, track_id=None, before_id=None, limit=200):
+def list_history(
+    conn: sqlite3.Connection,
+    *,
+    event: str | None = None,
+    playlist_id: str | None = None,
+    track_id: str | None = None,
+    before_id: int | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
     """Newest first. Each row has `data` parsed from data_json."""
     sql = "SELECT id, ts, event, playlist_id, track_id, data_json FROM history"
-    where, args = [], []
+    where: list[str] = []
+    args: list[Any] = []
     for col, val in (("event", event), ("playlist_id", playlist_id), ("track_id", track_id)):
         if val:
             where.append(f"{col} = ?")
@@ -78,7 +95,7 @@ def list_history(conn, *, event=None, playlist_id=None, track_id=None, before_id
     return out
 
 
-def latest_failures(conn) -> dict:
+def latest_failures(conn: sqlite3.Connection) -> dict[str, str | None]:
     """{track_id: reason} from each track's most recent failure event."""
     try:
         rows = conn.execute(
@@ -90,7 +107,7 @@ def latest_failures(conn) -> dict:
     except sqlite3.Error as e:
         logging.warning(f"Could not read latest failures: {e}")
         return {}
-    out = {}
+    out: dict[str, str | None] = {}
     for tid, data_json in rows:
         try:
             out[tid] = (json.loads(data_json) if data_json else {}).get("reason")
@@ -99,7 +116,7 @@ def latest_failures(conn) -> dict:
     return out
 
 
-def prune_history(conn, retention_days: int) -> None:
+def prune_history(conn: sqlite3.Connection, retention_days: int) -> None:
     """Delete events older than `retention_days` (at least 1, whatever the
     env says: 0 or a negative value would wipe the whole log every cycle).
     Indexed on ts, so cheap."""

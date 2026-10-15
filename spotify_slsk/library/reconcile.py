@@ -3,9 +3,12 @@
 Non-destructive by design: it only ever *records* a path for a row; it
 never moves or deletes a file. See matching.tracks._looks_like_match.
 """
+from __future__ import annotations
+
 import logging
 import os
 import re
+import sqlite3
 
 from mutagen import File as MutagenFile
 
@@ -18,7 +21,8 @@ from ..matching.tracks import (
     _tokenize,
 )
 
-def startup_check(conn, table_name: str):
+
+def startup_check(conn: sqlite3.Connection, table_name: str) -> None:
     """
     Smart, scoped startup reconciliation for ONE playlist table (table_name).
     """

@@ -131,7 +131,7 @@ class Search:
         return self.state == "InProgress"
 
 
-class TransferOutcome(str, enum.Enum):
+class TransferOutcome(enum.StrEnum):
     """Terminal classification of a transfer. ``None`` means still pending
     (Requested, Queued Locally/Remotely, Initializing, InProgress)."""
 

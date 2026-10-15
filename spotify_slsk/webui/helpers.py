@@ -96,7 +96,7 @@ def health_snapshot() -> dict:
             reason = (
                 f"schema version {version}, expected {db.SCHEMA_VERSION}"
                 if version != db.SCHEMA_VERSION
-                else f"no daemon heartbeat for {int(heartbeat_age)}s"
+                else f"no daemon heartbeat for {int(heartbeat_age or 0)}s"
             )
         elif heartbeat_age is None:
             reason = "waiting for the daemon's first heartbeat"

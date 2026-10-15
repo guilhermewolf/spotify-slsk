@@ -1,6 +1,12 @@
 """Spotify -> DB: fetch a playlist, diff it against its table, insert new rows."""
+from __future__ import annotations
+
 import logging
 import os
+import sqlite3
+from typing import Any
+
+import spotipy
 
 from ..db import (
     backfill_durations,
@@ -15,7 +21,8 @@ from ..db import (
 from ..models import Track
 from ..utils import get_playlist_id, sanitize_table_name
 
-def fetch_all_playlist_tracks(sp, playlist_id):
+
+def fetch_all_playlist_tracks(sp: spotipy.Spotify, playlist_id: str) -> list[dict[str, Any]]:
     tracks = []
     offset = 0
     limit = 100
@@ -30,7 +37,9 @@ def fetch_all_playlist_tracks(sp, playlist_id):
 
     return tracks
 
-def fetch_and_compare_tracks(conn, playlist_id, sp):
+def fetch_and_compare_tracks(
+    conn: sqlite3.Connection, playlist_id: str, sp: spotipy.Spotify
+) -> tuple[list[Track], str]:
     # Pull the playlist root (cheap one-page call). snapshot_id lets us skip
     # the expensive paginated track fetch when nothing has changed.
     playlist_info = sp.playlist(playlist_id, fields="name,snapshot_id")
@@ -110,11 +119,11 @@ def fetch_and_compare_tracks(conn, playlist_id, sp):
     return new_tracks, table_name
 
 
-def extract_artists_string(track):
+def extract_artists_string(track: dict[str, Any]) -> str:
     return ', '.join(artist['name'] for artist in track['artists'])
 
 
-def migrate_env_playlists(conn, sp):
+def migrate_env_playlists(conn: sqlite3.Connection, sp: spotipy.Spotify) -> None:
     """First-boot import: seed the empty catalogue from SPOTIFY_PLAYLIST_URLS env.
 
     Runs only when `playlists_meta` has no rows AND the env var is set.

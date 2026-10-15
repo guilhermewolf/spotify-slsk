@@ -11,9 +11,13 @@ Two matchers live here and are deliberately *not* merged:
 Both use difflib similarity over `_norm`/`_tokenize`, not the strict
 search-phase rules in `matching.candidates`.
 """
+from __future__ import annotations
+
 import difflib
 import logging
 import re
+import sqlite3
+from typing import Any
 
 from .normalize import (
     ARTIST_SPLIT_RE,
@@ -97,7 +101,9 @@ def _remix_equivalent(file_title: str, db_title: str) -> bool:
     return _titles_token_equivalent(f, d)
 
 
-def find_closest_match(conn, table_name, title, artist):
+def find_closest_match(
+    conn: sqlite3.Connection, table_name: str, title: str, artist: str
+) -> tuple[tuple[Any, ...] | None, float]:
     """
     Compatibility wrapper that delegates to the robust scorer.
     Returns (best_row, score) where best_row is (id, name, artists, album).
@@ -147,7 +153,9 @@ def _version_matches(file_title: str, db_title: str, artist: str = "") -> bool:
         return True
     return expected_title_tokens(db_title) <= set(fold(file_title).split())
 
-def find_closest_db_match(conn, table_name: str, file_title: str, file_artist: str):
+def find_closest_db_match(
+    conn: sqlite3.Connection, table_name: str, file_title: str, file_artist: str
+) -> tuple[Any, ...]:
     """
     Scan the table and return (track_id, db_title, db_artist, db_album, score, reason).
     """

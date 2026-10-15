@@ -2,7 +2,6 @@
 import logging
 import sqlite3
 
-
 SCHEMA_VERSION = 5
 
 
@@ -185,7 +184,7 @@ def _ensure_history_table(conn: sqlite3.Connection) -> None:
         logging.error(f"Error ensuring history: {e}")
 
 
-def create_connection(db_file):
+def create_connection(db_file: str) -> sqlite3.Connection | None:
     try:
         conn = sqlite3.connect(db_file, timeout=30)
         _apply_pragmas(conn)

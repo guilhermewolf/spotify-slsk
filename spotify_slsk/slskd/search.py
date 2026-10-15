@@ -1,6 +1,9 @@
 """slskd searches: the query waterfall, one search run, and search+grab."""
+from __future__ import annotations
+
 import logging
 import re
+import sqlite3
 import time
 
 from .. import config, runtime_state
@@ -10,9 +13,11 @@ from ..matching.candidates import (
     sort_candidates,
     summarize_evaluation,
 )
+from ..models import Candidate, IsBlocked
 from . import client as slskd_client
 from . import transfers
 from .models import Search, SearchResponse, remote_basename
+
 
 def _is_ascii(s: str) -> bool:
     return s.isascii() if isinstance(s, str) else True
@@ -134,8 +139,13 @@ def _run_one_search(query: str, timeout: int = 60, client=None) -> list:
 
 
 def interactive_search(
-    artist, title, album=None, duration_ms=None, is_blocked=None, timeout=60
-):
+    artist: str,
+    title: str,
+    album: str | None = None,
+    duration_ms: int | None = None,
+    is_blocked: IsBlocked | None = None,
+    timeout: int = 60,
+) -> list[Candidate]:
     """Read-only search for the track page: walk the whole query waterfall,
     evaluate every file, and return them all — accepted first in auto-pick
     order, then rejected — de-duplicated by (user, filename).
@@ -164,16 +174,16 @@ def interactive_search(
 
 
 def search_and_download(
-    artist,
-    title,
-    conn,
-    playlist_name,
-    track_id,
-    album=None,
-    max_version_tier=None,
-    timeout=60,
-    duration_ms=None,
-):
+    artist: str,
+    title: str,
+    conn: sqlite3.Connection,
+    playlist_name: str,
+    track_id: str,
+    album: str | None = None,
+    max_version_tier: int | None = None,
+    timeout: int = 60,
+    duration_ms: int | None = None,
+) -> str | None:
     """Run the full query waterfall, attempting download from each.
 
     Falls through to the next query when a query yields no *usable* candidates
@@ -237,16 +247,16 @@ def search_and_download(
 
 
 def download_and_verify(
-    search_results,
-    expected_title,
-    expected_artist,
-    conn,
-    playlist_name,
-    track_id,
-    max_version_tier=None,
-    evaluated=None,
-    expected_duration_ms=None,
-):
+    search_results: list[SearchResponse],
+    expected_title: str,
+    expected_artist: str,
+    conn: sqlite3.Connection,
+    playlist_name: str,
+    track_id: str,
+    max_version_tier: int | None = None,
+    evaluated: list[Candidate] | None = None,
+    expected_duration_ms: int | None = None,
+) -> str | None:
     """Filter, sort, and try to download the best candidate from one search.
 
     `max_version_tier`, when set, restricts candidates to *strictly better*

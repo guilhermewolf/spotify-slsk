@@ -1,4 +1,6 @@
 """Building the Spotify client."""
+from __future__ import annotations
+
 import logging
 import os
 import time
@@ -8,7 +10,8 @@ import spotipy
 from spotipy.cache_handler import CacheFileHandler
 from spotipy.oauth2 import SpotifyClientCredentials
 
-def setup_spotify_client():
+
+def setup_spotify_client() -> spotipy.Spotify | None:
     """Build the Spotify client, or return None if credentials are missing.
 
     Returning None rather than raising keeps the dashboard reachable so the
@@ -47,7 +50,7 @@ SPOTIFY_TRANSPORT_RETRIES = 3
 
 def fetch_playlist_name(sp: spotipy.Spotify, pid: str) -> str:
     """Name of playlist `pid`, retrying transport errors (used by the web UI)."""
-    last_exc = None
+    last_exc: Exception | None = None
     for attempt in range(SPOTIFY_TRANSPORT_RETRIES):
         try:
             return sp.playlist(pid, fields="name")["name"]
@@ -58,4 +61,5 @@ def fetch_playlist_name(sp: spotipy.Spotify, pid: str) -> str:
                 f"(attempt {attempt + 1}/{SPOTIFY_TRANSPORT_RETRIES}): {e}"
             )
             time.sleep(0.5 * (attempt + 1))
+    assert last_exc is not None  # the loop ran at least once
     raise last_exc

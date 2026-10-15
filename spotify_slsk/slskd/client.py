@@ -6,8 +6,11 @@ its own with ``new_client`` because the underlying requests.Session is not
 thread-safe. Polling loops sleep through ``interruptible_sleep`` so SIGTERM
 ends them promptly.
 """
+from __future__ import annotations
+
 import logging
 import os
+import threading
 import time
 
 import slskd_api
@@ -16,7 +19,7 @@ _client = None
 _shutdown_event = None
 
 
-def set_shutdown_event(event) -> None:
+def set_shutdown_event(event: threading.Event | None) -> None:
     """Wire the caller's shutdown Event so our polling loops can exit promptly."""
     global _shutdown_event
     _shutdown_event = event
@@ -30,7 +33,7 @@ def interruptible_sleep(seconds: float) -> bool:
     return _shutdown_event.wait(seconds)
 
 
-def new_client():
+def new_client() -> slskd_api.SlskdClient:
     """Build a fresh SlskdClient from env."""
     return slskd_api.SlskdClient(
         host=os.getenv("SLSKD_HOST_URL", "http://slskd:5030"),
@@ -39,7 +42,7 @@ def new_client():
     )
 
 
-def get_client():
+def get_client() -> slskd_api.SlskdClient:
     """Lazily build and cache the daemon's SlskdClient. Reads env at first call."""
     global _client
     if _client is None:
@@ -51,7 +54,9 @@ def shutting_down() -> bool:
     return _shutdown_event is not None and _shutdown_event.is_set()
 
 
-def wait_for_slskd_healthy(host, api_key, timeout=90, check_interval=1):
+def wait_for_slskd_healthy(
+    host: str, api_key: str | None, timeout: float = 90, check_interval: float = 1
+) -> bool:
     """Poll slskd until it reports connected+logged-in. Returns True on success.
 
     Returns False on timeout rather than raising: an unreachable slskd is an

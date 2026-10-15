@@ -15,7 +15,7 @@ from spotify_slsk.matching.tracks import (
     _tokenize,
     score_track_match,
 )
-from spotify_slsk.utils import sanitize_table_name, get_playlist_id
+from spotify_slsk.utils import get_playlist_id, sanitize_table_name
 
 
 class TestTokenize:
