@@ -24,8 +24,10 @@ dashboard for adding playlists, watching progress and retrying what failed.
 - **Retry and back-off** — a track that fails twice is suspended for two days
   rather than retried forever; rejected filenames are remembered so the same bad
   file isn't downloaded again.
-- **Blocklist** — peer files that fail to transfer or are rejected after
-  download are skipped for every track; whole users can be banned from the UI.
+- **Blocklist** — peer files that slskd reports as failed/rejected, or that
+  turn out broken after download (no tags, unreadable, truncated), are skipped
+  for every track; whole users can be banned from the UI. A file that is merely
+  the wrong song for one track is only skipped for that track.
 - **History** — every grab, import, failure, upgrade and retry is kept for
   `HISTORY_RETENTION_DAYS`, with a filterable history page.
 - **Web dashboard** — library totals, per-playlist progress, per-track status,

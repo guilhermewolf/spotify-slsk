@@ -33,7 +33,7 @@ make check PYTHON=.venv/bin/python   # against a virtualenv
 Individual targets: `make compile`, `make lint`, `make test`, `make audit`,
 `make docker-build`.
 
-- `make test` — ~460 tests. Fast (~1s); no network, no external services.
+- `make test` — 459 tests. Fast (~1s); no network, no external services.
 - `make audit` — `pip-audit` against the pinned `requirements.txt`. Advisories
   fail CI, so dependency CVEs surface on a PR rather than in production.
 - CI also builds the image and asserts it runs as uid 1000 and that no
@@ -110,7 +110,7 @@ Docker `HEALTHCHECK` compares `HEARTBEAT_FILE` mtime against `HEARTBEAT_STALE_SE
 ### Module responsibilities
 
 - **`spotify_slsk/app.py`** — orchestrator. Spotify client setup, Spotify→DB env migration, startup reconciliation, cycle loop, metadata tagging via `mutagen`, file moves, ntfy. Owns the **local-file ↔ DB** matcher (`difflib`-based).
-- **`spotify_slsk/soulseek_api.py`** — `get_client()` lazy slskd factory, search waterfall (multi-query + CJK passthrough + early-stop on response count), candidate filtering in `evaluate_candidates` (blocklist + format allowlist + fixed 320 floor for MP3s with a known bitrate + effective-bitrate floor via `_effective_mp3_kbps` + duration vs Spotify + the strict name rules in `filename_match`: basename-only title coverage, whole-name artist, symmetric version-gate via `_version_mismatch`), which returns every file with `accepted` and a human `reason` — `extract_candidates` is the accepted subset. `grab_candidate` is the single enqueue/wait/verify step shared by auto and manual grabs (tried + blocklist + history on failure). `interactive_search` is the read-only, collect-everything variant for the track page. Sort (version tier > format > bitrate > peer upload speed), cleanup via `searches.delete` in `finally`. `refresh_from_db(conn)` reloads tunables at each cycle start; `_interruptible_sleep` honors the shared shutdown Event.
+- **`spotify_slsk/soulseek_api.py`** — `get_client()` lazy slskd factory, search waterfall (multi-query + CJK passthrough + early-stop on response count), candidate filtering in `evaluate_candidates` (blocklist + format allowlist + fixed 320 floor for MP3s with a known bitrate + effective-bitrate floor via `_effective_mp3_kbps` + duration vs Spotify + the strict name rules in `filename_match`: basename-only title coverage, whole-name artist, symmetric version-gate via `_version_mismatch`), which returns every file with `accepted` and a human `reason` — `extract_candidates` is the accepted subset. `grab_candidate` is the single enqueue/wait/verify step shared by auto and manual grabs (tried + history on any failure; blocklist only on definitive peer faults). `interactive_search` is the read-only, collect-everything variant for the track page. Sort (version tier > format > bitrate > peer upload speed), cleanup via `searches.delete` in `finally`. `refresh_from_db(conn)` reloads tunables at each cycle start; `_interruptible_sleep` honors the shared shutdown Event.
 - **`spotify_slsk/db.py`** — SQLite persistence. WAL mode + `busy_timeout=5000` + `PRAGMA user_version` migrations. Per-playlist dynamic tables (`pl_<sanitized_name>` + `pl_<…>_tried`) plus a global `playlists_meta` catalogue keyed by Spotify id, a global `settings` key-value bag, a global `blocklist` (peer files, or whole peers when `filename` is NULL) and a global `history` event log. `get_setting(conn, key, default)` prefers DB, falls back to env, then default — so any env var becomes a mutable setting for free.
 - **`spotify_slsk/webui/`** — Flask dashboard (see next section).
 - **`spotify_slsk/runtime_state.py`** — in-process observability: thread-safe current-activity dict, a bounded log ring buffer (fed by a handler installed in `log_config`), per-track slskd search history (with accepted/rejected counts and reasons), interactive-search results keyed by (playlist_id, track_id) with a 10-minute TTL, and the manual-grab queue the UI fills and the daemon drains. All of it is per-process and resets on restart — deliberately not persisted.
@@ -138,7 +138,7 @@ Routes:
 - `GET /logs` · `GET /logs.json?since=&limit=` · `GET /activity.json` — live log tail and current daemon phase
 - `GET /file?rel=` — serves a downloaded file for the in-browser audio preview; `rel` is resolved against the playlists root and re-checked with `commonpath` after symlink normalisation
 - `GET /healthz` — JSON health (schema version, heartbeat age, reason)
-- `POST /playlists` · `POST /playlist/<id>/{toggle,delete,refresh}` · `POST /track/<pid>/<tid>/retry` · `POST /track/<pid>/<tid>/retag` · `POST /settings/test-ntfy`
+- `POST /playlists` · `POST /playlist/<id>/{toggle,delete,refresh}` (delete requires `confirm=1`, sent by the dashboard's `<details>` confirm) · `POST /track/<pid>/<tid>/retry` · `POST /track/<pid>/<tid>/retag` · `POST /settings/test-ntfy`
 
 **Only the daemon thread downloads, moves files or imports.** The interactive
 search runs on a UI background thread with its own slskd client (not the
@@ -192,14 +192,28 @@ unnormalised.
 4. On failure, `update_download_status(success=False)` increments `attempts`; at `MAX_ATTEMPTS_BEFORE_SUSPEND` (2) the row is suspended for 2 days.
 5. On verified success, `clear_tried_entries` deletes that track's rows from
    `pl_<…>_tried`, so a filename rejected once isn't blacklisted forever.
-6. Separately, a failed transfer / file that never appeared / post-download
-   rejection adds the peer file to the global `blocklist`, which survives
-   retries and success. Shutdown mid-transfer and reconcile never blocklist.
-7. A download with no title/artist tags is accepted only when the daemon knows
-   the expected track AND the slskd filename scores >= `MIN_MATCH_SCORE` AND
-   the real (mutagen) duration is within `SLSKD_MAX_DURATION_DIFF_SECONDS` of
-   Spotify's. Unknown durations, or the setting at 0, mean reject.
-8. A manual grab that fails does not increment `attempts`.
+6. **Blocklist policy.** Every failure goes to the track's `_tried` list and
+   history. Only a *definitive peer-file fault* also adds the peer file to the
+   global `blocklist` (which survives retries and success): slskd reporting the
+   transfer failed/errored/rejected/aborted (`candidate["peer_fault"]`), or a
+   post-download rejection of the file itself — no usable tags, unreadable
+   audio, or a real length far from what the peer advertised. Our wait timeout,
+   "Queued, Remotely" stalls, slskd not listing the transfer yet, a file not
+   found afterwards, a wrong-track mismatch ("no match"/"low score"/filename or
+   Spotify-duration miss), shutdown and reconcile never blocklist: the same file
+   can be right for another track, and a global ban would hide it there.
+7. **Completion grace.** slskd can report "Completed, Succeeded" while the file
+   is still under `/downloads/incomplete/`. `find_file_in_downloads` never
+   searches `incomplete`, and `wait_for_completion` polls for the finished file
+   for up to `COMPLETION_GRACE_SECONDS` (30 s, 1 s steps, shutdown-interruptible)
+   before calling it "file not found after download".
+8. A download with no title/artist tags is accepted only when the daemon knows
+   the expected track AND the file's name passes the strict candidate rules
+   (`soulseek_api.filename_match`, peer path preferred so its folder can supply
+   the artist) AND the real (mutagen) duration is within
+   `SLSKD_MAX_DURATION_DIFF_SECONDS` of Spotify's. Unknown durations, or the
+   setting at 0, mean reject.
+9. A manual grab that fails does not increment `attempts`.
 
 Files enter via the shared `/downloads` volume, then move to `/playlists/<table>/` after tagging.
 
