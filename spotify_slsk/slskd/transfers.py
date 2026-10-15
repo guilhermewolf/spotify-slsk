@@ -6,7 +6,7 @@ import time
 from .. import config
 from ..db import add_blocklist, add_tried_file, record_history
 from . import client as slskd_client
-from .models import remote_basename
+from .models import Transfer, TransferOutcome, remote_basename
 
 # The candidate dict behind the most recent successful download_and_verify,
 # so the caller can attribute a post-download rejection to the peer file
@@ -133,29 +133,6 @@ def grab_candidate(candidate, conn, playlist_name, track_id, source="auto"):
     return None
 
 
-def _transfer_outcome(state):
-    """Classify a slskd transfer state: "succeeded", "failed", or None while
-    it is still queued/in progress.
-
-    slskd's terminal states are all "Completed, <reason>". Only Succeeded is
-    a success; Rejected, TimedOut, Errored, Aborted, Cancelled... are
-    failures. Matching only failed/aborted/errored let "Completed, Rejected"
-    and "Completed, TimedOut" run into the 300 s timeout.
-    """
-    s = (state or "").lower()
-    if "completed" in s:
-        return "succeeded" if "succeeded" in s else "failed"
-    if any(w in s for w in ("failed", "aborted", "errored", "rejected", "timedout")):
-        return "failed"
-    return None
-
-
-# Terminal slskd states that are the peer's (or its file's) fault. Other
-# failures — "Completed, TimedOut", "Completed, Cancelled" — may be ours or
-# the network's, so they never blocklist.
-_PEER_FAULT_STATES = ("failed", "errored", "rejected", "aborted")
-
-
 def wait_for_completion(candidate, timeout=300):
     client = slskd_client.get_client()
     logging.debug(f"Waiting for transfer of {candidate['filename']} to complete...")
@@ -163,19 +140,20 @@ def wait_for_completion(candidate, timeout=300):
     start = time.time()
 
     while time.time() - start < 10:
-        downloads = client.transfers.get_downloads(candidate["user"])
-        for directory in downloads.get("directories", []):
-            for file in directory.get("files", []):
-                if (
-                    remote_basename(file["filename"])
-                    == remote_basename(candidate["filename"])
-                    and file["size"] == candidate["size"]
-                ):
-                    transfer_id = file["id"]
-                    break
-            if transfer_id:
-                break
-        if transfer_id:
+        downloads = Transfer.list_from_user_json(
+            client.transfers.get_downloads(candidate["user"])
+        )
+        match = next(
+            (
+                t for t in downloads
+                if t.id
+                and t.basename == remote_basename(candidate["filename"])
+                and t.size == candidate["size"]
+            ),
+            None,
+        )
+        if match:
+            transfer_id = match.id
             break
         if slskd_client.interruptible_sleep(1):
             return None
@@ -187,33 +165,33 @@ def wait_for_completion(candidate, timeout=300):
 
     start = time.time()
     while True:
-        downloads = client.transfers.get_downloads(candidate["user"])
-        for directory in downloads.get("directories", []):
-            for file in directory.get("files", []):
-                if file["id"] == transfer_id:
-                    state = file.get("state", "").lower()
-                    logging.debug(f"State for {file['filename']}: {state}")
-                    outcome = _transfer_outcome(state)
-                    if outcome == "succeeded":
-                        filename = remote_basename(candidate["filename"])
-                        real_path = _await_completed_file(filename)
-                        logging.info(f"File found: {real_path}")
-                        if real_path and _wait_for_external_processing(real_path):
-                            return real_path
-                        logging.warning(
-                            f"File not confirmed after download: {filename}"
-                        )
-                        candidate["failure"] = "file not found after download"
-                        return None
-                    if outcome == "failed":
-                        logging.warning(
-                            f"Transfer failed: {file['filename']} — state: {state}"
-                        )
-                        candidate["failure"] = f"transfer {state}"
-                        candidate["peer_fault"] = any(
-                            w in state for w in _PEER_FAULT_STATES
-                        )
-                        return None
+        downloads = Transfer.list_from_user_json(
+            client.transfers.get_downloads(candidate["user"])
+        )
+        for transfer in downloads:
+            if transfer.id != transfer_id:
+                continue
+            state = transfer.state.lower()
+            logging.debug(f"State for {transfer.filename}: {state}")
+            outcome = transfer.outcome
+            if outcome is TransferOutcome.SUCCEEDED:
+                filename = remote_basename(candidate["filename"])
+                real_path = _await_completed_file(filename)
+                logging.info(f"File found: {real_path}")
+                if real_path and _wait_for_external_processing(real_path):
+                    return real_path
+                logging.warning(
+                    f"File not confirmed after download: {filename}"
+                )
+                candidate["failure"] = "file not found after download"
+                return None
+            if outcome is TransferOutcome.FAILED:
+                logging.warning(
+                    f"Transfer failed: {transfer.filename} — state: {state}"
+                )
+                candidate["failure"] = f"transfer {state}"
+                candidate["peer_fault"] = transfer.peer_fault
+                return None
         if time.time() - start > timeout:
             logging.warning(f"Transfer timeout for {candidate['filename']}")
             candidate["failure"] = "transfer timed out"

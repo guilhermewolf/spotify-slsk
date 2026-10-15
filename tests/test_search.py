@@ -27,6 +27,7 @@ from spotify_slsk.slskd.search import (
 from spotify_slsk import config
 from spotify_slsk.matching import candidates as matching_candidates
 from spotify_slsk.slskd import client as slskd_client
+from spotify_slsk.slskd import models as slskd_models
 from spotify_slsk.slskd import search as slskd_search
 from spotify_slsk.slskd import transfers as slskd_transfers
 from spotify_slsk.config import normalize_ext_list
@@ -395,7 +396,7 @@ class TestRunOneSearch:
         fake.searches.delete = lambda sid: None
         monkeypatch.setattr(slskd_client, "get_client", lambda: fake)
         out = slskd_search._run_one_search("hello", timeout=2)
-        assert out and out[0]["username"] == "u"
+        assert out and out[0].username == "u"
 
     def test_returns_empty_on_no_search_id(self, monkeypatch):
         fake = type("F", (), {})()
@@ -826,7 +827,7 @@ class TestBlocklistPolicy:
     def test_explicit_peer_failure_blocklists(self, monkeypatch, tmp_path, state):
         def outcome(c):
             c["failure"] = f"transfer {state}"
-            c["peer_fault"] = any(w in state for w in slskd_transfers._PEER_FAULT_STATES)
+            c["peer_fault"] = any(w in state for w in slskd_models.PEER_FAULT_STATES)
             return None
 
         blocked, tried, _ = self._run(monkeypatch, tmp_path, outcome)
@@ -929,7 +930,7 @@ class TestTransferStates:
         "case", _TRANSFERS["cases"], ids=[c["state"] for c in _TRANSFERS["cases"]]
     )
     def test_classification(self, case):
-        assert slskd_transfers._transfer_outcome(case["state"]) == case["expected"]
+        assert slskd_models.Transfer(id="x", filename="f", state=case["state"]).outcome == case["expected"]
 
     @pytest.mark.parametrize(
         "case",

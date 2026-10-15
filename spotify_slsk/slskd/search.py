@@ -12,7 +12,7 @@ from ..matching.candidates import (
 )
 from . import client as slskd_client
 from . import transfers
-from .models import remote_basename
+from .models import Search, SearchResponse, remote_basename
 
 def _is_ascii(s: str) -> bool:
     return s.isascii() if isinstance(s, str) else True
@@ -101,17 +101,20 @@ def _run_one_search(query: str, timeout: int = 60, client=None) -> list:
             minimumPeerUploadSpeed=config.MIN_PEER_UPLOAD_SPEED,
             responseLimit=config.EARLY_STOP_RESPONSES,
         )
-        search_id = search.get("id")
+        search_id = Search.from_json(search).id
         if not search_id:
             return []
 
         start = time.time()
         while time.time() - start < timeout:
-            state = client.searches.state(search_id).get("state", "")
-            if state != "InProgress":
-                results = client.searches.search_responses(search_id)
+            if not Search.from_json(client.searches.state(search_id)).in_progress:
+                raw = client.searches.search_responses(search_id)
+                results = [
+                    SearchResponse.from_json(r)
+                    for r in (raw if isinstance(raw, list) else [])
+                ]
                 logging.info(f"Search returned {len(results)} results for: {query}")
-                return results or []
+                return results
             if slskd_client.interruptible_sleep(1):
                 return []
         logging.warning(f"Search timed out for: {query}")

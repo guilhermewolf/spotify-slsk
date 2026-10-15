@@ -10,7 +10,7 @@ import os
 import re
 
 from .. import config
-from ..slskd.models import remote_basename
+from ..slskd.models import SearchResponse, remote_basename
 from ..utils import fmt_duration
 from .normalize import (
     BRACKETS_RE,
@@ -204,22 +204,23 @@ def evaluate_candidates(
     """
     evaluated = []
 
-    for result in search_results:
-        user = result.get("username", "unknown")
-        user_upload_speed = result.get("uploadSpeed", 0) or 0
+    for raw in search_results:
+        result = raw if isinstance(raw, SearchResponse) else SearchResponse.from_json(raw)
+        user = result.username
+        user_upload_speed = result.upload_speed
 
-        for file in result.get("files", []):
-            filename = file.get("filename")
+        for file in result.files:
+            filename = file.filename
             if not filename:
                 continue
 
-            ext = os.path.splitext(filename)[1].lower()
+            ext = file.ext
             # slskd sends camelCase "bitRate" (only for lossy files); the old
             # lowercase read was always None, so the floor below never applied.
-            reported_bitrate = file.get("bitRate")
-            length_sec = file.get("length")
-            size_bytes = file.get("size")
-            base = remote_basename(filename)
+            reported_bitrate = file.bit_rate
+            length_sec = file.length
+            size_bytes = file.size
+            base = file.basename
             inferred_bitrate = _infer_bitrate_from_name(base)
             effective_bitrate = (
                 reported_bitrate if reported_bitrate is not None else inferred_bitrate
@@ -239,10 +240,10 @@ def evaluate_candidates(
                 "effective_mp3": effective_mp3,
                 "ext": ext,
                 "length": length_sec,
-                "sample_rate": file.get("sampleRate"),
-                "bit_depth": file.get("bitDepth"),
-                "free_slot": result.get("hasFreeUploadSlot"),
-                "queue_length": result.get("queueLength"),
+                "sample_rate": file.sample_rate,
+                "bit_depth": file.bit_depth,
+                "free_slot": result.has_free_upload_slot,
+                "queue_length": result.queue_length,
                 "title_coverage": None,
                 "version_tier": version_tier(base),
                 "accepted": False,
