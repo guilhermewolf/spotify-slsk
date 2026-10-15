@@ -281,34 +281,52 @@ def _infer_bitrate_from_name(name: str):
         return None
 
 
-_VERSION_MARKERS = (
-    "remix", "remake", "rework", "bootleg", "mashup",
-    "live", "acoustic", "unplugged", "instrumental", "karaoke",
-    "radio edit", "extended edit", "club edit",
+# Words that make a recording a *different* version. Compared as a set on both
+# sides, so "Dustup (Original Mix)" can't stand in for "Dustup (Mefjus Remix)"
+# and vice versa. Neutral variants (original/extended mix, radio edit,
+# remastered, album version) are deliberately absent — `_version_tier` ranks
+# those instead.
+_VERSION_KEYWORDS = (
+    "remix", "dub", "vip", "club mix", "live", "acoustic", "unplugged",
+    "instrumental", "karaoke", "cover", "sped up", "slowed", "nightcore", "8d",
+    "bootleg", "rework", "remake", "reedit", "flip", "mashup", "acapella",
 )
+_VERSION_WORDS = frozenset(w for kw in _VERSION_KEYWORDS for w in kw.split())
+# "<word> Mix" / "<word> Edit" is a named version ("Kris M Edit", "Strings
+# Mix") unless the word is one of these neutral qualifiers.
+_NEUTRAL_QUALIFIERS = frozenset({
+    "original", "extended", "radio", "album", "single", "short", "clean",
+    "explicit", "main", "full", "long",
+})
+
+
+def _version_keywords(text, artist="") -> frozenset:
+    """Version keywords in `text`, ignoring words of the credited artists
+    (so an artist called "Dub FX" doesn't make every file a dub)."""
+    t = " " + _fold(text) + " "
+    for name in _artist_names(artist):
+        t = t.replace(f" {name} ", " ")
+    found = {kw for kw in _VERSION_KEYWORDS if f" {kw} " in t}
+    for word, kind in re.findall(r"(?<= )(\w+) (mix|edit)(?= )", t):
+        if word not in _NEUTRAL_QUALIFIERS and word not in _VERSION_WORDS:
+            found.add(f"named {kind}")
+    return frozenset(found)
 
 
 def _has_version_marker(text: str):
-    t = (text or "").lower()
-    for marker in _VERSION_MARKERS:
-        if re.search(rf"\b{re.escape(marker)}\b", t):
-            return marker
-    return None
+    found = _version_keywords(text)
+    return next((kw for kw in _VERSION_KEYWORDS if kw in found), None)
 
 
-def _version_mismatch(expected_title: str, file_title: str) -> bool:
-    """True when exactly one side declares a version marker, or both declare different ones."""
-    e = _has_version_marker(expected_title)
-    f = _has_version_marker(file_title)
-    if e is None and f is None:
-        return False
-    return e != f
+def _version_mismatch(expected_title: str, file_title: str, artist: str = "") -> bool:
+    """True when the two sides declare different sets of version keywords."""
+    return _version_keywords(expected_title, artist) != _version_keywords(file_title, artist)
 
 
 # DJ-oriented version preference. Lower = more preferred. Extended Mix is the
 # DJ-friendly long cut; Original Mix is the producer's studio version; everything
 # else (radio edits, plain titles) is the fallback. Note: this is intentionally
-# orthogonal to `_VERSION_MARKERS` / `_version_mismatch` — those reject *wrong*
+# orthogonal to `_VERSION_KEYWORDS` / `_version_mismatch` — those reject *wrong*
 # versions (e.g. Live when expecting Studio); this only ranks compatible ones.
 def _version_tier(text: str) -> int:
     t = (text or "").lower()
@@ -366,10 +384,11 @@ _ARTIST_SPLIT_RE = re.compile(
 
 
 def _fold(text) -> str:
-    """Lowercase, strip accents, collapse every non-alphanumeric run to a space."""
+    """Lowercase, strip accents, collapse every non-alphanumeric run to a
+    space, and spell "rmx" as "remix"."""
     t = unicodedata.normalize("NFKD", text or "")
     t = "".join(c for c in t if not unicodedata.combining(c)).lower()
-    return " ".join(re.findall(r"[^\W_]+", t))
+    return " ".join("remix" if w == "rmx" else w for w in re.findall(r"[^\W_]+", t))
 
 
 def _expected_title_tokens(title) -> set:
@@ -500,7 +519,7 @@ def extract_candidates(
             ):
                 continue
             # A different version (remix/live/... on one side only) is never usable.
-            if _version_mismatch(expected_title, base):
+            if _version_mismatch(expected_title, stem, expected_artist):
                 continue
 
             candidates.append(

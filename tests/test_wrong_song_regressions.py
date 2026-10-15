@@ -141,3 +141,43 @@ class TestCandidateKeepsRightSongs:
         ), "Heart To Find", "Mat Joe"))
         assert len(out) == 3
         assert "Extended Mix" in out[0]["basename"]
+
+
+class TestVersionSymmetry:
+    @pytest.mark.parametrize("expected,filename", [
+        ("Heart To Find", "Mat Joe - Heart To Find (Dub).flac"),
+        ("Heart To Find", "Mat Joe - Heart To Find (VIP).flac"),
+        ("Heart To Find", "Mat Joe - Heart To Find (Club Mix).flac"),
+        ("Heart To Find", "Mat Joe - Heart To Find (Instrumental).flac"),
+        ("Heart To Find", "Mat Joe - Heart To Find (Sped Up).flac"),
+        ("Heart To Find", "Mat Joe - Heart To Find (Slowed + Reverb).flac"),
+        ("Heart To Find", "Mat Joe - Heart To Find (Nightcore).flac"),
+        ("Heart To Find", "Mat Joe - Heart To Find (8D Audio).flac"),
+        ("Heart To Find", "Mat Joe - Heart To Find (Karaoke Version).flac"),
+        ("Heart To Find", "Mat Joe - Heart To Find (Acoustic).flac"),
+        ("Heart To Find", "Mat Joe - Heart To Find (Live).flac"),
+        ("Heart To Find", "Mat Joe - Heart To Find (Piano Cover).flac"),
+        ("Heart To Find", "Mat Joe - Heart To Find (Kris M Edit).flac"),
+        ("Heart To Find", "Mat Joe - Heart To Find (Strings Mix).flac"),
+        ("Heart To Find", "Mat Joe - Heart To Find RMX.flac"),
+        ("Heart To Find - Dub", "Mat Joe - Heart To Find.flac"),
+        ("Heart To Find - Kris M Remix", "Mat Joe - Heart To Find (Other Remix).flac"),
+    ])
+    def test_different_version_rejected(self, expected, filename):
+        assert extract_candidates(_results(filename), expected, "Mat Joe") == []
+
+    @pytest.mark.parametrize("expected,filename", [
+        ("Heart To Find", "Mat Joe - Heart To Find (Radio Edit).flac"),
+        ("Heart To Find", "Mat Joe - Heart To Find (Album Version).flac"),
+        ("Heart To Find - Dub", "Mat Joe - Heart To Find (Dub).flac"),
+        ("Heart To Find - Kris M Remix", "Mat Joe - Heart To Find (Kris M Remix).flac"),
+        ("Heart To Find - Kris M Remix", "Mat Joe - Heart To Find (Kris M RMX).flac"),
+        ("Heart To Find - Kris M Edit", "Mat Joe - Heart To Find (Kris M Edit).flac"),
+    ])
+    def test_same_or_neutral_version_accepted(self, expected, filename):
+        assert len(extract_candidates(_results(filename), expected, "Mat Joe")) == 1
+
+    def test_artist_name_is_not_a_version_keyword(self):
+        assert len(extract_candidates(
+            _results("Dub FX - Love Someone.flac"), "Love Someone", "Dub FX"
+        )) == 1
