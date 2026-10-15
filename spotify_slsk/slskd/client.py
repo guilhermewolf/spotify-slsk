@@ -65,15 +65,17 @@ def wait_for_slskd_healthy(
     during exactly that outage. `block_until_slskd_healthy` owns the retrying.
     """
     logging.info(f"Waiting for slskd at {host} (timeout: {timeout}s)...")
-    client = get_client()
 
     start = time.time()
-    last_err = None
+    last_err: Exception | None = None
     while time.time() - start < timeout:
         if shutting_down():
             return False
         try:
-            state = client.application.state()
+            # Built inside the try: SlskdClient raises ValueError when
+            # SLSKD_API_KEY is unset, and that must not escape main() and
+            # take the dashboard down with it.
+            state = get_client().application.state()
             if state['server'].get('isConnected') and state['server'].get('isLoggedIn'):
                 logging.info("slskd is healthy and connected.")
                 return True

@@ -283,3 +283,13 @@ def test_sqlite_connect_is_not_logged_at_info(tmp_path, caplog):
     with caplog.at_level(logging.INFO):
         db.create_connection(str(tmp_path / "x.db")).close()
     assert not [r for r in caplog.records if "Connected to SQLite" in r.getMessage()]
+
+
+def test_missing_slskd_api_key_does_not_crash_the_wait(monkeypatch):
+    """SlskdClient raises ValueError without an API key. That used to escape
+    main() before the cycle loop - killing the web UI with it."""
+    def _no_key():
+        raise ValueError("Please provide an API-Key, a valid token or username/password.")
+
+    monkeypatch.setattr(slskd_client, "get_client", _no_key)
+    assert slskd_client.wait_for_slskd_healthy("h", None, timeout=0.05, check_interval=0.01) is False
