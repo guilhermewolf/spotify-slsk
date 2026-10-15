@@ -37,6 +37,8 @@ EXTERNAL_PROCESS_WAIT_TIMEOUT = int(os.getenv("SLSKD_WAIT_TIMEOUT", "60"))
 MIN_PEER_UPLOAD_SPEED = int(os.getenv("SLSKD_MIN_PEER_UPLOAD_SPEED", "0"))
 # MP3s whose effective bitrate (size*8/duration/1000) falls below this are
 # rejected even if their reported bitrate claims 320 — catches upsampled fakes.
+# Independent of the fixed rule in extract_candidates: an MP3 whose reported
+# or filename-inferred bitrate is known and below 320 is always rejected.
 MIN_EFFECTIVE_MP3_KBPS = int(os.getenv("SLSKD_MIN_EFFECTIVE_MP3_KBPS", "280"))
 # Cut the slskd search short once we have this many responses. slskd will
 # keep collecting responses for the full searchTimeout window otherwise.

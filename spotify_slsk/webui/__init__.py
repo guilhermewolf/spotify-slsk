@@ -161,7 +161,7 @@ SETTINGS_SPEC = [
     ("MIN_MATCH_SCORE", "0.62", "Accept threshold for downloaded-file -> DB match (0.0-1.0)", "ratio"),
     ("SLSKD_PREFERRED_FORMATS", "flac,mp3,aiff,wav", "Comma-separated, ordered — first format wins ties", "formats"),
     ("SLSKD_MIN_PEER_UPLOAD_SPEED", "0", "Passed to slskd; bytes/sec", "int0"),
-    ("SLSKD_MIN_EFFECTIVE_MP3_KBPS", "280", "Reject MP3s whose size/duration yields below this", "int0"),
+    ("SLSKD_MIN_EFFECTIVE_MP3_KBPS", "280", "Floor (kbps) for an MP3's effective bitrate, computed from file size and duration; catches 128 kbps files retagged as 320. Separate from the fixed 320 rule: an MP3 whose reported (or filename-inferred) bitrate is below 320 is always rejected, whatever this is set to", "int0"),
     ("SLSKD_EARLY_STOP_RESPONSES", "20", "Stop the slskd search once this many peers replied", "int1"),
     ("SLSKD_WAIT_TIMEOUT", "60", "Seconds to wait for a downloaded file to appear on disk", "int1"),
     ("UPGRADE_CHECK_INTERVAL_HOURS", "168", "Re-search downloaded tracks for a better version_tier (Extended Mix > Original Mix); 0 disables", "int0"),

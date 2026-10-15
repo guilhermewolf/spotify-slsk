@@ -9,8 +9,9 @@ dashboard for adding playlists, watching progress and retrying what failed.
 
 - **Spotify sync** — polls your playlists and picks up new tracks. Uses Spotify's
   `snapshot_id` to skip the expensive track fetch when a playlist hasn't changed.
-- **Quality-aware search** — format allowlist, bitrate floors (including an
-  effective-bitrate check that catches 128 kbps files retagged as 320), and a
+- **Quality-aware search** — format allowlist, a fixed 320 kbps floor for MP3s
+  whose bitrate is known, an effective-bitrate check from size and duration
+  (`SLSKD_MIN_EFFECTIVE_MP3_KBPS`, catches 128 kbps files retagged as 320), and a
   version gate so a Live or Remix version isn't accepted for a studio track.
 - **Version preference** — prefers Extended Mix over Original Mix over
   everything else, and can periodically re-search downloaded tracks for a
