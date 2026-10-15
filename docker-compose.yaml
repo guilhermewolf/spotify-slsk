@@ -26,7 +26,7 @@ services:
     user: "${PUID:-1000}:${PGID:-1000}"
 
   slskd:
-    image: slskd/slskd:0.23.1
+    image: slskd/slskd:0.26.1
     env_file:
       - .env
     volumes:

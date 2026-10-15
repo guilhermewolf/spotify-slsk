@@ -33,6 +33,8 @@ __pycache__/
 .cache
 .claude/
 graphify-out/
+# Local reference checkouts of other projects.
+Lidarr/
 
 # Development-only files — not needed at runtime
 tests/

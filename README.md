@@ -39,7 +39,7 @@ dashboard for adding playlists, watching progress and retrying what failed.
 
 ## Requirements
 
-- Docker and Docker Compose (recommended), or Python 3.11+
+- Docker and Docker Compose (recommended), or Python 3.12+
 - A running [`slskd`](https://github.com/slskd/slskd) instance and a Soulseek account
 - Spotify API credentials (client ID/secret) — playlists must be public
 
@@ -82,6 +82,40 @@ overrides the environment variable and changes apply on the next cycle:
 `SLSKD_MIN_EFFECTIVE_MP3_KBPS`, `SLSKD_EARLY_STOP_RESPONSES`,
 `SLSKD_MAX_DURATION_DIFF_SECONDS`, `SLSKD_WAIT_TIMEOUT`,
 `HISTORY_RETENTION_DAYS`, `UPGRADE_CHECK_INTERVAL_HOURS`.
+
+## Upgrading slskd to 0.26
+
+The bundled compose files now pin `slskd/slskd:0.26.1` (previously 0.23.1).
+slskd 0.26 **refuses to start** with a 0.23-era `slskd.yml`, because config
+keys moved ([slskd#1672](https://github.com/slskd/slskd/pull/1672)). Before
+upgrading, edit `slsk_app/slskd.yml`:
+
+| 0.23 key | 0.26 key |
+|---|---|
+| `global.upload` / `global.limits` / `global.download` | `transfers.upload` (with `limits` nested under it) / `transfers.download` |
+| `groups` | `transfers.groups` |
+| `integration` (webhooks, scripts, ...) | `integrations` |
+| `permissions.file.mode` | `transfers.download.destination.permissions.mode` |
+
+For example:
+
+```yaml
+# 0.23                         # 0.26
+global:                        transfers:
+  upload:                        upload:
+    slots: 20                      slots: 20
+  download:                      download:
+    slots: 500                     slots: 500
+groups: { ... }                  groups: { ... }
+integration: { ... }           integrations: { ... }
+```
+
+Compare against slskd's
+[example config for 0.26.1](https://github.com/slskd/slskd/blob/0.26.1/config/slskd.example.yml)
+if slskd still logs a configuration error. Nothing changes on the
+spotify-slsk side: the transfer states it reads (`Completed, Succeeded`,
+`Queued, Remotely`, ...) are the same, and they are pinned by
+`tests/test_slskd_contract.py`.
 
 ## Security
 
