@@ -178,3 +178,89 @@ def get_search_history(track_id: str) -> list:
     with _search_lock:
         bucket = _search_history.get(track_id)
         return list(bucket) if bucket else []
+
+
+# --- interactive search (track page) ---------------------------------------
+#
+# One slskd search per (playlist_id, track_id) at a time, run on a web-UI
+# background thread. Results live here only — ephemeral, like the search
+# history — and expire after INTERACTIVE_TTL_SECONDS.
+
+INTERACTIVE_TTL_SECONDS = 600
+# A search thread that never reported back (crash, hung slskd) stops
+# blocking a new one after this long.
+INTERACTIVE_STALE_SECONDS = 900
+
+_interactive_lock = threading.Lock()
+_interactive: dict = {}
+
+
+def _expired(entry: dict, now: float) -> bool:
+    if entry["status"] == "running":
+        return now - entry["started"] > INTERACTIVE_STALE_SECONDS
+    return now - entry["finished"] > INTERACTIVE_TTL_SECONDS
+
+
+def start_interactive_search(key) -> bool:
+    """Claim the slot for ``key``. False if a search is already running."""
+    now = time.time()
+    with _interactive_lock:
+        for k in [k for k, e in _interactive.items() if _expired(e, now)]:
+            del _interactive[k]
+        current = _interactive.get(key)
+        if current is not None and current["status"] == "running":
+            return False
+        _interactive[key] = {
+            "status": "running",
+            "started": now,
+            "finished": None,
+            "results": [],
+            "error": None,
+        }
+        return True
+
+
+def finish_interactive_search(key, results=None, error=None) -> None:
+    with _interactive_lock:
+        entry = _interactive.get(key)
+        if entry is None:
+            return
+        entry.update(
+            status="error" if error else "done",
+            finished=time.time(),
+            results=list(results or []),
+            error=error,
+        )
+
+
+def get_interactive_search(key):
+    """Snapshot of the search for ``key``, or None if absent/expired."""
+    with _interactive_lock:
+        entry = _interactive.get(key)
+        if entry is None:
+            return None
+        if _expired(entry, time.time()):
+            del _interactive[key]
+            return None
+        return dict(entry)
+
+
+# --- manual grabs: web UI -> daemon thread ---------------------------------
+#
+# The UI never downloads or writes the DB for a grab itself; it queues a
+# request and wakes the daemon, which owns files and the DB writer.
+
+_grab_lock = threading.Lock()
+_grab_queue: deque = deque(maxlen=100)
+
+
+def enqueue_manual_grab(request: dict) -> None:
+    with _grab_lock:
+        _grab_queue.append(dict(request))
+
+
+def pop_manual_grabs() -> list:
+    with _grab_lock:
+        items = list(_grab_queue)
+        _grab_queue.clear()
+    return items

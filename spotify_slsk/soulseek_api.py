@@ -110,15 +110,20 @@ def _interruptible_sleep(seconds: float) -> bool:
     return _shutdown_event.wait(seconds)
 
 
+def new_client():
+    """Build a fresh SlskdClient from env."""
+    return slskd_api.SlskdClient(
+        host=os.getenv("SLSKD_HOST_URL", "http://slskd:5030"),
+        api_key=os.getenv("SLSKD_API_KEY"),
+        url_base=os.getenv("SLSKD_URL_BASE", ""),
+    )
+
+
 def get_client():
-    """Lazily build and cache the SlskdClient. Reads env at first call."""
+    """Lazily build and cache the daemon's SlskdClient. Reads env at first call."""
     global _client
     if _client is None:
-        _client = slskd_api.SlskdClient(
-            host=os.getenv("SLSKD_HOST_URL", "http://slskd:5030"),
-            api_key=os.getenv("SLSKD_API_KEY"),
-            url_base=os.getenv("SLSKD_URL_BASE", ""),
-        )
+        _client = new_client()
     return _client
 
 
@@ -189,13 +194,14 @@ def _build_search_queries(artist: str, title: str, album: str | None = None) -> 
     return queries
 
 
-def _run_one_search(query: str, timeout: int = 60) -> list:
+def _run_one_search(query: str, timeout: int = 60, client=None) -> list:
     """Run a single slskd search to completion and return its responses.
 
     Returns [] on timeout, error, or shutdown. Always cleans up the slskd-side
     search record in the finally block so we don't leak ids on the daemon.
+    `client` defaults to the daemon's shared client.
     """
-    client = get_client()
+    client = client or get_client()
     logging.info(f"Searching for: {query}")
     search_id = None
     try:
@@ -543,6 +549,36 @@ def sort_candidates(candidates):
             -(c.get("user_upload_speed") or 0),
         ),
     )
+
+
+def interactive_search(
+    artist, title, album=None, duration_ms=None, is_blocked=None, timeout=60
+):
+    """Read-only search for the track page: walk the whole query waterfall,
+    evaluate every file, and return them all — accepted first in auto-pick
+    order, then rejected — de-duplicated by (user, filename).
+
+    Runs on a web-UI thread, so it uses its own slskd client rather than
+    sharing the daemon's requests session, and never touches the DB.
+    """
+    client = new_client()
+    seen = set()
+    evaluated = []
+    for query in _build_search_queries(artist, title, album):
+        results = _run_one_search(query, timeout, client=client)
+        for c in evaluate_candidates(
+            results or [],
+            title,
+            artist,
+            expected_duration_ms=duration_ms,
+            is_blocked=is_blocked,
+        ):
+            key = (c["user"], c["filename"])
+            if key not in seen:
+                seen.add(key)
+                evaluated.append(c)
+    accepted = sort_candidates([c for c in evaluated if c["accepted"]])
+    return accepted + [c for c in evaluated if not c["accepted"]]
 
 
 def find_file_in_downloads(filename, base_dir=None):

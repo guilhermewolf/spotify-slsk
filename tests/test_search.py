@@ -743,3 +743,24 @@ class TestBlocklistFiltering:
         soulseek_api.download_and_verify(results, "Lose Yourself", "Eminem", conn, "pl_x", "t1")
         assert enqueued == []
         conn.close()
+
+
+class TestInteractiveSearch:
+    def test_collects_all_queries_accepted_first_and_deduped(self, monkeypatch):
+        monkeypatch.setattr(soulseek_api, "new_client", lambda: object())
+        good = {"filename": "Eminem - Lose Yourself.flac", "size": 1, "bitrate": 1411, "length": 300}
+        bad = {"filename": "Eminem - Lose Yourself.wma", "size": 1, "bitrate": 320, "length": 300}
+        mp3 = {"filename": "Eminem - Lose Yourself.mp3", "size": 12_000_000, "bitrate": 320, "length": 300}
+        calls = []
+
+        def fake(query, timeout=60, client=None):
+            calls.append(query)
+            # Same files on every query: must be de-duplicated.
+            return [{"username": "u", "uploadSpeed": 1, "files": [bad, mp3, good]}]
+
+        monkeypatch.setattr(soulseek_api, "_run_one_search", fake)
+        out = soulseek_api.interactive_search("Eminem", "Lose Yourself")
+        assert len(calls) == len(soulseek_api._build_search_queries("Eminem", "Lose Yourself"))
+        assert [(c["ext"], c["accepted"]) for c in out] == [
+            (".flac", True), (".mp3", True), (".wma", False),
+        ]

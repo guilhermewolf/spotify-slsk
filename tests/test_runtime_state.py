@@ -166,3 +166,26 @@ class TestLoggingWiring:
             assert any("wiring probe" in e["message"] for e in after["entries"])
         finally:
             root.handlers, root.level = saved_handlers, saved_level
+
+
+class TestInteractiveSearchState:
+    def test_one_search_per_key_and_expiry(self, monkeypatch):
+        key = ("pid", "t-int")
+        assert runtime_state.start_interactive_search(key)
+        assert not runtime_state.start_interactive_search(key), "second concurrent search refused"
+        assert runtime_state.get_interactive_search(key)["status"] == "running"
+        runtime_state.finish_interactive_search(key, results=[{"x": 1}])
+        snap = runtime_state.get_interactive_search(key)
+        assert snap["status"] == "done" and snap["results"] == [{"x": 1}]
+        assert runtime_state.start_interactive_search(key), "a finished search can be re-run"
+        runtime_state.finish_interactive_search(key, error="boom")
+        later = runtime_state.time.time() + runtime_state.INTERACTIVE_TTL_SECONDS + 1
+        monkeypatch.setattr(runtime_state.time, "time", lambda: later)
+        assert runtime_state.get_interactive_search(key) is None
+
+    def test_grab_queue_drains(self):
+        runtime_state.pop_manual_grabs()
+        runtime_state.enqueue_manual_grab({"track_id": "a"})
+        runtime_state.enqueue_manual_grab({"track_id": "b"})
+        assert [g["track_id"] for g in runtime_state.pop_manual_grabs()] == ["a", "b"]
+        assert runtime_state.pop_manual_grabs() == []

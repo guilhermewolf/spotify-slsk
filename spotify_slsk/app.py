@@ -21,6 +21,7 @@ from .db import (
     record_history,
     prune_history,
     get_pending_tracks,
+    get_track,
     get_playlist_meta,
     upsert_playlist_meta,
     list_playlists,
@@ -1207,6 +1208,58 @@ def _run_upgrade_pass(conn, playlist_name):
             mark_upgrade_checked(conn, playlist_name, track.id)
 
 
+def _process_manual_grabs(conn):
+    """Download grabs queued from the track page's interactive search.
+
+    Runs on the daemon thread so only it writes files and the DB. Reuses
+    the automatic path: grab_candidate (tried/blocklist/history on
+    failure) then process_downloaded_file (tag check, move, import). A
+    manual failure does not count toward the track's attempts.
+    """
+    for req in runtime_state.pop_manual_grabs():
+        if _shutdown.is_set():
+            return
+        table_name, candidate = req["table_name"], req["candidate"]
+        row = get_track(conn, table_name, req["track_id"])
+        if not row:
+            continue
+        track = Track(
+            row["id"], row["name"], row["artists"], row["album"], table_name,
+            duration_ms=row["duration_ms"],
+        )
+        _touch_heartbeat()
+        runtime_state.set_activity(
+            "downloading",
+            detail=f"Manual grab: {track.name} — {track.artist}",
+            playlist_id=req["playlist_id"],
+            table_name=table_name,
+            track_id=track.id,
+            track_name=track.name,
+            track_artist=track.artist,
+        )
+        try:
+            file_path = soulseek_api.grab_candidate(
+                candidate, conn, table_name, track.id, source="manual"
+            )
+            if not file_path:
+                continue
+            verified, final_path = process_downloaded_file(
+                file_path, table_name, conn, expected_track=track, source=candidate
+            )
+            if not verified:
+                continue
+            clear_tried_entries(conn, table_name, track.id)
+            old = row["path"]
+            if old and os.path.isfile(old) and os.path.abspath(old) != os.path.abspath(final_path):
+                os.remove(old)
+                record_history(
+                    conn, "deleted_file", table_name=table_name, track_id=track.id,
+                    path=old, reason="replaced by manual grab",
+                )
+        except Exception:
+            logging.exception(f"Manual grab failed for {track.id} in {table_name}")
+
+
 def _run_startup_reconciliation(sp, conn):
     """Run the one-shot on-disk reconciliation once per daemon start."""
     for pl in list_playlists(conn, only_enabled=True):
@@ -1349,12 +1402,15 @@ def main():
                 "tracks_failed": 0,
             }
             try:
+                _process_manual_grabs(conn)
                 for pl in playlists:
                     if _shutdown.is_set():
                         break
                     counters = process_playlist(
                         sp, conn, pl["playlist_id"], ntfy_url, ntfy_topic
                     )
+                    # Between playlists too: a grab shouldn't wait a full cycle.
+                    _process_manual_grabs(conn)
                     if counters:
                         for k in cycle_totals:
                             cycle_totals[k] += counters.get(k, 0)

@@ -499,3 +499,44 @@ class TestHistoryEvents:
             "Mat Joe", "Heart To Find", conn, "pl_x", "t1", max_version_tier=1
         )
         assert db.list_history(conn) == []
+
+
+class TestManualGrabs:
+    def test_daemon_downloads_and_imports_a_queued_grab(self, conn, monkeypatch, sandbox_dirs):
+        from spotify_slsk import runtime_state, soulseek_api
+        downloads, playlists = sandbox_dirs
+        _seed(conn)
+        _stub_metadata(monkeypatch, "Heart To Find", "Mat Joe")
+        src = downloads / "Mat Joe - Heart To Find.flac"
+        src.write_bytes(b"audio")
+        seen = {}
+
+        def fake_grab(candidate, c, table, tid, source="auto"):
+            seen.update(table=table, tid=tid, source=source)
+            return str(src)
+
+        monkeypatch.setattr(soulseek_api, "grab_candidate", fake_grab)
+        runtime_state.pop_manual_grabs()
+        runtime_state.enqueue_manual_grab({
+            "playlist_id": "pid", "table_name": "pl_x", "track_id": "t1",
+            "candidate": {"user": "peer", "filename": "Mat Joe - Heart To Find.flac", "size": 5},
+        })
+
+        app._process_manual_grabs(conn)
+
+        assert seen == {"table": "pl_x", "tid": "t1", "source": "manual"}
+        row = db.get_track(conn, "pl_x", "t1")
+        assert row["downloaded"] is True
+        assert row["path"] == str(playlists / "pl_x" / "Mat Joe - Heart To Find.flac")
+        assert runtime_state.pop_manual_grabs() == []
+
+    def test_failed_manual_grab_does_not_count_an_attempt(self, conn, monkeypatch):
+        from spotify_slsk import runtime_state, soulseek_api
+        _seed(conn)
+        monkeypatch.setattr(soulseek_api, "grab_candidate", lambda *a, **k: None)
+        runtime_state.enqueue_manual_grab({
+            "playlist_id": "pid", "table_name": "pl_x", "track_id": "t1",
+            "candidate": {"user": "peer", "filename": "x.flac", "size": 5},
+        })
+        app._process_manual_grabs(conn)
+        assert db.get_track(conn, "pl_x", "t1")["attempts"] == 0

@@ -74,6 +74,18 @@
 </form>
 {% endif %}
 
+<h2 style="font-size:1.05rem;margin-top:2rem;">Interactive search</h2>
+<form method="POST"
+      action="{{ url_for('interactive_search_start', playlist_id=playlist_id, track_id=track.id) }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <button type="submit" class="secondary outline" style="width:auto"
+          {% if search and search.status == 'running' %}disabled{% endif %}>Search slskd now</button>
+  <small class="subtle">
+    Lists every file found, including rejected ones and why. Grabbing hands the file to the daemon.
+  </small>
+</form>
+{% with track_id = track.id %}{% include "_interactive.html" %}{% endwith %}
+
 {% if search_history %}
 <h2 style="font-size:1.05rem;margin-top:2rem;">Recent slskd searches</h2>
 <p class="subtle">
