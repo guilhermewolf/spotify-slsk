@@ -1249,8 +1249,17 @@ def _process_manual_grabs(conn):
             if not verified:
                 continue
             clear_tried_entries(conn, table_name, track.id)
+            # process_downloaded_file matches by tags across the whole
+            # playlist, so the file may have been filed under another track.
+            # Only replace this track's old file if the import landed here.
+            imported = get_track(conn, table_name, track.id) or {}
             old = row["path"]
-            if old and os.path.isfile(old) and os.path.abspath(old) != os.path.abspath(final_path):
+            if (
+                imported.get("path") == final_path
+                and old
+                and os.path.isfile(old)
+                and os.path.abspath(old) != os.path.abspath(final_path)
+            ):
                 os.remove(old)
                 record_history(
                     conn, "deleted_file", table_name=table_name, track_id=track.id,

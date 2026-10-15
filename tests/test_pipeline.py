@@ -540,3 +540,23 @@ class TestManualGrabs:
         })
         app._process_manual_grabs(conn)
         assert db.get_track(conn, "pl_x", "t1")["attempts"] == 0
+
+    def test_manual_grab_replaces_old_file_only_for_its_own_track(self, conn, monkeypatch, sandbox_dirs):
+        from spotify_slsk import runtime_state, soulseek_api
+        downloads, playlists = sandbox_dirs
+        _seed(conn)
+        _seed(conn, "t2", name="Another Song", artists="Someone")
+        old = playlists / "old.flac"
+        old.write_bytes(b"old")
+        db.update_download_status(conn, "t1", "pl_x", success=True, file_path=str(old))
+        # The grabbed file's tags match t2, not t1.
+        _stub_metadata(monkeypatch, "Another Song", "Someone")
+        src = downloads / "Someone - Another Song.flac"
+        src.write_bytes(b"audio")
+        monkeypatch.setattr(soulseek_api, "grab_candidate", lambda *a, **k: str(src))
+        runtime_state.enqueue_manual_grab({
+            "playlist_id": "pid", "table_name": "pl_x", "track_id": "t1",
+            "candidate": {"user": "peer", "filename": "x.flac", "size": 5},
+        })
+        app._process_manual_grabs(conn)
+        assert old.exists(), "t1's file must survive a grab that imported as t2"
