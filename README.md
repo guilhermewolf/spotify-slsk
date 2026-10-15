@@ -18,11 +18,20 @@ dashboard for adding playlists, watching progress and retrying what failed.
   better version.
 - **Metadata tagging** — writes title/artist/album with `mutagen`, then moves
   the file into `/playlists/<playlist>/`.
+- **Duration-aware matching** — candidates whose length differs from Spotify's
+  by more than `SLSKD_MAX_DURATION_DIFF_SECONDS` are skipped, and an untagged
+  download is accepted only if its filename and real duration both match.
 - **Retry and back-off** — a track that fails twice is suspended for two days
   rather than retried forever; rejected filenames are remembered so the same bad
   file isn't downloaded again.
-- **Web dashboard** — library totals, per-playlist progress, per-track status
-  and history, manual retry, and editable settings that apply without a restart.
+- **Blocklist** — peer files that fail to transfer or are rejected after
+  download are skipped for every track; whole users can be banned from the UI.
+- **History** — every grab, import, failure, upgrade and retry is kept for
+  `HISTORY_RETENTION_DAYS`, with a filterable history page.
+- **Web dashboard** — library totals, per-playlist progress, per-track status,
+  why each search result was rejected, interactive search with manual grab, a
+  Wanted page with bulk re-search, manual retry, and editable settings that
+  apply without a restart.
 - **Health** — `/healthz` plus a Docker `HEALTHCHECK` fed by a heartbeat file.
 - **ntfy notifications** — optional; silently skipped when unconfigured.
 
@@ -69,7 +78,8 @@ These are also editable from the **Settings** page, where the database value
 overrides the environment variable and changes apply on the next cycle:
 `MIN_MATCH_SCORE`, `SLSKD_PREFERRED_FORMATS`, `SLSKD_MIN_PEER_UPLOAD_SPEED`,
 `SLSKD_MIN_EFFECTIVE_MP3_KBPS`, `SLSKD_EARLY_STOP_RESPONSES`,
-`SLSKD_WAIT_TIMEOUT`, `UPGRADE_CHECK_INTERVAL_HOURS`.
+`SLSKD_MAX_DURATION_DIFF_SECONDS`, `SLSKD_WAIT_TIMEOUT`,
+`HISTORY_RETENTION_DAYS`, `UPGRADE_CHECK_INTERVAL_HOURS`.
 
 ## Security
 
