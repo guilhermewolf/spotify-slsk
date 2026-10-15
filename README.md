@@ -132,7 +132,7 @@ database and music library out of the image — do not remove it.
 ## Development
 
 ```bash
-python3 -m venv .venv
+python3.12 -m venv .venv
 make install PYTHON=.venv/bin/python
 make check   PYTHON=.venv/bin/python
 
@@ -140,12 +140,13 @@ make check   PYTHON=.venv/bin/python
 .venv/bin/python -m spotify_slsk
 ```
 
-The application lives in the `spotify_slsk/` package; `tests/` sits alongside
-it. Run from the repo root — the SQLite path is resolved relative to the
+The application lives in the `spotify_slsk/` package (`daemon.py` is the
+entrypoint; `spotify/`, `slskd/`, `matching/`, `importer/`, `library/`, `db/` and
+`webui/` hold the rest — CLAUDE.md has the map); `tests/` sits alongside it. Run from the repo root — the SQLite path is resolved relative to the
 working directory.
 
-`make check` runs the same compile, lint, test and dependency-audit steps as
-CI. The test suite is hermetic: `tests/conftest.py` forces fake credentials, an
+`make check` runs the same compile, lint (ruff), typecheck (mypy), test and
+dependency-audit steps as CI, on Python 3.12. The test suite is hermetic: `tests/conftest.py` forces fake credentials, an
 unreachable slskd host and temporary download/playlist directories, and makes a
 real slskd client or outbound HTTP request raise. It cannot touch your library
 or your database.
