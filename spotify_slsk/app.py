@@ -13,6 +13,7 @@ from .db import (
     create_table,
     insert_track,
     fetch_all_tracks,
+    backfill_durations,
     update_download_status,
     clear_tried_entries,
     add_tried_file,
@@ -34,6 +35,7 @@ from mutagen.aiff import AIFF
 from mutagen.mp3 import MP3
 from .utils import sanitize_table_name, get_playlist_id
 from spotipy.oauth2 import SpotifyClientCredentials
+from . import soulseek_api
 from .soulseek_api import (
     search_and_download,
     get_client as get_slskd_client,
@@ -150,19 +152,24 @@ def fetch_and_compare_tracks(conn, playlist_id, sp):
 
     db_tracks = {track[0]: track for track in fetch_all_tracks(conn, table_name)}
     new_tracks = []
+    known_durations = []
 
     for item in items:
         track = item.get("track")
         if not track or not track.get("id"):
             continue
         artists_str = extract_artists_string(track)
+        duration_ms = track.get("duration_ms")
 
-        if track["id"] not in db_tracks:
+        if track["id"] in db_tracks:
+            known_durations.append((track["id"], duration_ms))
+        else:
             track_data = (
                 track["id"],
                 track["name"],
                 artists_str,
                 track["album"]["name"],
+                duration_ms,
             )
             insert_track(conn, table_name, track_data)
             logging.info(
@@ -176,8 +183,13 @@ def fetch_and_compare_tracks(conn, playlist_id, sp):
                     artists_str,
                     track["album"]["name"],
                     playlist_id,
+                    duration_ms=duration_ms,
                 )
             )
+
+    # Rows inserted before schema v5 have no duration; fill them in.
+    if known_durations:
+        backfill_durations(conn, table_name, known_durations)
 
     # Only stamp the new snapshot after we've successfully inserted the diff,
     # so a crash mid-sync retries next cycle.
@@ -250,32 +262,101 @@ def find_closest_db_match(conn, table_name: str, file_title: str, file_artist: s
 
     return (*best_row, best_score, best_reason)
 
-def process_downloaded_file(file_path, playlist_name, conn, reconcile: bool = False):
+def _audio_length_seconds(file_path):
+    """Actual audio duration via mutagen, or None if unreadable."""
+    try:
+        mf = MutagenFile(file_path)
+        if mf is not None and mf.info is not None and mf.info.length:
+            return float(mf.info.length)
+    except Exception as e:
+        logging.debug(f"Could not read duration of {file_path}: {e}")
+    return None
+
+
+def _fallback_match_untagged(file_path, expected_track):
+    """Decide whether an untagged download is the track we asked slskd for.
+
+    Used only when the file has no title/artist tags. Both must hold:
+    the slskd filename (plus its parent folder as an artist hint) scores
+    at least MIN_MATCH_SCORE against the expected track, AND the file's
+    real duration is within SLSKD_MAX_DURATION_DIFF_SECONDS of Spotify's.
+    Unknown durations, or a disabled duration check (0), mean no.
+    Returns (ok, reason).
+    """
+    tolerance = soulseek_api.MAX_DURATION_DIFF_SECONDS
+    if tolerance <= 0:
+        return False, "missing tags (duration check disabled)"
+    if not expected_track.duration_ms:
+        return False, "missing tags (no Spotify duration)"
+    stem = os.path.splitext(os.path.basename(file_path))[0]
+    artist_guess, title_guess = _derive_artist_title_from_stem(stem)
+    if not artist_guess:
+        artist_guess = os.path.basename(os.path.dirname(file_path))
+    score, _ = score_track_match(
+        title_guess, artist_guess, expected_track.name, expected_track.artist
+    )
+    if score < MIN_MATCH_SCORE:
+        return False, f"missing tags; filename score {score:.2f} < {MIN_MATCH_SCORE}"
+    length = _audio_length_seconds(file_path)
+    if length is None:
+        return False, "missing tags; unreadable duration"
+    expected = expected_track.duration_ms / 1000.0
+    if abs(length - expected) > tolerance:
+        return False, (
+            f"missing tags; duration {soulseek_api.fmt_duration(length)} "
+            f"vs {soulseek_api.fmt_duration(expected)}"
+        )
+    return True, None
+
+
+def process_downloaded_file(
+    file_path, playlist_name, conn, reconcile: bool = False, expected_track=None
+):
     """
     Process a file that is either freshly downloaded or already on disk.
 
     When reconcile=True:
       - Never delete files on mismatch.
       - If the file already lives in /playlists/<playlist_name>, don't move it again.
+
+    `expected_track` is the Track the download was for. When given and the
+    file has no title/artist tags, the filename + real duration are checked
+    against it (see _fallback_match_untagged) instead of rejecting outright.
     """
     title, artist, album = extract_metadata_from_file(file_path)
 
     if not title or not artist:
-        logging.warning(f"❌ Missing metadata for {file_path}. Skipping tagging and DB update.")
-        _reject_and_log(file_path, playlist_name, conn, reason="invalid metadata", destructive=not reconcile)
-        return False, None
+        ok, reason = (
+            _fallback_match_untagged(file_path, expected_track)
+            if expected_track is not None and not reconcile
+            else (False, "invalid metadata")
+        )
+        if not ok:
+            logging.warning(f"❌ Rejecting {file_path}: {reason}")
+            _reject_and_log(
+                file_path, playlist_name, conn,
+                track_id=expected_track.id if expected_track is not None else None,
+                reason=reason, destructive=not reconcile,
+            )
+            return False, None
+        logging.info(
+            f"Untagged file accepted by filename + duration: {file_path}"
+        )
+        track_id = expected_track.id
+        title, artist, album = expected_track.name, expected_track.artist, None
+        db_album = expected_track.album
+    else:
+        # Route through the robust scorer (via wrapper)
+        match, score = find_closest_match(conn, playlist_name, title, artist)
+        if not match:
+            _reject_and_log(file_path, playlist_name, conn, reason="no match", destructive=not reconcile)
+            return False, None
 
-    # Route through the robust scorer (via wrapper)
-    match, score = find_closest_match(conn, playlist_name, title, artist)
-    if not match:
-        _reject_and_log(file_path, playlist_name, conn, reason="no match", destructive=not reconcile)
-        return False, None
-
-    track_id, db_title, db_artist, db_album = match
-    if score < MIN_MATCH_SCORE:
-        logging.warning(f"⚠️ Low match score ({score:.2f}) for {title} by {artist}. Skipping update.")
-        _reject_and_log(file_path, playlist_name, conn, track_id=track_id, reason="low score", destructive=not reconcile)
-        return False, None
+        track_id, db_title, db_artist, db_album = match
+        if score < MIN_MATCH_SCORE:
+            logging.warning(f"⚠️ Low match score ({score:.2f}) for {title} by {artist}. Skipping update.")
+            _reject_and_log(file_path, playlist_name, conn, track_id=track_id, reason="low score", destructive=not reconcile)
+            return False, None
 
     # Fall back to the Spotify-known album when the downloaded file has no
     # album tag (observed during Phase B testing: downloaded MP3 had no TALB).
@@ -961,10 +1042,13 @@ def handle_track_download(track, playlist_name, conn):
         playlist_name=playlist_name,
         track_id=track.id,
         album=track.album,
+        duration_ms=track.duration_ms,
     )
 
     if file_path:
-        verified, _final_path = process_downloaded_file(file_path, playlist_name, conn)
+        verified, _final_path = process_downloaded_file(
+            file_path, playlist_name, conn, expected_track=track
+        )
         if verified:
             clear_tried_entries(conn, playlist_name, track.id)
             return True
@@ -1002,12 +1086,15 @@ def try_upgrade_track(track, playlist_name, conn, current_path):
         track_id=track.id,
         album=track.album,
         max_version_tier=current_tier,
+        duration_ms=track.duration_ms,
     )
     if not new_file:
         logging.info(f"[upgrade] No better-tier candidate for '{track.name}'")
         return False
 
-    verified, final_path = process_downloaded_file(new_file, playlist_name, conn)
+    verified, final_path = process_downloaded_file(
+        new_file, playlist_name, conn, expected_track=track
+    )
     if not verified or not final_path:
         return False
 

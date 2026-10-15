@@ -339,3 +339,91 @@ class TestStartupReconciliation:
         app.startup_check(conn, "pl_x")
 
         assert writes == [], "re-wrote a row whose stored path was already correct"
+
+
+class TestDurationSync:
+    def test_new_tracks_store_duration_and_old_rows_are_backfilled(self, conn):
+        _seed(conn, "old")  # pre-v5 row: no duration
+        db.upsert_playlist_meta(conn, "pid", "pl_x", "X", None)
+        old, new = _item("old"), _item("new")
+        old["track"]["duration_ms"] = 200_000
+        new["track"]["duration_ms"] = 242_000
+        sp = _FakeSpotify("X", "snap", [old, new])
+
+        new_tracks, _ = app.fetch_and_compare_tracks(conn, "pid", sp)
+
+        assert new_tracks[0].duration_ms == 242_000
+        assert db.get_track(conn, "pl_x", "new")["duration_ms"] == 242_000
+        assert db.get_track(conn, "pl_x", "old")["duration_ms"] == 200_000
+        assert db.get_pending_tracks(conn, "pl_x")[0].duration_ms is not None
+
+
+class TestUntaggedFallback:
+    """An untagged download is accepted only if the slskd filename AND the
+    real audio duration both match the track that was requested."""
+
+    def _track(self, duration_ms=242_000):
+        from spotify_slsk.models import Track
+        return Track("t1", "Heart To Find", "Mat Joe", "Alb", "pl_x", duration_ms=duration_ms)
+
+    def _setup(self, conn, monkeypatch, sandbox_dirs, filename, length):
+        from spotify_slsk import soulseek_api
+        downloads, playlists = sandbox_dirs
+        _seed(conn)
+        _stub_metadata(monkeypatch, None, None)
+        monkeypatch.setattr(app, "_audio_length_seconds", lambda p: length)
+        monkeypatch.setattr(soulseek_api, "MAX_DURATION_DIFF_SECONDS", 15)
+        monkeypatch.setattr(app, "MIN_MATCH_SCORE", 0.62)
+        src = downloads / filename
+        src.write_bytes(b"audio")
+        return src, playlists
+
+    def test_accepts_when_filename_and_duration_match(self, conn, monkeypatch, sandbox_dirs):
+        src, playlists = self._setup(
+            conn, monkeypatch, sandbox_dirs, "Mat Joe - Heart To Find.flac", 245.0
+        )
+        ok, final = app.process_downloaded_file(
+            str(src), "pl_x", conn, expected_track=self._track()
+        )
+        assert ok is True
+        assert final == str(playlists / "pl_x" / "Mat Joe - Heart To Find.flac")
+        assert db.get_track(conn, "pl_x", "t1")["downloaded"] is True
+
+    def test_rejects_and_deletes_on_duration_mismatch(self, conn, monkeypatch, sandbox_dirs):
+        src, _ = self._setup(
+            conn, monkeypatch, sandbox_dirs, "Mat Joe - Heart To Find.flac", 120.0
+        )
+        ok, _ = app.process_downloaded_file(
+            str(src), "pl_x", conn, expected_track=self._track()
+        )
+        assert ok is False
+        assert not src.exists()
+        assert db.get_track(conn, "pl_x", "t1")["downloaded"] is False
+        assert "Mat Joe - Heart To Find.flac" in db.get_tried_files(conn, "pl_x", "t1")
+
+    def test_rejects_on_filename_mismatch(self, conn, monkeypatch, sandbox_dirs):
+        src, _ = self._setup(
+            conn, monkeypatch, sandbox_dirs, "Other Guy - Something Else.flac", 242.0
+        )
+        ok, _ = app.process_downloaded_file(
+            str(src), "pl_x", conn, expected_track=self._track()
+        )
+        assert ok is False and not src.exists()
+
+    def test_rejects_without_spotify_duration(self, conn, monkeypatch, sandbox_dirs):
+        src, _ = self._setup(
+            conn, monkeypatch, sandbox_dirs, "Mat Joe - Heart To Find.flac", 242.0
+        )
+        ok, _ = app.process_downloaded_file(
+            str(src), "pl_x", conn, expected_track=self._track(duration_ms=None)
+        )
+        assert ok is False
+
+    def test_reconcile_never_uses_fallback_or_deletes(self, conn, monkeypatch, sandbox_dirs):
+        src, _ = self._setup(
+            conn, monkeypatch, sandbox_dirs, "Mat Joe - Heart To Find.flac", 242.0
+        )
+        ok, _ = app.process_downloaded_file(
+            str(src), "pl_x", conn, reconcile=True, expected_track=self._track()
+        )
+        assert ok is False and src.exists()

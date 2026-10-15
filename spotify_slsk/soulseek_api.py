@@ -43,6 +43,9 @@ MIN_EFFECTIVE_MP3_KBPS = int(os.getenv("SLSKD_MIN_EFFECTIVE_MP3_KBPS", "280"))
 # Cut the slskd search short once we have this many responses. slskd will
 # keep collecting responses for the full searchTimeout window otherwise.
 EARLY_STOP_RESPONSES = int(os.getenv("SLSKD_EARLY_STOP_RESPONSES", "20"))
+# Reject a candidate whose slskd-reported length differs from Spotify's
+# duration by more than this many seconds. 0 disables the check.
+MAX_DURATION_DIFF_SECONDS = int(os.getenv("SLSKD_MAX_DURATION_DIFF_SECONDS", "15"))
 
 _client = None
 _shutdown_event = None
@@ -56,6 +59,7 @@ def refresh_from_db(conn) -> None:
     """
     global PREFERRED_FORMATS, MIN_PEER_UPLOAD_SPEED, MIN_EFFECTIVE_MP3_KBPS
     global EARLY_STOP_RESPONSES, EXTERNAL_PROCESS_WAIT_TIMEOUT
+    global MAX_DURATION_DIFF_SECONDS
 
     PREFERRED_FORMATS = _normalize_ext_list(
         get_setting(conn, "SLSKD_PREFERRED_FORMATS", DEFAULT_FORMATS)
@@ -72,6 +76,9 @@ def refresh_from_db(conn) -> None:
         )
         EXTERNAL_PROCESS_WAIT_TIMEOUT = int(
             get_setting(conn, "SLSKD_WAIT_TIMEOUT", "60")
+        )
+        MAX_DURATION_DIFF_SECONDS = int(
+            get_setting(conn, "SLSKD_MAX_DURATION_DIFF_SECONDS", "15")
         )
     except (TypeError, ValueError) as e:
         logging.warning(f"Bad numeric setting during refresh; using previous values: {e}")
@@ -314,6 +321,12 @@ def _version_tier(text: str) -> int:
     return 2
 
 
+def fmt_duration(seconds) -> str:
+    """Seconds -> "m:ss"."""
+    seconds = int(round(seconds or 0))
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
 def _effective_mp3_kbps(size_bytes, length_sec):
     if not size_bytes or not length_sec or length_sec <= 0:
         return None
@@ -330,6 +343,7 @@ def evaluate_candidates(
     min_title_score=80,
     min_artist_score=70,
     max_version_tier=None,
+    expected_duration_ms=None,
 ):
     """
     Judge every file in slskd search results against the expected track.
@@ -341,7 +355,8 @@ def evaluate_candidates(
     only when we *know* quality is too low.
 
     `max_version_tier`, when set, rejects anything not *strictly better*
-    (used by the upgrade pass).
+    (used by the upgrade pass). `expected_duration_ms` (Spotify) rejects
+    files whose reported length is more than MAX_DURATION_DIFF_SECONDS off.
     """
     evaluated = []
     expected_title_norm = " ".join(expected_title.lower().replace("-", " ").split())
@@ -403,6 +418,17 @@ def evaluate_candidates(
             ):
                 entry["reason"] = (
                     f"effective bitrate {effective_mp3} < {MIN_EFFECTIVE_MP3_KBPS}"
+                )
+            elif (
+                MAX_DURATION_DIFF_SECONDS > 0
+                and expected_duration_ms
+                and length_sec
+                and abs(length_sec - expected_duration_ms / 1000)
+                > MAX_DURATION_DIFF_SECONDS
+            ):
+                entry["reason"] = (
+                    f"duration {fmt_duration(length_sec)} vs "
+                    f"{fmt_duration(expected_duration_ms / 1000)}"
                 )
             if entry["reason"]:
                 logging.debug(f"Skipped {filename}: {entry['reason']}")
@@ -520,6 +546,7 @@ def download_and_verify(
     track_id,
     max_version_tier=None,
     evaluated=None,
+    expected_duration_ms=None,
 ):
     """Filter, sort, and try to download the best candidate from one search.
 
@@ -537,6 +564,7 @@ def download_and_verify(
             expected_title,
             expected_artist,
             max_version_tier=max_version_tier,
+            expected_duration_ms=expected_duration_ms,
         )
     candidates = [c for c in evaluated if c["accepted"]]
     if not candidates:
@@ -604,6 +632,7 @@ def search_and_download(
     album=None,
     max_version_tier=None,
     timeout=60,
+    duration_ms=None,
 ):
     """Run the full query waterfall, attempting download from each.
 
@@ -619,7 +648,11 @@ def search_and_download(
         results = _run_one_search(query, timeout)
         evaluated = (
             evaluate_candidates(
-                results, title, artist, max_version_tier=max_version_tier
+                results,
+                title,
+                artist,
+                max_version_tier=max_version_tier,
+                expected_duration_ms=duration_ms,
             )
             if results
             else []

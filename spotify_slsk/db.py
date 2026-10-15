@@ -3,7 +3,7 @@ import sqlite3
 import logging
 from .models import Track
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
@@ -24,6 +24,8 @@ def _ensure_schema_version(conn: sqlite3.Connection) -> None:
     """Bootstrap PRAGMA user_version so future migrations can diff cleanly."""
     try:
         current = conn.execute("PRAGMA user_version").fetchone()[0]
+        if current < 5:
+            _migrate_to_v5(conn)
         if current < SCHEMA_VERSION:
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.commit()
@@ -39,6 +41,35 @@ def _ensure_schema_version(conn: sqlite3.Connection) -> None:
             )
     except sqlite3.Error as e:
         logging.warning(f"Failed to read/set schema user_version: {e}")
+
+
+def _migrate_to_v5(conn: sqlite3.Connection) -> None:
+    """v5: per-playlist tables gain `duration_ms` (Spotify track length).
+
+    Every catalogued table is migrated here rather than lazily in
+    create_table, because the webui reads tables of playlists the daemon
+    hasn't synced since the upgrade (disabled ones, for instance). Stored
+    snapshots are cleared so the next sync re-reads every track and
+    backfills the new column; existing rows are NULL until then.
+    """
+    tables = [
+        r[0]
+        for r in conn.execute(
+            "SELECT DISTINCT m.table_name FROM playlists_meta m "
+            "JOIN sqlite_master s ON s.type = 'table' AND s.name = m.table_name"
+        )
+    ]
+    with conn:
+        for table_name in tables:
+            _add_duration_column(conn, table_name)
+        conn.execute("UPDATE playlists_meta SET snapshot_id = NULL")
+
+
+def _add_duration_column(conn: sqlite3.Connection, table_name: str) -> None:
+    cols = {row[1] for row in conn.execute(f'PRAGMA table_info("{table_name}")')}
+    if "duration_ms" not in cols:
+        conn.execute(f'ALTER TABLE "{table_name}" ADD COLUMN duration_ms INTEGER')
+        logging.info(f"Migrated {table_name}: added duration_ms column")
 
 
 def _ensure_playlists_meta_table(conn: sqlite3.Connection) -> None:
@@ -422,7 +453,7 @@ def list_tracks(conn, table_name: str) -> list:
     try:
         rows = conn.execute(
             f'SELECT id, name, artists, album, downloaded, path, attempts, '
-            f'last_attempt, suspended_until, CURRENT_TIMESTAMP '
+            f'last_attempt, suspended_until, CURRENT_TIMESTAMP, duration_ms '
             f'FROM "{table_name}" ORDER BY name COLLATE NOCASE'
         ).fetchall()
         result = []
@@ -437,6 +468,7 @@ def list_tracks(conn, table_name: str) -> list:
                 "attempts": r[6] or 0,
                 "last_attempt": r[7],
                 "suspended_until": r[8],
+                "duration_ms": r[10],
             }
             d["status"] = _track_status(d["downloaded"], d["attempts"], r[8], r[9])
             result.append(d)
@@ -451,7 +483,7 @@ def get_track(conn, table_name: str, track_id: str):
     try:
         r = conn.execute(
             f'SELECT id, name, artists, album, downloaded, path, attempts, '
-            f'last_attempt, suspended_until, CURRENT_TIMESTAMP '
+            f'last_attempt, suspended_until, CURRENT_TIMESTAMP, duration_ms '
             f'FROM "{table_name}" WHERE id = ?',
             (track_id,),
         ).fetchone()
@@ -467,6 +499,7 @@ def get_track(conn, table_name: str, track_id: str):
             "attempts": r[6] or 0,
             "last_attempt": r[7],
             "suspended_until": r[8],
+            "duration_ms": r[10],
         }
         d["status"] = _track_status(d["downloaded"], d["attempts"], r[8], r[9])
         return d
@@ -507,7 +540,8 @@ def create_table(conn, playlist_name):
                                         last_attempt TIMESTAMP,
                                         suspended_until TIMESTAMP,
                                         last_upgrade_check TIMESTAMP,
-                                        tried_files TEXT DEFAULT ''
+                                        tried_files TEXT DEFAULT '',
+                                        duration_ms INTEGER
                                     );"""
         cursor = conn.cursor()
         cursor.execute(sql_create_tracks_table)
@@ -520,6 +554,8 @@ def create_table(conn, playlist_name):
                     f'ALTER TABLE "{table_name}" ADD COLUMN last_upgrade_check TIMESTAMP'
                 )
             logging.info(f"Migrated {table_name}: added last_upgrade_check column")
+        with conn:
+            _add_duration_column(conn, table_name)
         create_tried_table(conn, playlist_name)
         cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_id ON {table_name} (id);")
         logging.info(f"Index on {table_name}(id) created or already exists.")
@@ -527,14 +563,30 @@ def create_table(conn, playlist_name):
         logging.error(f"Error creating table {table_name}: {e}")
 
 def insert_track(conn, playlist_name, track):
+    """Insert (id, name, artists, album[, duration_ms]); existing ids are kept."""
     table_name = playlist_name
-    sql = f'''INSERT OR IGNORE INTO {table_name}(id, name, artists, album) VALUES (?, ?, ?, ?)'''
+    track = tuple(track) + (None,) * (5 - len(track))
+    sql = f'''INSERT OR IGNORE INTO {table_name}(id, name, artists, album, duration_ms) VALUES (?, ?, ?, ?, ?)'''
     try:
         with conn:
             conn.execute(sql, track)
         logging.info(f"Inserted track into {table_name}: {track[1]} by {track[2]}")
     except sqlite3.Error as e:
         logging.error(f"Error inserting track into {table_name}: {e}")
+
+def backfill_durations(conn, table_name, durations) -> None:
+    """Fill duration_ms for rows that don't have it yet. `durations` is
+    an iterable of (track_id, duration_ms)."""
+    try:
+        with conn:
+            conn.executemany(
+                f'UPDATE "{table_name}" SET duration_ms = ? '
+                f'WHERE id = ? AND duration_ms IS NULL',
+                [(ms, tid) for tid, ms in durations if ms],
+            )
+    except sqlite3.Error as e:
+        logging.error(f"Error backfilling durations in {table_name}: {e}")
+
 
 def fetch_all_tracks(conn, playlist_name):
     table_name = playlist_name
@@ -651,13 +703,16 @@ def get_pending_tracks(conn, playlist_name: str) -> list:
     cursor = conn.cursor()
     try:
         cursor.execute(f"""
-            SELECT id, name, artists, album
+            SELECT id, name, artists, album, duration_ms
             FROM "{playlist_name}"
             WHERE downloaded = 0
               AND (suspended_until IS NULL OR suspended_until < CURRENT_TIMESTAMP)
         """)
         rows = cursor.fetchall()
-        return [Track(row[0], row[1], row[2], row[3], playlist_name) for row in rows]
+        return [
+            Track(row[0], row[1], row[2], row[3], playlist_name, duration_ms=row[4])
+            for row in rows
+        ]
     except sqlite3.Error as e:
         logging.error(f"Failed to fetch pending tracks from {playlist_name}: {e}")
         return []
@@ -675,7 +730,7 @@ def get_upgrade_candidates(conn, playlist_name: str, interval_hours: int) -> lis
     try:
         cursor = conn.cursor()
         cursor.execute(
-            f'SELECT id, name, artists, album, path FROM "{playlist_name}" '
+            f'SELECT id, name, artists, album, path, duration_ms FROM "{playlist_name}" '
             f'WHERE downloaded = 1 '
             f"AND (last_upgrade_check IS NULL "
             f"     OR last_upgrade_check < datetime('now', ?))",
@@ -683,7 +738,7 @@ def get_upgrade_candidates(conn, playlist_name: str, interval_hours: int) -> lis
         )
         rows = cursor.fetchall()
         return [
-            (Track(r[0], r[1], r[2], r[3], playlist_name), r[4])
+            (Track(r[0], r[1], r[2], r[3], playlist_name, duration_ms=r[5]), r[4])
             for r in rows
         ]
     except sqlite3.Error as e:

@@ -30,6 +30,7 @@ import requests
 
 from .. import db
 from .. import runtime_state
+from ..soulseek_api import fmt_duration
 from ..utils import get_playlist_id, sanitize_table_name
 
 
@@ -163,6 +164,7 @@ SETTINGS_SPEC = [
     ("SLSKD_MIN_PEER_UPLOAD_SPEED", "0", "Passed to slskd; bytes/sec", "int0"),
     ("SLSKD_MIN_EFFECTIVE_MP3_KBPS", "280", "Floor (kbps) for an MP3's effective bitrate, computed from file size and duration; catches 128 kbps files retagged as 320. Separate from the fixed 320 rule: an MP3 whose reported (or filename-inferred) bitrate is below 320 is always rejected, whatever this is set to", "int0"),
     ("SLSKD_EARLY_STOP_RESPONSES", "20", "Stop the slskd search once this many peers replied", "int1"),
+    ("SLSKD_MAX_DURATION_DIFF_SECONDS", "15", "Reject candidates whose length differs from Spotify's by more than this many seconds; also the tolerance for accepting an untagged download by filename + duration. 0 disables both", "int0"),
     ("SLSKD_WAIT_TIMEOUT", "60", "Seconds to wait for a downloaded file to appear on disk", "int1"),
     ("UPGRADE_CHECK_INTERVAL_HOURS", "168", "Re-search downloaded tracks for a better version_tier (Extended Mix > Original Mix); 0 disables", "int0"),
 ]
@@ -309,6 +311,9 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
     # Templates call csrf_token() to render the hidden field.
     app.jinja_env.globals["csrf_token"] = _csrf_token
     app.jinja_env.filters["human_bytes"] = _human_bytes
+    app.jinja_env.filters["duration_ms"] = (
+        lambda ms: fmt_duration(ms / 1000) if ms else "—"
+    )
 
     @app.after_request
     def _security_headers(response):

@@ -653,3 +653,42 @@ class TestRejectionReasons:
         assert entry["candidate_count"] == 1
         assert entry["rejected_count"] == 1
         assert entry["rejections"][0]["reason"] == "format not allowed: .wma"
+
+
+class TestDurationFilter:
+    def _results(self, length):
+        return [{"username": "u", "uploadSpeed": 1000, "files": [{
+            "filename": "Eminem - Lose Yourself.flac", "size": 30_000_000,
+            "bitrate": 1411, "length": length,
+        }]}]
+
+    def test_rejects_when_too_far_off(self, monkeypatch):
+        monkeypatch.setattr(soulseek_api, "MAX_DURATION_DIFF_SECONDS", 15)
+        out = soulseek_api.evaluate_candidates(
+            self._results(190), "Lose Yourself", "Eminem", expected_duration_ms=242_000
+        )
+        assert out[0]["accepted"] is False
+        assert out[0]["reason"] == "duration 3:10 vs 4:02"
+
+    def test_accepts_within_tolerance(self, monkeypatch):
+        monkeypatch.setattr(soulseek_api, "MAX_DURATION_DIFF_SECONDS", 15)
+        out = soulseek_api.evaluate_candidates(
+            self._results(250), "Lose Yourself", "Eminem", expected_duration_ms=242_000
+        )
+        assert out[0]["accepted"] is True
+
+    def test_zero_disables(self, monkeypatch):
+        monkeypatch.setattr(soulseek_api, "MAX_DURATION_DIFF_SECONDS", 0)
+        out = soulseek_api.evaluate_candidates(
+            self._results(100), "Lose Yourself", "Eminem", expected_duration_ms=242_000
+        )
+        assert out[0]["accepted"] is True
+
+    def test_unknown_durations_are_not_rejected(self, monkeypatch):
+        monkeypatch.setattr(soulseek_api, "MAX_DURATION_DIFF_SECONDS", 15)
+        assert soulseek_api.evaluate_candidates(
+            self._results(None), "Lose Yourself", "Eminem", expected_duration_ms=242_000
+        )[0]["accepted"]
+        assert soulseek_api.evaluate_candidates(
+            self._results(100), "Lose Yourself", "Eminem", expected_duration_ms=None
+        )[0]["accepted"]

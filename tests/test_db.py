@@ -350,6 +350,39 @@ class TestSchemaMigrations:
         assert db.get_upgrade_candidates(conn, "pl_legacy", 1)[0][0].id == "t1"
         conn.close()
 
+    def test_v4_db_upgrades_to_v5(self, tmp_path):
+        """A real v4 DB: per-playlist table without duration_ms."""
+        path = str(tmp_path / "v4.db")
+        raw = sqlite3.connect(path)
+        raw.execute(
+            "CREATE TABLE playlists_meta (playlist_id TEXT PRIMARY KEY, "
+            "table_name TEXT NOT NULL, name TEXT NOT NULL, snapshot_id TEXT, "
+            "last_synced TIMESTAMP, enabled INTEGER NOT NULL DEFAULT 1, "
+            "added_at TIMESTAMP)"
+        )
+        raw.execute("INSERT INTO playlists_meta VALUES ('pid','pl_v4','V4','snap',NULL,0,NULL)")
+        raw.execute(
+            'CREATE TABLE "pl_v4" (id TEXT PRIMARY KEY, name TEXT NOT NULL, '
+            "artists TEXT NOT NULL, album TEXT NOT NULL, downloaded INTEGER DEFAULT 0, "
+            "path TEXT, attempts INTEGER DEFAULT 0, last_attempt TIMESTAMP, "
+            "suspended_until TIMESTAMP, last_upgrade_check TIMESTAMP, "
+            "tried_files TEXT DEFAULT '')"
+        )
+        raw.execute("INSERT INTO pl_v4 (id, name, artists, album) VALUES ('t1','S','A','Alb')")
+        raw.execute("PRAGMA user_version = 4")
+        raw.commit()
+        raw.close()
+
+        conn = db.create_connection(path)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+        # Migrated without a sync (the playlist is disabled), so the webui
+        # can read it straight away.
+        track = db.get_track(conn, "pl_v4", "t1")
+        assert track is not None and track["duration_ms"] is None
+        # Snapshot cleared so the next sync backfills durations.
+        assert db.get_playlist_meta(conn, "pid")[0] is None
+        conn.close()
+
     def test_existing_rows_survive_reopening(self, tmp_path):
         path = str(tmp_path / "reopen.db")
         conn = db.create_connection(path)
