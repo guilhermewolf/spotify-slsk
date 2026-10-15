@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% set active_page = 'dashboard' %}
+{% block title %}Grab anyway? · spotify-slsk{% endblock %}
+{% block content %}
+
+<a class="back-link" href="{{ url_for('track_detail', playlist_id=playlist_id, track_id=track.id) }}">
+  &larr; {{ track.name }}
+</a>
+
+<h1>Grab a rejected file?</h1>
+<p>
+  <code>{{ candidate.filename }}</code> from <strong>{{ candidate.user }}</strong>
+  was rejected by the search filters: <strong>{{ candidate.reason }}</strong>.
+</p>
+<p class="subtle">
+  Grabbing overrides the search filters only. After download the file still has to
+  match <em>{{ track.name }}</em> by its tags (or by filename and duration), or it is
+  deleted like any other mismatch.
+</p>
+
+<form method="POST" action="{{ url_for('interactive_grab', playlist_id=playlist_id, track_id=track.id) }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <input type="hidden" name="username" value="{{ candidate.user }}">
+  <input type="hidden" name="filename" value="{{ candidate.filename }}">
+  <input type="hidden" name="size" value="{{ candidate.size }}">
+  <label>
+    <input type="checkbox" name="force" value="1" required>
+    I understand this file was rejected; grab it anyway.
+  </label>
+  <button type="submit" style="width:auto">Grab anyway</button>
+</form>
+
+{% endblock %}

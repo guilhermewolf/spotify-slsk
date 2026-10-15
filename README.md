@@ -9,19 +9,31 @@ dashboard for adding playlists, watching progress and retrying what failed.
 
 - **Spotify sync** — polls your playlists and picks up new tracks. Uses Spotify's
   `snapshot_id` to skip the expensive track fetch when a playlist hasn't changed.
-- **Quality-aware search** — format allowlist, bitrate floors (including an
-  effective-bitrate check that catches 128 kbps files retagged as 320), and a
+- **Quality-aware search** — format allowlist, a fixed 320 kbps floor for MP3s
+  whose bitrate is known, an effective-bitrate check from size and duration
+  (`SLSKD_MIN_EFFECTIVE_MP3_KBPS`, catches 128 kbps files retagged as 320), and a
   version gate so a Live or Remix version isn't accepted for a studio track.
 - **Version preference** — prefers Extended Mix over Original Mix over
   everything else, and can periodically re-search downloaded tracks for a
   better version.
 - **Metadata tagging** — writes title/artist/album with `mutagen`, then moves
   the file into `/playlists/<playlist>/`.
+- **Duration-aware matching** — candidates whose length differs from Spotify's
+  by more than `SLSKD_MAX_DURATION_DIFF_SECONDS` are skipped, and an untagged
+  download is accepted only if its filename and real duration both match.
 - **Retry and back-off** — a track that fails twice is suspended for two days
   rather than retried forever; rejected filenames are remembered so the same bad
   file isn't downloaded again.
-- **Web dashboard** — library totals, per-playlist progress, per-track status
-  and history, manual retry, and editable settings that apply without a restart.
+- **Blocklist** — peer files that slskd reports as failed/rejected, or that
+  turn out broken after download (no tags, unreadable, truncated), are skipped
+  for every track; whole users can be banned from the UI. A file that is merely
+  the wrong song for one track is only skipped for that track.
+- **History** — every grab, import, failure, upgrade and retry is kept for
+  `HISTORY_RETENTION_DAYS`, with a filterable history page.
+- **Web dashboard** — library totals, per-playlist progress, per-track status,
+  why each search result was rejected, interactive search with manual grab, a
+  Wanted page with bulk re-search, manual retry, and editable settings that
+  apply without a restart.
 - **Health** — `/healthz` plus a Docker `HEALTHCHECK` fed by a heartbeat file.
 - **ntfy notifications** — optional; silently skipped when unconfigured.
 
@@ -68,7 +80,8 @@ These are also editable from the **Settings** page, where the database value
 overrides the environment variable and changes apply on the next cycle:
 `MIN_MATCH_SCORE`, `SLSKD_PREFERRED_FORMATS`, `SLSKD_MIN_PEER_UPLOAD_SPEED`,
 `SLSKD_MIN_EFFECTIVE_MP3_KBPS`, `SLSKD_EARLY_STOP_RESPONSES`,
-`SLSKD_WAIT_TIMEOUT`, `UPGRADE_CHECK_INTERVAL_HOURS`.
+`SLSKD_MAX_DURATION_DIFF_SECONDS`, `SLSKD_WAIT_TIMEOUT`,
+`HISTORY_RETENTION_DAYS`, `UPGRADE_CHECK_INTERVAL_HOURS`.
 
 ## Security
 

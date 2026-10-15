@@ -290,6 +290,10 @@ button.danger:focus {
 .badge-retrying   { background: var(--ss-retry-bg); color: var(--ss-retry); }
 .badge-suspended  { background: var(--ss-suspended-bg); color: var(--ss-suspended); }
 .badge-disabled   { background: var(--ss-pending-bg); color: var(--ss-pending); }
+.badge-event-imported, .badge-event-upgraded { background: var(--ss-ok-bg); color: var(--ss-ok); }
+.badge-event-grabbed, .badge-event-retried { background: var(--ss-pending-bg); color: var(--ss-pending); }
+.badge-event-download_failed, .badge-event-import_rejected { background: var(--ss-suspended-bg); color: var(--ss-suspended); }
+.badge-event-deleted_file { background: var(--ss-retry-bg); color: var(--ss-retry); }
 
 /* ---- filters -------------------------------------------------------- */
 
@@ -339,6 +343,22 @@ button.danger:focus {
 }
 .track-title { font-weight: 600; }
 .track-table tbody tr:hover { background: var(--pico-card-sectioning-background-color); }
+
+/* Interactive search: long peer filenames wrap (full path in the cell's
+   title) and the Grab column stays pinned while the table scrolls. */
+.table-wrap { max-width: 100%; min-width: 0; }
+.interactive-table .file-cell { min-width: 12rem; max-width: 26rem; }
+.interactive-table .file-cell code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.interactive-table .actions-col {
+  position: sticky;
+  right: 0;
+  background: var(--pico-background-color);
+  box-shadow: -1px 0 0 var(--pico-muted-border-color);
+}
+.interactive-table .actions-col button { margin: 0; width: auto; }
 
 /* ---- detail lists --------------------------------------------------- */
 
@@ -531,3 +551,15 @@ button.outline.danger:focus {
   width: auto;
   color: var(--pico-muted-color);
 }
+
+/* Rejection reasons under a search-history row. */
+.reject-list { margin: 0.25rem 0 0; padding-left: 1rem; font-size: 0.85rem; }
+.reject-list li { margin: 0; list-style: disc; }
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap;
+}
+/* <details> used as a no-JS confirm step. */
+details.confirm { margin: 0; }
+details.confirm[open] { max-width: 22rem; }

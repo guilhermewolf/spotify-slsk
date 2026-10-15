@@ -95,9 +95,24 @@ class TestPlaylistCrud:
         r = post(client, "/playlist/pid1/toggle", follow_redirects=True)
         assert r.status_code == 200
 
+        # Without the confirm step nothing is deleted.
         r = post(client, "/playlist/pid1/delete", follow_redirects=True)
+        assert b"not confirmed" in r.data
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        assert db.get_playlist_meta(conn, "pid1")[1] == "pl_x"
+        conn.close()
+
+        r = post(client, "/playlist/pid1/delete", {"confirm": "1"}, follow_redirects=True)
         assert r.status_code == 200
         assert b"removed" in r.data.lower()
+
+    def test_dashboard_remove_uses_no_inline_handler(self, app_tmp, client):
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        db.upsert_playlist_meta(conn, "pid1", "pl_x", "X", "snap")
+        conn.close()
+        html = client.get("/").data
+        assert b"onsubmit" not in html and b"onclick" not in html
+        assert b'name="confirm" value="1"' in html
 
     def test_playlist_detail_404s_for_unknown(self, client):
         r = client.get("/playlist/does-not-exist")
@@ -267,6 +282,11 @@ class TestCsrfProtection:
         ("/playlist/pid1/refresh", {}),
         ("/track/pid1/t1/retry", {}),
         ("/settings", {"MIN_MATCH_SCORE": "0.9"}),
+        ("/blocklist/1/delete", {}),
+        ("/blocklist/ban-user", {"username": "x"}),
+        ("/track/pid1/t1/search", {}),
+        ("/track/pid1/t1/grab", {"username": "u", "filename": "f", "size": "1"}),
+        ("/wanted/search", {"all": "1"}),
     ]
 
     @pytest.mark.parametrize("route,data", MUTATING_ROUTES)
@@ -577,3 +597,220 @@ class TestExtraEndpoints:
         assert r.status_code == 200
         assert b"missing" in r.data.lower()
 
+
+
+class TestTrackSearchHistoryReasons:
+    def test_track_page_shows_rejection_reasons(self, app_tmp, client):
+        from spotify_slsk import runtime_state
+
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        db.upsert_playlist_meta(conn, "pid1", "pl_x", "X", "s")
+        db.create_table(conn, "pl_x")
+        db.insert_track(conn, "pl_x", ("t-why", "Song", "Artist", "Album"))
+        conn.close()
+        runtime_state.record_search(
+            "t-why", "song artist", result_count=3, candidate_count=1,
+            rejected_count=2,
+            rejections=[{"user": "peer", "filename": "x.wma", "reason": "format not allowed: .wma"}],
+        )
+        r = client.get("/track/pid1/t-why")
+        assert r.status_code == 200
+        assert b"format not allowed: .wma" in r.data
+        assert b"and 1 more" in r.data
+
+
+class TestBlocklistPage:
+    def test_ban_list_and_remove(self, app_tmp, client):
+        r = post(client, "/blocklist/ban-user", {"username": "villain", "reason": "fakes"},
+                 follow_redirects=True)
+        assert r.status_code == 200
+        assert b"villain" in r.data and b"whole user" in r.data
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        entry_id = db.list_blocklist(conn)[0]["id"]
+        conn.close()
+        post(client, f"/blocklist/{entry_id}/delete")
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        assert db.list_blocklist(conn) == []
+        conn.close()
+
+    def test_empty_username_is_refused(self, app_tmp, client):
+        post(client, "/blocklist/ban-user", {"username": "  "})
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        assert db.list_blocklist(conn) == []
+        conn.close()
+
+    def test_entries_are_autoescaped(self, app_tmp, client):
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        db.add_blocklist(conn, "<script>x</script>", "f", None, "r")
+        conn.close()
+        r = client.get("/blocklist")
+        assert b"<script>x</script>" not in r.data
+
+
+class TestHistoryPage:
+    def _seed(self, app_tmp):
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        db.upsert_playlist_meta(conn, "pid1", "pl_x", "X", "s")
+        db.create_table(conn, "pl_x")
+        db.insert_track(conn, "pl_x", ("t1", "Song", "Artist", "Album"))
+        db.record_history(conn, "grabbed", playlist_id="pid1", track_id="t1", username="peer", filename="f.flac")
+        db.record_history(conn, "download_failed", playlist_id="pid1", track_id="t1", reason="transfer timed out")
+        conn.close()
+
+    def test_lists_and_filters(self, app_tmp, client):
+        self._seed(app_tmp)
+        r = client.get("/history")
+        assert r.status_code == 200
+        assert b"transfer timed out" in r.data and b"Song" in r.data
+        r = client.get("/history?event=grabbed")
+        assert b"transfer timed out" not in r.data and b"f.flac" in r.data
+        assert client.get("/history?event=bogus&before_id=x").status_code == 200
+        for bad in ("99999999999999999999999", "-5", "0", str(2**63)):
+            assert client.get(f"/history?before_id={bad}").status_code == 200, bad
+
+    def test_retry_records_history_and_track_page_shows_it(self, app_tmp, client):
+        self._seed(app_tmp)
+        post(client, "/track/pid1/t1/retry")
+        r = client.get("/track/pid1/t1")
+        assert b"retried" in r.data and b"transfer timed out" in r.data
+
+
+class TestInteractiveSearchUI:
+    CAND_OK = {
+        "user": "peer", "filename": "Artist - Song.flac", "size": 123, "ext": ".flac",
+        "basename": "Artist - Song.flac",
+        "bitrate": 1411, "bit_depth": 16, "sample_rate": 44100, "length": 200,
+        "free_slot": True, "user_upload_speed": 1000, "queue_length": 0,
+        "accepted": True, "reason": None,
+    }
+    CAND_BAD = dict(CAND_OK, filename="Artist - Song.wma", basename="Artist - Song.wma", ext=".wma",
+                    accepted=False, reason="format not allowed: .wma")
+
+    def _seed(self, app_tmp):
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        db.upsert_playlist_meta(conn, "pid1", "pl_x", "X", "s")
+        db.create_table(conn, "pl_x")
+        db.insert_track(conn, "pl_x", ("t1", "Song", "Artist", "Album", 200_000))
+        conn.close()
+
+    def _search(self, app_tmp, client, monkeypatch):
+        import time as _time
+        from spotify_slsk import runtime_state, soulseek_api
+
+        self._seed(app_tmp)
+        captured = {}
+
+        def fake(artist, title, album=None, duration_ms=None, is_blocked=None):
+            captured.update(artist=artist, title=title, duration_ms=duration_ms)
+            return [dict(self.CAND_OK), dict(self.CAND_BAD)]
+
+        monkeypatch.setattr(soulseek_api, "interactive_search", fake)
+        runtime_state._interactive.pop(("pid1", "t1"), None)
+        runtime_state.pop_manual_grabs()
+        r = post(client, "/track/pid1/t1/search")
+        assert r.status_code == 302
+        for _ in range(200):
+            snap = runtime_state.get_interactive_search(("pid1", "t1"))
+            if snap and snap["status"] != "running":
+                break
+            _time.sleep(0.01)
+        assert captured == {"artist": "Artist", "title": "Song", "duration_ms": 200_000}
+
+    def test_results_partial_lists_accepted_and_rejected(self, app_tmp, client, monkeypatch):
+        self._search(app_tmp, client, monkeypatch)
+        r = client.get("/track/pid1/t1/search")
+        assert r.status_code == 200
+        assert b"Artist - Song.flac" in r.data
+        assert b"format not allowed: .wma" in r.data
+        assert b"hx-trigger" not in r.data, "finished search must stop polling"
+        # The filename cell wraps (full path in title); Grab column is pinned.
+        assert b'class="file-cell" title="Artist - Song.flac"' in r.data
+        assert r.data.count(b'class="actions-col"') == 3
+        assert b"Artist - Song.flac" in client.get("/track/pid1/t1").data
+
+    def test_grab_accepted_queues_for_daemon_and_wakes(self, app_tmp, client, monkeypatch):
+        from spotify_slsk import runtime_state
+        self._search(app_tmp, client, monkeypatch)
+        woke = []
+        app_tmp.config["WAKE_DAEMON"] = lambda: woke.append(1)
+        post(client, "/track/pid1/t1/grab",
+             {"username": "peer", "filename": "Artist - Song.flac", "size": "123"})
+        grabs = runtime_state.pop_manual_grabs()
+        assert [(g["table_name"], g["track_id"], g["candidate"]["filename"]) for g in grabs] == [
+            ("pl_x", "t1", "Artist - Song.flac")]
+        assert woke == [1]
+
+    def test_grab_rejected_needs_confirmation(self, app_tmp, client, monkeypatch):
+        from spotify_slsk import runtime_state
+        self._search(app_tmp, client, monkeypatch)
+        form = {"username": "peer", "filename": "Artist - Song.wma", "size": "123"}
+        r = post(client, "/track/pid1/t1/grab", form)
+        assert r.status_code == 200 and b"Grab anyway" in r.data
+        assert runtime_state.pop_manual_grabs() == []
+        post(client, "/track/pid1/t1/grab", dict(form, force="1"))
+        assert len(runtime_state.pop_manual_grabs()) == 1
+
+    def test_grab_of_unknown_result_is_refused(self, app_tmp, client, monkeypatch):
+        from spotify_slsk import runtime_state
+        self._search(app_tmp, client, monkeypatch)
+        post(client, "/track/pid1/t1/grab",
+             {"username": "evil", "filename": "/etc/passwd", "size": "1", "force": "1"})
+        assert runtime_state.pop_manual_grabs() == []
+
+
+class TestWantedPage:
+    def _seed(self, app_tmp):
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        db.upsert_playlist_meta(conn, "pid1", "pl_x", "X", "s")
+        db.create_table(conn, "pl_x")
+        db.insert_track(conn, "pl_x", ("t1", "Missing One", "Artist", "Album"))
+        db.insert_track(conn, "pl_x", ("t2", "Missing Two", "Artist", "Album"))
+        db.insert_track(conn, "pl_x", ("t3", "Have It", "Artist", "Album"))
+        db.update_download_status(conn, "t3", "pl_x", success=True, file_path="/p/x.flac")
+        db.update_download_status(conn, "t1", "pl_x", success=False)
+        db.update_download_status(conn, "t1", "pl_x", success=False)
+        db.record_history(conn, "download_failed", playlist_id="pid1", track_id="t1",
+                          reason="transfer timed out")
+        db.upsert_playlist_meta(conn, "pid2", "pl_off", "Off", "s")
+        db.create_table(conn, "pl_off")
+        db.insert_track(conn, "pl_off", ("t9", "Disabled Track", "A", "B"))
+        db.set_playlist_enabled(conn, "pid2", False)
+        conn.close()
+
+    def test_lists_missing_from_enabled_playlists(self, app_tmp, client):
+        self._seed(app_tmp)
+        r = client.get("/wanted")
+        assert r.status_code == 200
+        assert b"Missing One" in r.data and b"Missing Two" in r.data
+        assert b"Have It" not in r.data and b"Disabled Track" not in r.data
+        assert b"transfer timed out" in r.data and b"suspended" in r.data
+        assert b"does not clear" in r.data and b'href="/blocklist"' in r.data
+        r = client.get("/wanted?q=two")
+        assert b"Missing Two" in r.data and b"Missing One" not in r.data
+
+    def test_search_selected_clears_suspension_and_records_history(self, app_tmp, client):
+        self._seed(app_tmp)
+        woke = []
+        app_tmp.config["WAKE_DAEMON"] = lambda: woke.append(1)
+        post(client, "/wanted/search", {"tracks": ["pid1:t1", "pid2:t9", "bogus"]})
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        t1 = db.get_track(conn, "pl_x", "t1")
+        assert (t1["attempts"], t1["suspended_until"]) == (0, None)
+        retried = db.list_history(conn, event="retried")
+        assert [r["track_id"] for r in retried] == ["t1"], "disabled playlist not touched"
+        conn.close()
+        assert woke == [1]
+
+    def test_search_all_missing(self, app_tmp, client):
+        self._seed(app_tmp)
+        post(client, "/wanted/search", {"all": "1"})
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        assert sorted(r["track_id"] for r in db.list_history(conn, event="retried")) == ["t1", "t2"]
+        conn.close()
+
+
+def test_activity_banner_keeps_polling(client):
+    # outerHTML swapped the polling wrapper away after the first refresh.
+    html = client.get("/").data.decode()
+    wrapper = html[html.index('hx-select="#activity-banner"') - 200:html.index('hx-select="#activity-banner"')]
+    assert 'hx-swap="innerHTML"' in wrapper

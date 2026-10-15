@@ -261,3 +261,20 @@ class TestMissingSpotifyCredentials:
         app._run_startup_reconciliation(None, conn)  # must not raise
         conn.close()
 
+
+
+def test_spotify_token_cache_goes_to_the_configured_path(monkeypatch, tmp_path):
+    from spotify_slsk import app as daemon
+    monkeypatch.setenv("SPOTIPY_CLIENT_ID", "id")
+    monkeypatch.setenv("SPOTIPY_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("SPOTIPY_CACHE_PATH", str(tmp_path / "tok"))
+    sp = daemon.setup_spotify_client()
+    assert sp.auth_manager.cache_handler.cache_path == str(tmp_path / "tok")
+
+
+def test_sqlite_connect_is_not_logged_at_info(tmp_path, caplog):
+    import logging
+    from spotify_slsk import db
+    with caplog.at_level(logging.INFO):
+        db.create_connection(str(tmp_path / "x.db")).close()
+    assert not [r for r in caplog.records if "Connected to SQLite" in r.getMessage()]

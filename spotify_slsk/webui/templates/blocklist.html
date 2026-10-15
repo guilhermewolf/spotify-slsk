@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% set active_page = 'blocklist' %}
+{% block title %}Blocklist · spotify-slsk{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Blocklist</h1>
+    <p class="subtle">
+      Peer files that failed to transfer or were rejected after download, and peers
+      banned outright. Searches skip them for every track. Newest first, up to 500.
+    </p>
+  </div>
+</div>
+
+<form class="filter-form" method="POST" action="{{ url_for('blocklist_ban_user') }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <input type="text" name="username" required maxlength="200" style="flex:1"
+         aria-label="Soulseek username" placeholder="Soulseek username to ban">
+  <input type="text" name="reason" maxlength="200" style="flex:1"
+         aria-label="Reason (optional)" placeholder="Reason (optional)">
+  <button type="submit" class="secondary outline">Ban user</button>
+</form>
+
+{% if entries %}
+<div class="table-wrap">
+  <table class="track-table">
+    <thead>
+      <tr>
+        <th scope="col">User</th>
+        <th scope="col">File</th>
+        <th scope="col">Reason</th>
+        <th scope="col">Added</th>
+        <th scope="col">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for e in entries %}
+      <tr>
+        <td class="nowrap">{{ e.username }}</td>
+        <td>
+          {% if e.filename %}<code>{{ e.filename }}</code>
+          {% if e.size %}<div class="subtle">{{ e.size|human_bytes }}</div>{% endif %}
+          {% else %}<span class="badge badge-suspended">whole user</span>{% endif %}
+        </td>
+        <td>{{ e.reason or '—' }}</td>
+        <td class="nowrap subtle">{{ e.created_at }}</td>
+        <td class="nowrap">
+          <form method="POST" action="{{ url_for('blocklist_delete', entry_id=e.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="secondary outline">Remove</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty">
+  <h2>Nothing blocklisted</h2>
+  <p>Failed transfers and rejected downloads will show up here.</p>
+</div>
+{% endif %}
+
+{% endblock %}

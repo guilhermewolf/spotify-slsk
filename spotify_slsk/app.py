@@ -13,13 +13,18 @@ from .db import (
     create_table,
     insert_track,
     fetch_all_tracks,
+    backfill_durations,
     update_download_status,
     clear_tried_entries,
     add_tried_file,
+    add_blocklist,
+    record_history,
+    prune_history,
     get_pending_tracks,
     get_track,
     get_playlist_meta,
     upsert_playlist_meta,
+    rename_playlist_meta,
     list_playlists,
     get_setting,
     get_upgrade_candidates,
@@ -35,6 +40,8 @@ from mutagen.aiff import AIFF
 from mutagen.mp3 import MP3
 from .utils import sanitize_table_name, get_playlist_id
 from spotipy.oauth2 import SpotifyClientCredentials
+from spotipy.cache_handler import CacheFileHandler
+from . import soulseek_api
 from .soulseek_api import (
     search_and_download,
     get_client as get_slskd_client,
@@ -57,15 +64,20 @@ MIN_MATCH_SCORE = float(os.getenv("MIN_MATCH_SCORE", "0.62"))
 CYCLE_INTERVAL_SECONDS = int(os.getenv("CYCLE_INTERVAL_SECONDS", "300"))
 CYCLE_ERROR_BACKOFF_SECONDS = int(os.getenv("CYCLE_ERROR_BACKOFF_SECONDS", "60"))
 HEARTBEAT_FILE = os.getenv("HEARTBEAT_FILE", "/tmp/heartbeat")
+HISTORY_RETENTION_DAYS = int(os.getenv("HISTORY_RETENTION_DAYS", "90"))
 
 
 def _reload_settings(conn):
     """Pull live tunables from the DB so UI changes take effect next cycle."""
-    global MIN_MATCH_SCORE
+    global MIN_MATCH_SCORE, HISTORY_RETENTION_DAYS
     try:
         MIN_MATCH_SCORE = float(get_setting(conn, "MIN_MATCH_SCORE", "0.62"))
     except (TypeError, ValueError) as e:
         logging.warning(f"Bad MIN_MATCH_SCORE in DB; keeping previous: {e}")
+    try:
+        HISTORY_RETENTION_DAYS = max(1, int(get_setting(conn, "HISTORY_RETENTION_DAYS", "90")))
+    except (TypeError, ValueError) as e:
+        logging.warning(f"Bad HISTORY_RETENTION_DAYS in DB; keeping previous: {e}")
     _slsk_refresh_from_db(conn)
 
 _shutdown = threading.Event()
@@ -143,7 +155,14 @@ def fetch_and_compare_tracks(conn, playlist_id, sp):
 
     create_table(conn, table_name)
 
-    stored_snapshot, _, _, _ = get_playlist_meta(conn, playlist_id)
+    stored_snapshot, stored_table, stored_name, _ = get_playlist_meta(conn, playlist_id)
+    # A playlist added while Spotify was unreachable is catalogued under a
+    # placeholder (its id) and table. Point the row at the real table now,
+    # not only when the snapshot is stamped at the end: rows are inserted
+    # into `table_name` below, and until then the dashboard was reading the
+    # empty placeholder table ("0 / 0 downloaded" mid-sync).
+    if stored_table is not None and (stored_table, stored_name) != (table_name, playlist_title):
+        rename_playlist_meta(conn, playlist_id, table_name, playlist_title)
     if stored_snapshot and snapshot_id and stored_snapshot == snapshot_id:
         logging.info(
             f"Playlist {playlist_title} unchanged (snapshot {snapshot_id[:8]}); "
@@ -159,19 +178,24 @@ def fetch_and_compare_tracks(conn, playlist_id, sp):
 
     db_tracks = {track[0]: track for track in fetch_all_tracks(conn, table_name)}
     new_tracks = []
+    known_durations = []
 
     for item in items:
         track = item.get("track")
         if not track or not track.get("id"):
             continue
         artists_str = extract_artists_string(track)
+        duration_ms = track.get("duration_ms")
 
-        if track["id"] not in db_tracks:
+        if track["id"] in db_tracks:
+            known_durations.append((track["id"], duration_ms))
+        else:
             track_data = (
                 track["id"],
                 track["name"],
                 artists_str,
                 track["album"]["name"],
+                duration_ms,
             )
             insert_track(conn, table_name, track_data)
             logging.info(
@@ -185,8 +209,13 @@ def fetch_and_compare_tracks(conn, playlist_id, sp):
                     artists_str,
                     track["album"]["name"],
                     playlist_id,
+                    duration_ms=duration_ms,
                 )
             )
+
+    # Rows inserted before schema v5 have no duration; fill them in.
+    if known_durations:
+        backfill_durations(conn, table_name, known_durations)
 
     # Only stamp the new snapshot after we've successfully inserted the diff,
     # so a crash mid-sync retries next cycle.
@@ -265,6 +294,53 @@ def find_closest_db_match(conn, table_name: str, file_title: str, file_artist: s
 
     return (*best_row, best_score, best_reason)
 
+def _audio_length_seconds(file_path):
+    """Actual audio duration via mutagen, or None if unreadable."""
+    try:
+        mf = MutagenFile(file_path)
+        if mf is not None and mf.info is not None and mf.info.length:
+            return float(mf.info.length)
+    except Exception as e:
+        logging.debug(f"Could not read duration of {file_path}: {e}")
+    return None
+
+
+def _fallback_match_untagged(file_path, expected_track, source=None):
+    """Decide whether an untagged download is the track we asked slskd for.
+
+    Used only when the file has no title/artist tags, and only against the
+    requested track. Both must hold: the file's name passes the same strict
+    rules as a search candidate (soulseek_api.filename_match: every title
+    word in the basename + coverage, whole-name artist in the name or
+    folder, same version), AND the file's real duration is within
+    SLSKD_MAX_DURATION_DIFF_SECONDS of Spotify's. The peer path from
+    `source` is preferred (it carries the share's folders); otherwise the
+    local basename plus its parent folder. Unknown durations, or a disabled
+    duration check (0), mean no. Returns (ok, reason).
+    """
+    tolerance = soulseek_api.MAX_DURATION_DIFF_SECONDS
+    if tolerance <= 0:
+        return False, "missing tags (duration check disabled)"
+    if not expected_track.duration_ms:
+        return False, "missing tags (no Spotify duration)"
+    name = (source or {}).get("filename") or os.path.join(
+        os.path.basename(os.path.dirname(file_path)), os.path.basename(file_path)
+    )
+    _, why = soulseek_api.filename_match(name, expected_track.name, expected_track.artist)
+    if why:
+        return False, f"missing tags; filename: {why}"
+    length = _audio_length_seconds(file_path)
+    if length is None:
+        return False, "missing tags; unreadable duration"
+    expected = expected_track.duration_ms / 1000.0
+    if abs(length - expected) > tolerance:
+        return False, (
+            f"missing tags; duration {soulseek_api.fmt_duration(length)} "
+            f"vs {soulseek_api.fmt_duration(expected)}"
+        )
+    return True, None
+
+
 def _match_requested_track(conn, table_name, track_id, title, artist):
     """Score the file's tags against the one track that was requested.
 
@@ -285,7 +361,15 @@ def _match_requested_track(conn, table_name, track_id, title, artist):
     return (row["id"], row["name"], row["artists"], row["album"]), score
 
 
-def process_downloaded_file(file_path, playlist_name, conn, reconcile: bool = False, track_id=None):
+def process_downloaded_file(
+    file_path,
+    playlist_name,
+    conn,
+    reconcile: bool = False,
+    track_id=None,
+    expected_track=None,
+    source=None,
+):
     """
     Process a file that is either freshly downloaded or already on disk.
 
@@ -296,27 +380,76 @@ def process_downloaded_file(file_path, playlist_name, conn, reconcile: bool = Fa
     When reconcile=True:
       - Never delete files on mismatch.
       - If the file already lives in /playlists/<playlist_name>, don't move it again.
+
+    `expected_track` is the Track the download was for (implies its
+    track_id). When given and the file has no title/artist tags, the
+    filename + real duration are checked against it (see
+    _fallback_match_untagged) instead of rejecting outright.
+
+    `source` is the slskd candidate the file came from. A rejection only
+    blocklists that peer file when the fault is the file's own, whatever
+    track it is for: no usable tags, unreadable audio, or a real length
+    far from what the peer advertised (truncated/corrupt). A mismatch
+    against the *requested* track ("no match", "low score", a filename or
+    Spotify-duration miss) is recorded in the track's _tried list and
+    history only — the same file can be exactly right for another track,
+    and a global ban would hide it there.
     """
+    if expected_track is not None and track_id is None:
+        track_id = expected_track.id
+
+    advertised = (source or {}).get("length")
+    if advertised and not reconcile and soulseek_api.MAX_DURATION_DIFF_SECONDS > 0:
+        actual = _audio_length_seconds(file_path)
+        if actual is not None and abs(actual - advertised) > soulseek_api.MAX_DURATION_DIFF_SECONDS:
+            reason = (
+                f"duration {soulseek_api.fmt_duration(actual)} vs advertised "
+                f"{soulseek_api.fmt_duration(advertised)} (truncated or corrupt)"
+            )
+            logging.warning(f"❌ Rejecting {file_path}: {reason}")
+            _reject_and_log(
+                file_path, playlist_name, conn, track_id=track_id, reason=reason,
+                source=source, peer_fault=True,
+            )
+            return False, None
+
     title, artist, album = extract_metadata_from_file(file_path)
 
     if not title or not artist:
-        logging.warning(f"❌ Missing metadata for {file_path}. Skipping tagging and DB update.")
-        _reject_and_log(file_path, playlist_name, conn, track_id=track_id, reason="invalid metadata", destructive=not reconcile)
-        return False, None
-
-    if track_id is not None:
-        match, score = _match_requested_track(conn, playlist_name, track_id, title, artist)
+        ok, reason = (
+            _fallback_match_untagged(file_path, expected_track, source)
+            if expected_track is not None and not reconcile
+            else (False, "invalid metadata")
+        )
+        if not ok:
+            logging.warning(f"❌ Rejecting {file_path}: {reason}")
+            _reject_and_log(
+                file_path, playlist_name, conn, track_id=track_id,
+                reason=reason, destructive=not reconcile, source=source,
+                peer_fault=reason in _PEER_FAULT_REASONS,
+            )
+            return False, None
+        logging.info(
+            f"Untagged file accepted by filename + duration: {file_path}"
+        )
+        title, artist, album = expected_track.name, expected_track.artist, None
+        db_album = expected_track.album
+        match_method = "filename+duration"
     else:
-        match, score = find_closest_match(conn, playlist_name, title, artist)
-    if not match:
-        _reject_and_log(file_path, playlist_name, conn, reason="no match", destructive=not reconcile)
-        return False, None
+        match_method = "tags"
+        if track_id is not None:
+            match, score = _match_requested_track(conn, playlist_name, track_id, title, artist)
+        else:
+            match, score = find_closest_match(conn, playlist_name, title, artist)
+        if not match:
+            _reject_and_log(file_path, playlist_name, conn, reason="no match", destructive=not reconcile, source=source)
+            return False, None
 
-    track_id, db_title, db_artist, db_album = match
-    if score < MIN_MATCH_SCORE:
-        logging.warning(f"⚠️ Low match score ({score:.2f}) for {title} by {artist}. Skipping update.")
-        _reject_and_log(file_path, playlist_name, conn, track_id=track_id, reason="low score", destructive=not reconcile)
-        return False, None
+        track_id, db_title, db_artist, db_album = match
+        if score < MIN_MATCH_SCORE:
+            logging.warning(f"⚠️ Low match score ({score:.2f}) for {title} by {artist}. Skipping update.")
+            _reject_and_log(file_path, playlist_name, conn, track_id=track_id, reason="low score", destructive=not reconcile, source=source)
+            return False, None
 
     # Fall back to the Spotify-known album when the downloaded file has no
     # album tag (observed during Phase B testing: downloaded MP3 had no TALB).
@@ -339,22 +472,47 @@ def process_downloaded_file(file_path, playlist_name, conn, reconcile: bool = Fa
 
     if final_path:
         update_download_status(conn, track_id, playlist_name, success=True, file_path=final_path)
+        if not reconcile:
+            record_history(
+                conn, "imported", table_name=playlist_name, track_id=track_id,
+                path=final_path,
+                match=match_method,
+                username=(source or {}).get("user"),
+                filename=(source or {}).get("filename"),
+            )
         return True, final_path
 
     logging.error(f"❌ Failed to move {file_path} to playlist folder.")
     return False, None
 
 
-def _reject_and_log(file_path, playlist_name, conn, track_id=None, reason="unknown", destructive: bool = True):
+# Rejections that condemn the peer file for every track (see
+# process_downloaded_file). Everything else is a per-track mismatch.
+_PEER_FAULT_REASONS = ("invalid metadata", "missing tags; unreadable duration")
+
+
+def _reject_and_log(file_path, playlist_name, conn, track_id=None, reason="unknown", destructive: bool = True, source=None, peer_fault: bool = False):
     """
     On normal downloads we delete bad files; on reconcile we never delete.
+    The file always goes to the track's _tried list; a known slskd `source`
+    is blocklisted globally only when `peer_fault` (the file itself is bad).
     """
     filename = os.path.basename(file_path)
 
     if destructive:
+        record_history(
+            conn, "import_rejected", table_name=playlist_name, track_id=track_id,
+            reason=reason, path=file_path,
+            username=(source or {}).get("user"),
+            filename=(source or {}).get("filename"),
+        )
         try:
             os.remove(file_path)
             logging.info(f"🧹 Deleted file due to {reason}: {file_path}")
+            record_history(
+                conn, "deleted_file", table_name=playlist_name, track_id=track_id,
+                path=file_path, reason=reason,
+            )
         except Exception as e:
             logging.error(f"❌ Failed to delete file {file_path}: {e}")
     else:
@@ -364,6 +522,16 @@ def _reject_and_log(file_path, playlist_name, conn, track_id=None, reason="unkno
         add_tried_file(conn, playlist_name, track_id, filename)
     else:
         logging.debug(f"Skipping add_tried_file() because track ID is unknown for: {filename}")
+
+    if destructive and source and peer_fault:
+        add_blocklist(
+            conn,
+            source.get("user"),
+            source.get("filename"),
+            source.get("size"),
+            f"rejected after download: {reason}",
+            track_id,
+        )
 
 def _normalize_ext_list_env(var_name: str, default_csv: str) -> tuple:
     """
@@ -754,7 +922,15 @@ def setup_spotify_client():
     """
     logging.info("Setting up Spotify client")
     try:
-        auth_manager = SpotifyClientCredentials()
+        # SpotifyClientCredentials ignores SPOTIPY_CACHE_PATH and defaults to
+        # ./.cache, which the non-root container user can't write: spotipy
+        # warned "Couldn't write token to cache" on every call. Point the
+        # cache at the data dir (the tests point it into their sandbox).
+        auth_manager = SpotifyClientCredentials(
+            cache_handler=CacheFileHandler(
+                cache_path=os.getenv("SPOTIPY_CACHE_PATH", "./data/.spotipy-cache")
+            )
+        )
         sp = spotipy.Spotify(auth_manager=auth_manager)
     except Exception as e:
         logging.error(
@@ -1009,11 +1185,13 @@ def handle_track_download(track, playlist_name, conn):
         playlist_name=playlist_name,
         track_id=track.id,
         album=track.album,
+        duration_ms=track.duration_ms,
     )
 
     if file_path:
         verified, _final_path = process_downloaded_file(
-            file_path, playlist_name, conn, track_id=track.id
+            file_path, playlist_name, conn, expected_track=track,
+            source=soulseek_api.last_download,
         )
         if verified:
             clear_tried_entries(conn, playlist_name, track.id)
@@ -1052,33 +1230,46 @@ def try_upgrade_track(track, playlist_name, conn, current_path):
         track_id=track.id,
         album=track.album,
         max_version_tier=current_tier,
+        duration_ms=track.duration_ms,
     )
     if not new_file:
         logging.info(f"[upgrade] No better-tier candidate for '{track.name}'")
         return False
 
     verified, final_path = process_downloaded_file(
-        new_file, playlist_name, conn, track_id=track.id
+        new_file, playlist_name, conn, expected_track=track,
+        source=soulseek_api.last_download,
     )
     if not verified or not final_path:
         return False
 
-    # Delete the old file iff it differs from the new one. Same-basename is
-    # possible when the upgrade winner happens to share a filename — in that
-    # case shutil.move already overwrote it.
+    # Delete the old file only if the import landed on *this* track (re-read
+    # the row, like _process_manual_grabs) and it differs from the new one.
+    # Same-basename is possible when the upgrade winner happens to share a
+    # filename — in that case shutil.move already overwrote it.
+    imported = get_track(conn, playlist_name, track.id) or {}
     try:
         if (
-            current_path
+            imported.get("path") == final_path
+            and current_path
             and os.path.isfile(current_path)
             and os.path.abspath(current_path) != os.path.abspath(final_path)
         ):
             os.remove(current_path)
             logging.info(f"[upgrade] Replaced {current_path} -> {final_path}")
+            record_history(
+                conn, "deleted_file", table_name=playlist_name, track_id=track.id,
+                path=current_path, reason="replaced by upgrade",
+            )
         else:
             logging.info(f"[upgrade] Wrote upgraded file: {final_path}")
     except OSError as e:
         logging.warning(f"[upgrade] Could not delete old file {current_path}: {e}")
 
+    record_history(
+        conn, "upgraded", table_name=playlist_name, track_id=track.id,
+        old_path=current_path, path=final_path,
+    )
     clear_tried_entries(conn, playlist_name, track.id)
     return True
 
@@ -1113,6 +1304,66 @@ def _run_upgrade_pass(conn, playlist_name):
             )
         finally:
             mark_upgrade_checked(conn, playlist_name, track.id)
+
+
+def _process_manual_grabs(conn):
+    """Download grabs queued from the track page's interactive search.
+
+    Runs on the daemon thread so only it writes files and the DB. Reuses
+    the automatic path: grab_candidate (tried/blocklist/history on
+    failure) then process_downloaded_file (tag check, move, import). A
+    manual failure does not count toward the track's attempts.
+    """
+    for req in runtime_state.pop_manual_grabs():
+        if _shutdown.is_set():
+            return
+        table_name, candidate = req["table_name"], req["candidate"]
+        row = get_track(conn, table_name, req["track_id"])
+        if not row:
+            continue
+        track = Track(
+            row["id"], row["name"], row["artists"], row["album"], table_name,
+            duration_ms=row["duration_ms"],
+        )
+        _touch_heartbeat()
+        runtime_state.set_activity(
+            "downloading",
+            detail=f"Manual grab: {track.name} — {track.artist}",
+            playlist_id=req["playlist_id"],
+            table_name=table_name,
+            track_id=track.id,
+            track_name=track.name,
+            track_artist=track.artist,
+        )
+        try:
+            file_path = soulseek_api.grab_candidate(
+                candidate, conn, table_name, track.id, source="manual"
+            )
+            if not file_path:
+                continue
+            verified, final_path = process_downloaded_file(
+                file_path, table_name, conn, expected_track=track, source=candidate
+            )
+            if not verified:
+                continue
+            clear_tried_entries(conn, table_name, track.id)
+            # The import is verified against this track only, but re-read the
+            # row anyway: replace the old file only if the import landed here.
+            imported = get_track(conn, table_name, track.id) or {}
+            old = row["path"]
+            if (
+                imported.get("path") == final_path
+                and old
+                and os.path.isfile(old)
+                and os.path.abspath(old) != os.path.abspath(final_path)
+            ):
+                os.remove(old)
+                record_history(
+                    conn, "deleted_file", table_name=table_name, track_id=track.id,
+                    path=old, reason="replaced by manual grab",
+                )
+        except Exception:
+            logging.exception(f"Manual grab failed for {track.id} in {table_name}")
 
 
 def _run_startup_reconciliation(sp, conn):
@@ -1161,9 +1412,8 @@ def _migrate_env_playlists(conn, sp):
 
 
 def main():
-    # Persist the Spotipy auth token across restarts on the data volume, and
-    # silence the "Couldn't write token to cache at: .cache" warning that
-    # spams otherwise (WORKDIR isn't writable by the non-root container user).
+    # Persist the Spotipy auth token across restarts on the data volume
+    # (read by setup_spotify_client's cache handler).
     os.environ.setdefault("SPOTIPY_CACHE_PATH", "/app/data/.spotipy-cache")
 
     setup_logging()
@@ -1231,6 +1481,7 @@ def main():
         while not _shutdown.is_set():
             _touch_heartbeat()
             _reload_settings(conn)
+            prune_history(conn, HISTORY_RETENTION_DAYS)
             playlists = list_playlists(conn, only_enabled=True)
             if sp is None:
                 # No Spotify credentials. Idle rather than spin: syncing is
@@ -1256,12 +1507,15 @@ def main():
                 "tracks_failed": 0,
             }
             try:
+                _process_manual_grabs(conn)
                 for pl in playlists:
                     if _shutdown.is_set():
                         break
                     counters = process_playlist(
                         sp, conn, pl["playlist_id"], ntfy_url, ntfy_topic
                     )
+                    # Between playlists too: a grab shouldn't wait a full cycle.
+                    _process_manual_grabs(conn)
                     if counters:
                         for k in cycle_totals:
                             cycle_totals[k] += counters.get(k, 0)

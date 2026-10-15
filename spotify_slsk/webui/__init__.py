@@ -30,6 +30,8 @@ import requests
 
 from .. import db
 from .. import runtime_state
+from .. import soulseek_api
+from ..soulseek_api import fmt_duration
 from ..utils import get_playlist_id, sanitize_table_name
 
 
@@ -161,9 +163,11 @@ SETTINGS_SPEC = [
     ("MIN_MATCH_SCORE", "0.62", "Accept threshold for downloaded-file -> DB match (0.0-1.0)", "ratio"),
     ("SLSKD_PREFERRED_FORMATS", "flac,mp3,aiff,wav", "Comma-separated, ordered — first format wins ties", "formats"),
     ("SLSKD_MIN_PEER_UPLOAD_SPEED", "0", "Passed to slskd; bytes/sec", "int0"),
-    ("SLSKD_MIN_EFFECTIVE_MP3_KBPS", "280", "Reject MP3s whose size/duration yields below this", "int0"),
+    ("SLSKD_MIN_EFFECTIVE_MP3_KBPS", "280", "Floor (kbps) for an MP3's effective bitrate, computed from file size and duration; catches 128 kbps files retagged as 320. Separate from the fixed 320 rule: an MP3 whose reported (or filename-inferred) bitrate is below 320 is always rejected, whatever this is set to", "int0"),
     ("SLSKD_EARLY_STOP_RESPONSES", "20", "Stop the slskd search once this many peers replied", "int1"),
+    ("SLSKD_MAX_DURATION_DIFF_SECONDS", "15", "Reject candidates whose length differs from Spotify's by more than this many seconds; also the tolerance for accepting an untagged download by filename + duration. 0 disables both", "int0"),
     ("SLSKD_WAIT_TIMEOUT", "60", "Seconds to wait for a downloaded file to appear on disk", "int1"),
+    ("HISTORY_RETENTION_DAYS", "90", "Delete history events older than this many days", "int1"),
     ("UPGRADE_CHECK_INTERVAL_HOURS", "168", "Re-search downloaded tracks for a better version_tier (Extended Mix > Original Mix); 0 disables", "int0"),
 ]
 
@@ -309,6 +313,9 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
     # Templates call csrf_token() to render the hidden field.
     app.jinja_env.globals["csrf_token"] = _csrf_token
     app.jinja_env.filters["human_bytes"] = _human_bytes
+    app.jinja_env.filters["duration_ms"] = (
+        lambda ms: fmt_duration(ms / 1000) if ms else "—"
+    )
 
     @app.after_request
     def _security_headers(response):
@@ -437,6 +444,8 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
             playlist_name=playlist_name,
             track=track,
             search_history=runtime_state.get_search_history(track_id),
+            history=db.list_history(g.conn, track_id=track_id, limit=50),
+            search=runtime_state.get_interactive_search((playlist_id, track_id)),
         )
 
     # ---- playlist mutations -------------------------------------------
@@ -496,6 +505,11 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
 
     @app.route("/playlist/<playlist_id>/delete", methods=["POST"])
     def delete_playlist(playlist_id):
+        # Dropping the rows is irreversible: require the explicit second
+        # step from the dashboard's confirm disclosure.
+        if request.form.get("confirm") != "1":
+            flash("Removal not confirmed; nothing was deleted.", "error")
+            return redirect(url_for("dashboard"))
         if db.remove_playlist(g.conn, playlist_id):
             flash("Playlist removed. Files on disk were kept.", "success")
         else:
@@ -526,6 +540,7 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
         if not table_name:
             abort(404)
         db.retry_track(g.conn, table_name, track_id)
+        db.record_history(g.conn, "retried", playlist_id=playlist_id, track_id=track_id)
         _wake()
         flash(
             "Cleared attempts and rejected-file history. Cycle starting now.",
@@ -534,6 +549,239 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
         return redirect(
             url_for("track_detail", playlist_id=playlist_id, track_id=track_id)
         )
+
+    # ---- interactive search -------------------------------------------
+
+    def _track_or_404(playlist_id, track_id):
+        _, table_name, _, _ = db.get_playlist_meta(g.conn, playlist_id)
+        if not table_name:
+            abort(404)
+        track = db.get_track(g.conn, table_name, track_id)
+        if not track:
+            abort(404)
+        return table_name, track
+
+    @app.route("/track/<playlist_id>/<track_id>/search", methods=["POST"])
+    def interactive_search_start(playlist_id, track_id):
+        _, track = _track_or_404(playlist_id, track_id)
+        key = (playlist_id, track_id)
+        token = runtime_state.start_interactive_search(key)
+        if token is None:
+            flash("A search for this track is already running.", "error")
+        else:
+            # Snapshot the blocklist here: the search thread gets no DB.
+            is_blocked = db.load_blocklist(g.conn)
+
+            def _run():
+                try:
+                    results = soulseek_api.interactive_search(
+                        track["artists"],
+                        track["name"],
+                        album=track["album"],
+                        duration_ms=track["duration_ms"],
+                        is_blocked=is_blocked,
+                    )
+                    runtime_state.finish_interactive_search(key, token, results=results)
+                except Exception as e:
+                    logging.exception("Interactive search failed")
+                    runtime_state.finish_interactive_search(key, token, error=str(e))
+
+            threading.Thread(target=_run, daemon=True, name="interactive-search").start()
+            flash("Searching slskd. Results appear below as soon as it finishes.", "success")
+        return redirect(
+            url_for("track_detail", playlist_id=playlist_id, track_id=track_id)
+            + "#interactive"
+        )
+
+    @app.route("/track/<playlist_id>/<track_id>/search")
+    def interactive_search_results(playlist_id, track_id):
+        _track_or_404(playlist_id, track_id)
+        return render_template(
+            "_interactive.html",
+            playlist_id=playlist_id,
+            track_id=track_id,
+            search=runtime_state.get_interactive_search((playlist_id, track_id)),
+        )
+
+    @app.route("/track/<playlist_id>/<track_id>/grab", methods=["POST"])
+    def interactive_grab(playlist_id, track_id):
+        table_name, track = _track_or_404(playlist_id, track_id)
+        back = url_for("track_detail", playlist_id=playlist_id, track_id=track_id)
+        search = runtime_state.get_interactive_search((playlist_id, track_id))
+        username = request.form.get("username", "")
+        filename = request.form.get("filename", "")
+        # Only results of this track's own search can be grabbed — the form
+        # is not a way to make the daemon fetch arbitrary peer paths.
+        candidate = next(
+            (
+                c
+                for c in (search or {}).get("results", [])
+                if c["user"] == username
+                and c["filename"] == filename
+                and str(c["size"]) == request.form.get("size", "")
+            ),
+            None,
+        )
+        if candidate is None:
+            flash("That result has expired. Run the search again.", "error")
+            return redirect(back)
+        if not candidate["accepted"] and request.form.get("force") != "1":
+            return render_template(
+                "grab_confirm.html",
+                playlist_id=playlist_id,
+                track=track,
+                candidate=candidate,
+            )
+        runtime_state.enqueue_manual_grab(
+            {
+                "playlist_id": playlist_id,
+                "table_name": table_name,
+                "track_id": track_id,
+                "candidate": candidate,
+            }
+        )
+        _wake()
+        flash("Grab queued. The daemon will download it next.", "success")
+        return redirect(back)
+
+    # ---- wanted -------------------------------------------------------
+
+    def _wanted_tracks():
+        """Every not-downloaded track across enabled playlists."""
+        rows = []
+        for pl in db.list_playlists(g.conn, only_enabled=True):
+            for t in db.list_tracks(g.conn, pl["table_name"]):
+                if not t["downloaded"]:
+                    t["playlist_id"] = pl["playlist_id"]
+                    t["playlist_name"] = pl["name"]
+                    t["table_name"] = pl["table_name"]
+                    rows.append(t)
+        return rows
+
+    @app.route("/wanted")
+    def wanted_page():
+        all_tracks = _wanted_tracks()
+        playlist_id = request.args.get("playlist") or None
+        query = (request.args.get("q") or "").strip()
+        tracks = all_tracks
+        if playlist_id:
+            tracks = [t for t in tracks if t["playlist_id"] == playlist_id]
+        if query:
+            needle = query.lower()
+            tracks = [
+                t
+                for t in tracks
+                if needle in (t["name"] or "").lower()
+                or needle in (t["artists"] or "").lower()
+                or needle in (t["album"] or "").lower()
+            ]
+        failures = db.latest_failures(g.conn)
+        for t in tracks:
+            t["last_failure"] = failures.get(t["id"])
+        return render_template(
+            "wanted.html",
+            tracks=tracks,
+            total=len(all_tracks),
+            playlists=db.list_playlists(g.conn, only_enabled=True),
+            playlist_id=playlist_id,
+            query=query,
+        )
+
+    @app.route("/wanted/search", methods=["POST"])
+    def wanted_search():
+        if request.form.get("all") == "1":
+            targets = [(t["playlist_id"], t["table_name"], t["id"]) for t in _wanted_tracks()]
+        else:
+            tables = {
+                p["playlist_id"]: p["table_name"]
+                for p in db.list_playlists(g.conn, only_enabled=True)
+            }
+            targets = []
+            for value in request.form.getlist("tracks"):
+                pid, _, tid = value.partition(":")
+                if pid in tables and tid:
+                    targets.append((pid, tables[pid], tid))
+        count = 0
+        for pid, table_name, tid in targets:
+            track = db.get_track(g.conn, table_name, tid)
+            if not track or track["downloaded"]:
+                continue
+            db.retry_track(g.conn, table_name, tid)
+            db.record_history(g.conn, "retried", playlist_id=pid, track_id=tid, bulk=True)
+            count += 1
+        if count:
+            _wake()
+            flash(f"Cleared attempts for {count} track(s). Cycle starting now.", "success")
+        else:
+            flash("No tracks selected.", "error")
+        return redirect(url_for("wanted_page"))
+
+    # ---- history ------------------------------------------------------
+
+    @app.route("/history")
+    def history_page():
+        event = request.args.get("event") or None
+        if event not in db.HISTORY_EVENTS:
+            event = None
+        playlist_id = request.args.get("playlist") or None
+        try:
+            before_id = int(request.args.get("before_id", ""))
+        except ValueError:
+            before_id = None
+        # SQLite integers are 64-bit: a larger bound raises OverflowError
+        # (500). Ids are positive, so anything above the max is "no bound".
+        if before_id is not None and not 0 < before_id < 2**63:
+            before_id = None
+        limit = 200
+        rows = db.list_history(
+            g.conn, event=event, playlist_id=playlist_id, before_id=before_id, limit=limit
+        )
+        playlists = db.list_playlists(g.conn)
+        tables = {p["playlist_id"]: p["table_name"] for p in playlists}
+        names = {}
+        for row in rows:
+            key = (row["playlist_id"], row["track_id"])
+            if key not in names and key[0] in tables and key[1]:
+                t = db.get_track(g.conn, tables[key[0]], key[1])
+                names[key] = f"{t['name']} — {t['artists']}" if t else None
+            row["track_label"] = names.get(key)
+        return render_template(
+            "history.html",
+            rows=rows,
+            events=db.HISTORY_EVENTS,
+            playlists=playlists,
+            event=event,
+            playlist_id=playlist_id,
+            older_id=rows[-1]["id"] if len(rows) == limit else None,
+        )
+
+    # ---- blocklist ----------------------------------------------------
+
+    @app.route("/blocklist")
+    def blocklist_page():
+        return render_template(
+            "blocklist.html", entries=db.list_blocklist(g.conn, limit=500)
+        )
+
+    @app.route("/blocklist/<int:entry_id>/delete", methods=["POST"])
+    def blocklist_delete(entry_id):
+        if db.remove_blocklist(g.conn, entry_id):
+            flash("Removed from the blocklist.", "success")
+        else:
+            flash("Blocklist entry not found.", "error")
+        return redirect(url_for("blocklist_page"))
+
+    @app.route("/blocklist/ban-user", methods=["POST"])
+    def blocklist_ban_user():
+        username = (request.form.get("username") or "").strip()
+        reason = (request.form.get("reason") or "").strip()[:200] or "banned manually"
+        if not username or len(username) > 200:
+            flash("Enter a Soulseek username.", "error")
+        elif db.add_blocklist(g.conn, username, None, None, reason):
+            flash(f'Banned "{username}". Their files are skipped from now on.', "success")
+        else:
+            flash(f'"{username}" is already banned.', "error")
+        return redirect(url_for("blocklist_page"))
 
     # ---- settings -----------------------------------------------------
 

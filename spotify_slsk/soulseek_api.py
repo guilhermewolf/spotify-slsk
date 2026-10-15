@@ -6,7 +6,14 @@ import unicodedata
 
 import slskd_api
 
-from .db import get_tried_files, add_tried_file, get_setting
+from .db import (
+    get_tried_files,
+    add_tried_file,
+    get_setting,
+    add_blocklist,
+    load_blocklist,
+    record_history,
+)
 from . import runtime_state
 
 DEFAULT_FORMATS = "flac,mp3,aiff,wav"
@@ -37,13 +44,23 @@ EXTERNAL_PROCESS_WAIT_TIMEOUT = int(os.getenv("SLSKD_WAIT_TIMEOUT", "60"))
 MIN_PEER_UPLOAD_SPEED = int(os.getenv("SLSKD_MIN_PEER_UPLOAD_SPEED", "0"))
 # MP3s whose effective bitrate (size*8/duration/1000) falls below this are
 # rejected even if their reported bitrate claims 320 — catches upsampled fakes.
+# Independent of the fixed rule in extract_candidates: an MP3 whose reported
+# or filename-inferred bitrate is known and below 320 is always rejected.
 MIN_EFFECTIVE_MP3_KBPS = int(os.getenv("SLSKD_MIN_EFFECTIVE_MP3_KBPS", "280"))
 # Cut the slskd search short once we have this many responses. slskd will
 # keep collecting responses for the full searchTimeout window otherwise.
 EARLY_STOP_RESPONSES = int(os.getenv("SLSKD_EARLY_STOP_RESPONSES", "20"))
+# Reject a candidate whose slskd-reported length differs from Spotify's
+# duration by more than this many seconds. 0 disables the check.
+MAX_DURATION_DIFF_SECONDS = int(os.getenv("SLSKD_MAX_DURATION_DIFF_SECONDS", "15"))
 
 _client = None
 _shutdown_event = None
+# The candidate dict behind the most recent successful download_and_verify,
+# so the caller can attribute a post-download rejection to the peer file
+# (blocklist) and record where the file came from (history). Daemon-thread
+# only.
+last_download = None
 
 
 def refresh_from_db(conn) -> None:
@@ -54,6 +71,7 @@ def refresh_from_db(conn) -> None:
     """
     global PREFERRED_FORMATS, MIN_PEER_UPLOAD_SPEED, MIN_EFFECTIVE_MP3_KBPS
     global EARLY_STOP_RESPONSES, EXTERNAL_PROCESS_WAIT_TIMEOUT
+    global MAX_DURATION_DIFF_SECONDS
 
     PREFERRED_FORMATS = _normalize_ext_list(
         get_setting(conn, "SLSKD_PREFERRED_FORMATS", DEFAULT_FORMATS)
@@ -70,6 +88,9 @@ def refresh_from_db(conn) -> None:
         )
         EXTERNAL_PROCESS_WAIT_TIMEOUT = int(
             get_setting(conn, "SLSKD_WAIT_TIMEOUT", "60")
+        )
+        MAX_DURATION_DIFF_SECONDS = int(
+            get_setting(conn, "SLSKD_MAX_DURATION_DIFF_SECONDS", "15")
         )
     except (TypeError, ValueError) as e:
         logging.warning(f"Bad numeric setting during refresh; using previous values: {e}")
@@ -89,15 +110,20 @@ def _interruptible_sleep(seconds: float) -> bool:
     return _shutdown_event.wait(seconds)
 
 
+def new_client():
+    """Build a fresh SlskdClient from env."""
+    return slskd_api.SlskdClient(
+        host=os.getenv("SLSKD_HOST_URL", "http://slskd:5030"),
+        api_key=os.getenv("SLSKD_API_KEY"),
+        url_base=os.getenv("SLSKD_URL_BASE", ""),
+    )
+
+
 def get_client():
-    """Lazily build and cache the SlskdClient. Reads env at first call."""
+    """Lazily build and cache the daemon's SlskdClient. Reads env at first call."""
     global _client
     if _client is None:
-        _client = slskd_api.SlskdClient(
-            host=os.getenv("SLSKD_HOST_URL", "http://slskd:5030"),
-            api_key=os.getenv("SLSKD_API_KEY"),
-            url_base=os.getenv("SLSKD_URL_BASE", ""),
-        )
+        _client = new_client()
     return _client
 
 
@@ -168,13 +194,14 @@ def _build_search_queries(artist: str, title: str, album: str | None = None) -> 
     return queries
 
 
-def _run_one_search(query: str, timeout: int = 60) -> list:
+def _run_one_search(query: str, timeout: int = 60, client=None) -> list:
     """Run a single slskd search to completion and return its responses.
 
     Returns [] on timeout, error, or shutdown. Always cleans up the slskd-side
     search record in the finally block so we don't leak ids on the daemon.
+    `client` defaults to the daemon's shared client.
     """
-    client = get_client()
+    client = client or get_client()
     logging.info(f"Searching for: {query}")
     search_id = None
     try:
@@ -338,6 +365,20 @@ def _version_tier(text: str) -> int:
     return 2
 
 
+def _duration_off(diff_seconds, longer_ok=False) -> bool:
+    """True when a file's length is outside MAX_DURATION_DIFF_SECONDS of the
+    expected one. A longer-cut version may run long but never short."""
+    if longer_ok and diff_seconds > 0:
+        return False
+    return abs(diff_seconds) > MAX_DURATION_DIFF_SECONDS
+
+
+def fmt_duration(seconds) -> str:
+    """Seconds -> "m:ss"."""
+    seconds = int(round(seconds or 0))
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
 def _effective_mp3_kbps(size_bytes, length_sec):
     if not size_bytes or not length_sec or length_sec <= 0:
         return None
@@ -451,107 +492,196 @@ def _title_coverage(expected_tokens, stem, artist_names, folder_tokens) -> float
     return len(expected_tokens) / (len(expected_tokens) + len(extras))
 
 
-def extract_candidates(
+def filename_match(path, expected_title, expected_artist):
+    """Judge a peer path's name against the expected track with the strict
+    wrong-song rules. Returns (title_coverage, reason); reason is None when
+    the name is this track.
+
+    Title evidence comes from the basename only; artist evidence may also
+    come from the folders (shares are laid out Artist\\Album\\NN - Title).
+    Folder text never supplies title words - that is how a "Vespers
+    (All-Night Vigil)" folder matched "All Night".
+    """
+    base = _remote_basename(path)
+    stem = os.path.splitext(base)[0]
+    folder_folded = _fold(" ".join(re.split(r"[\\/]", path or "")[:-1]))
+    artist_names = _artist_names(expected_artist)
+    title_tokens = _expected_title_tokens(expected_title)
+    # A basename that repeats its album folder ("Artist_Album Name_01_Song")
+    # must still name the title outside that phrase: the folder-word exclusion
+    # below would otherwise let "If Love Is a Skill & Georgia_01_If Love Is a
+    # Skill" pass for "Georgia".
+    padded = f" {_fold(stem)} "
+    for folder in re.split(r"[\\/]", path or "")[:-1]:
+        phrase = _fold(folder)
+        if phrase and set(phrase.split()) != title_tokens and f" {phrase} " in padded:
+            padded = padded.replace(f" {phrase} ", " ")
+            if not title_tokens <= set(padded.split()):
+                return 0.0, "title words only in the album/folder name"
+    coverage = _title_coverage(
+        title_tokens, stem, artist_names,
+        set(folder_folded.split()),
+    )
+    base_folded = _fold(stem)
+    if coverage == 0.0:
+        return coverage, "title words missing from filename"
+    if coverage < MIN_TITLE_COVERAGE:
+        return coverage, f"title coverage {coverage:.2f} < {MIN_TITLE_COVERAGE}"
+    if not any(
+        _artist_in(n, base_folded) or _artist_in(n, folder_folded)
+        for n in artist_names
+    ):
+        return coverage, "artist not in filename or folder"
+    # A different version (remix/live/... on one side only) is never usable.
+    if _version_mismatch(expected_title, stem, expected_artist):
+        got = ", ".join(sorted(_version_keywords(stem, expected_artist))) or "none"
+        want = ", ".join(sorted(_version_keywords(expected_title, expected_artist))) or "none"
+        return coverage, f"version mismatch ({got} vs expected {want})"
+    return coverage, None
+
+
+def evaluate_candidates(
     search_results,
     expected_title,
     expected_artist,
+    max_version_tier=None,
+    expected_duration_ms=None,
+    is_blocked=None,
 ):
     """
-    Extract valid file candidates from slskd search results based on title and
-    artist matching. Unknown MP3 bitrates are allowed (slskd often reports None);
-    files are hard-rejected only when we *know* quality is too low.
+    Judge every file in slskd search results against the expected track.
 
-    Title evidence comes from the basename only. Artist evidence may also come
-    from the peer's folders: real shares are laid out Artist\\Album\\NN - Title,
-    so the basename often lacks the artist. Folder text never supplies title
-    words - that is how a "Vespers (All-Night Vigil)" folder matched "All Night".
+    Returns one dict per file (in response order) carrying the candidate
+    fields plus ``accepted`` and, when rejected, a short human ``reason``
+    ("format not allowed: .wma", "bitrate 192 < 320", ...). Unknown MP3
+    bitrates are allowed (slskd often reports None); files are hard-rejected
+    only when we *know* quality is too low.
+
+    `max_version_tier`, when set, rejects anything not *strictly better*
+    (used by the upgrade pass). `expected_duration_ms` (Spotify) rejects
+    files whose reported length is more than MAX_DURATION_DIFF_SECONDS off.
+    `is_blocked(username, filename)` (see db.load_blocklist) rejects
+    blocklisted peer files and banned peers. Title/artist/version use the
+    strict rules in `filename_match`.
     """
-    candidates = []
-    expected_tokens = _expected_title_tokens(expected_title)
-    artist_names = _artist_names(expected_artist)
+    evaluated = []
 
     for result in search_results:
         user = result.get("username", "unknown")
         user_upload_speed = result.get("uploadSpeed", 0) or 0
-        files = result.get("files", [])
 
-        for file in files:
+        for file in result.get("files", []):
             filename = file.get("filename")
             if not filename:
                 continue
 
             ext = os.path.splitext(filename)[1].lower()
-            if ext not in PREFERRED_FORMATS:
-                continue
-
             # slskd sends camelCase "bitRate" (only for lossy files); the old
             # lowercase read was always None, so the floor below never applied.
             reported_bitrate = file.get("bitRate")
             length_sec = file.get("length")
             size_bytes = file.get("size")
-            inferred_bitrate = _infer_bitrate_from_name(_remote_basename(filename))
+            base = _remote_basename(filename)
+            inferred_bitrate = _infer_bitrate_from_name(base)
             effective_bitrate = (
                 reported_bitrate if reported_bitrate is not None else inferred_bitrate
             )
             effective_mp3 = (
                 _effective_mp3_kbps(size_bytes, length_sec) if ext == ".mp3" else None
             )
+            entry = {
+                "user": user,
+                "user_upload_speed": user_upload_speed,
+                # Full peer path: slskd needs it to enqueue the transfer, and
+                # it is the blocklist key. `basename` is what `_tried` stores.
+                "filename": filename,
+                "basename": base,
+                "size": size_bytes,
+                "bitrate": effective_bitrate,
+                "effective_mp3": effective_mp3,
+                "ext": ext,
+                "length": length_sec,
+                "sample_rate": file.get("sampleRate"),
+                "bit_depth": file.get("bitDepth"),
+                "free_slot": result.get("hasFreeUploadSlot"),
+                "queue_length": result.get("queueLength"),
+                "title_coverage": None,
+                "version_tier": _version_tier(base),
+                "accepted": False,
+                "reason": None,
+            }
+            evaluated.append(entry)
 
+            if is_blocked is not None and is_blocked(user, filename):
+                entry["reason"] = "blocklisted"
+            elif ext not in PREFERRED_FORMATS:
+                entry["reason"] = f"format not allowed: {ext or '(none)'}"
             # Reject MP3s whose reported/inferred bitrate is known-low.
-            if ext == ".mp3" and effective_bitrate is not None and effective_bitrate < 320:
-                logging.debug(
-                    f"Skipped {filename}: reported bitrate {effective_bitrate} < 320"
-                )
-                continue
-
+            elif ext == ".mp3" and effective_bitrate is not None and effective_bitrate < 320:
+                entry["reason"] = f"bitrate {effective_bitrate} < 320"
             # Reject MP3s whose size/duration shows they're effectively below the
             # configured floor — catches 128 kbps files retagged as 320.
-            if (
+            elif (
                 ext == ".mp3"
                 and effective_mp3 is not None
                 and effective_mp3 < MIN_EFFECTIVE_MP3_KBPS
             ):
-                logging.debug(
-                    f"Skipped {filename}: effective bitrate {effective_mp3} < {MIN_EFFECTIVE_MP3_KBPS}"
+                entry["reason"] = (
+                    f"effective bitrate {effective_mp3} < {MIN_EFFECTIVE_MP3_KBPS}"
                 )
-                continue
-
-            base = _remote_basename(filename)
-            stem = os.path.splitext(base)[0]
-            folder_folded = _fold(" ".join(re.split(r"[\\/]", filename)[:-1]))
-
-            title_coverage = _title_coverage(
-                expected_tokens, stem, artist_names, set(folder_folded.split())
-            )
-            if title_coverage < MIN_TITLE_COVERAGE:
-                continue
-            base_folded = _fold(stem)
-            if not any(
-                _artist_in(n, base_folded) or _artist_in(n, folder_folded)
-                for n in artist_names
+            elif (
+                MAX_DURATION_DIFF_SECONDS > 0
+                and expected_duration_ms
+                and length_sec
+                and _duration_off(
+                    length_sec - expected_duration_ms / 1000,
+                    # Extended/Original Mixes are the long cuts the version
+                    # tiers prefer; Spotify often lists the radio edit.
+                    longer_ok=_version_tier(base) < _version_tier(expected_title),
+                )
             ):
-                continue
-            # A different version (remix/live/... on one side only) is never usable.
-            if _version_mismatch(expected_title, stem, expected_artist):
+                entry["reason"] = (
+                    f"duration {fmt_duration(length_sec)} vs "
+                    f"{fmt_duration(expected_duration_ms / 1000)}"
+                )
+            if entry["reason"]:
+                logging.debug(f"Skipped {filename}: {entry['reason']}")
                 continue
 
-            candidates.append(
-                {
-                    "user": user,
-                    "user_upload_speed": user_upload_speed,
-                    # Full peer path: slskd needs it to enqueue the transfer.
-                    "filename": filename,
-                    "basename": base,
-                    "size": size_bytes,
-                    "bitrate": effective_bitrate,
-                    "effective_mp3": effective_mp3,
-                    "ext": ext,
-                    "title_coverage": round(title_coverage, 2),
-                    "version_tier": _version_tier(base),
-                }
-            )
+            title_coverage, reason = filename_match(filename, expected_title, expected_artist)
+            entry["title_coverage"] = round(title_coverage, 2)
+            if reason:
+                entry["reason"] = reason
+            elif max_version_tier is not None and entry["version_tier"] >= max_version_tier:
+                entry["reason"] = "not a better version than the current file"
+            else:
+                entry["accepted"] = True
+            if entry["reason"]:
+                logging.debug(f"Skipped {filename}: {entry['reason']}")
 
-    return candidates
+    return evaluated
+
+
+def extract_candidates(search_results, expected_title, expected_artist):
+    """Return only the accepted candidates from `evaluate_candidates`."""
+    return [
+        c
+        for c in evaluate_candidates(search_results, expected_title, expected_artist)
+        if c["accepted"]
+    ]
+
+
+def summarize_evaluation(evaluated, limit=50):
+    """Compact form of an evaluation for the per-track search history."""
+    rejected = [c for c in evaluated if not c["accepted"]]
+    return {
+        "candidate_count": len(evaluated) - len(rejected),
+        "rejected_count": len(rejected),
+        "rejections": [
+            {"user": c["user"], "filename": c["filename"], "reason": c["reason"]}
+            for c in rejected[:limit]
+        ],
+    }
 
 
 def sort_candidates(candidates):
@@ -581,13 +711,64 @@ def sort_candidates(candidates):
     )
 
 
+def interactive_search(
+    artist, title, album=None, duration_ms=None, is_blocked=None, timeout=60
+):
+    """Read-only search for the track page: walk the whole query waterfall,
+    evaluate every file, and return them all — accepted first in auto-pick
+    order, then rejected — de-duplicated by (user, filename).
+
+    Runs on a web-UI thread, so it uses its own slskd client rather than
+    sharing the daemon's requests session, and never touches the DB.
+    """
+    client = new_client()
+    seen = set()
+    evaluated = []
+    for query in _build_search_queries(artist, title, album):
+        results = _run_one_search(query, timeout, client=client)
+        for c in evaluate_candidates(
+            results or [],
+            title,
+            artist,
+            expected_duration_ms=duration_ms,
+            is_blocked=is_blocked,
+        ):
+            key = (c["user"], c["filename"])
+            if key not in seen:
+                seen.add(key)
+                evaluated.append(c)
+    accepted = sort_candidates([c for c in evaluated if c["accepted"]])
+    return accepted + [c for c in evaluated if not c["accepted"]]
+
+
+# slskd can report "Completed, Succeeded" while the file still sits in its
+# incomplete directory; the move to the final location lands moments later.
+COMPLETION_GRACE_SECONDS = 30
+
+
 def find_file_in_downloads(filename, base_dir=None):
+    """Path of a *finished* download named `filename`, or None. slskd's
+    incomplete directory is never searched: a hit there is still being
+    written."""
     if base_dir is None:
         base_dir = DOWNLOAD_DIR
-    for root, _, files in os.walk(base_dir):
+    for root, dirs, files in os.walk(base_dir):
+        dirs[:] = [d for d in dirs if d != "incomplete"]
         if filename in files:
             return os.path.join(root, filename)
     return None
+
+
+def _await_completed_file(filename, grace=None):
+    """Poll for a finished download for up to `grace` seconds (1 s steps,
+    interruptible by shutdown). Returns the path or None."""
+    deadline = time.time() + (COMPLETION_GRACE_SECONDS if grace is None else grace)
+    while True:
+        path = find_file_in_downloads(filename)
+        if path or time.time() >= deadline:
+            return path
+        if _interruptible_sleep(1):
+            return None
 
 
 def download_and_verify(
@@ -598,19 +779,28 @@ def download_and_verify(
     playlist_name,
     track_id,
     max_version_tier=None,
+    evaluated=None,
+    expected_duration_ms=None,
 ):
     """Filter, sort, and try to download the best candidate from one search.
 
     `max_version_tier`, when set, restricts candidates to *strictly better*
     version tiers (used by the upgrade pass — Original Mix already on disk
     means we'll only consider tier 0 = Extended Mix).
+
+    `evaluated` lets a caller that already ran `evaluate_candidates` (to
+    record rejection reasons) pass the result instead of recomputing it.
     """
-    client = get_client()
-    candidates = extract_candidates(search_results, expected_title, expected_artist)
-    if max_version_tier is not None:
-        candidates = [
-            c for c in candidates if c.get("version_tier", 2) < max_version_tier
-        ]
+    if evaluated is None:
+        evaluated = evaluate_candidates(
+            search_results,
+            expected_title,
+            expected_artist,
+            max_version_tier=max_version_tier,
+            expected_duration_ms=expected_duration_ms,
+            is_blocked=load_blocklist(conn) if conn is not None else None,
+        )
+    candidates = [c for c in evaluated if c["accepted"]]
     if not candidates:
         logging.warning("No valid candidates found.")
         return None
@@ -625,45 +815,102 @@ def download_and_verify(
             logging.info(f"Skipping previously tried file: {basename}")
             continue
 
-        logging.info(
-            f"Attempting download: {candidate['filename']} from {candidate['user']}"
-        )
-        try:
-            client.transfers.enqueue(
-                username=candidate["user"],
-                files=[
-                    {
-                        "filename": candidate["filename"],
-                        "size": candidate["size"],
-                    }
-                ],
-            )
-
-            file_path = wait_for_completion(candidate)
-            if file_path:
-                logging.info(f"Downloaded and verified: {file_path}")
-                if not _wait_for_external_processing(file_path):
-                    logging.warning(
-                        f"Post-download verification failed for: {basename}"
-                    )
-                    add_tried_file(conn, playlist_name, track_id, basename)
-                    continue
-                return file_path
-            logging.warning(f"Download failed or was not confirmed: {basename}")
-            add_tried_file(conn, playlist_name, track_id, basename)
-        except Exception as e:
-            # Don't blacklist on this path: an exception here is usually a
-            # transient slskd-API hiccup (JSON decode against an empty body,
-            # connection reset, etc.), not a "this peer rejected the file"
-            # signal. add_tried_file is permanent until the track succeeds,
-            # so a single bad response would permanently ban a perfectly
-            # good candidate. Let the next cycle retry naturally — bounded
-            # by MAX_ATTEMPTS_BEFORE_SUSPEND on the track itself.
-            logging.error(
-                f"Error downloading {basename} from {candidate['user']}: {e}"
-            )
+        file_path = grab_candidate(candidate, conn, playlist_name, track_id)
+        if file_path:
+            return file_path
 
     logging.warning("Exhausted all download attempts.")
+    return None
+
+
+def _shutting_down() -> bool:
+    return _shutdown_event is not None and _shutdown_event.is_set()
+
+
+def _candidate_history(candidate) -> dict:
+    return {
+        "username": candidate.get("user"),
+        "filename": candidate.get("filename"),
+        "format": (candidate.get("ext") or "").lstrip(".") or None,
+        "bitrate": candidate.get("bitrate"),
+        "size": candidate.get("size"),
+    }
+
+
+def grab_candidate(candidate, conn, playlist_name, track_id, source="auto"):
+    """Enqueue one candidate, wait for it, and return the local path or None.
+
+    Any failure is remembered in the track's `_tried` table and history.
+    Only a definitive peer-file fault — slskd reporting the transfer
+    failed/errored/rejected/aborted (`candidate["peer_fault"]`, set by
+    wait_for_completion) — also blocklists the file for every track. Our
+    own wait timeout, a "Queued, Remotely" stall, slskd not listing the
+    transfer yet, a file we could not find afterwards, or a shutdown say
+    nothing certain about the peer, and a global ban would outlive the
+    track's retry. On success the candidate is stashed in `last_download`.
+    `source` ("auto"/"manual") is recorded in history.
+    """
+    global last_download
+    candidate.pop("failure", None)
+    candidate.pop("peer_fault", None)
+    basename = _remote_basename(candidate["filename"])
+    logging.info(
+        f"Attempting download: {candidate['filename']} from {candidate['user']}"
+    )
+    try:
+        get_client().transfers.enqueue(
+            username=candidate["user"],
+            files=[
+                {
+                    "filename": candidate["filename"],
+                    "size": candidate["size"],
+                }
+            ],
+        )
+
+        file_path = wait_for_completion(candidate)
+        if file_path:
+            logging.info(f"Downloaded and verified: {file_path}")
+            if _wait_for_external_processing(file_path):
+                last_download = candidate
+                record_history(
+                    conn, "grabbed", table_name=playlist_name, track_id=track_id,
+                    source=source, **_candidate_history(candidate),
+                )
+                return file_path
+            logging.warning(f"Post-download verification failed for: {basename}")
+            failure = "file did not appear after download"
+        else:
+            logging.warning(f"Download failed or was not confirmed: {basename}")
+            failure = candidate.get("failure") or "transfer failed"
+        add_tried_file(conn, playlist_name, track_id, basename)
+        # A shutdown mid-transfer says nothing about the peer.
+        if not _shutting_down():
+            record_history(
+                conn, "download_failed", table_name=playlist_name,
+                track_id=track_id, reason=failure, source=source,
+                **_candidate_history(candidate),
+            )
+            if candidate.get("peer_fault"):
+                add_blocklist(
+                    conn,
+                    candidate["user"],
+                    candidate["filename"],
+                    candidate.get("size"),
+                    failure,
+                    track_id,
+                )
+    except Exception as e:
+        # Don't blacklist on this path: an exception here is usually a
+        # transient slskd-API hiccup (JSON decode against an empty body,
+        # connection reset, etc.), not a "this peer rejected the file"
+        # signal. add_tried_file is permanent until the track succeeds,
+        # so a single bad response would permanently ban a perfectly
+        # good candidate. Let the next cycle retry naturally — bounded
+        # by MAX_ATTEMPTS_BEFORE_SUSPEND on the track itself.
+        logging.error(
+            f"Error downloading {basename} from {candidate['user']}: {e}"
+        )
     return None
 
 
@@ -676,6 +923,7 @@ def search_and_download(
     album=None,
     max_version_tier=None,
     timeout=60,
+    duration_ms=None,
 ):
     """Run the full query waterfall, attempting download from each.
 
@@ -684,16 +932,38 @@ def search_and_download(
     fixes the case where slskd returns N junk responses for a long
     artist+title query but a shorter query would have surfaced good matches.
     """
+    global last_download
+    last_download = None
     queries = _build_search_queries(artist, title, album)
     if not queries:
         return None
+    is_blocked = load_blocklist(conn) if conn is not None else None
+    results_total = accepted_total = 0
     for query in queries:
         results = _run_one_search(query, timeout)
-        # Record every attempt — even empty ones — so the inspector shows
-        # the full waterfall the daemon actually walked.
-        runtime_state.record_search(
-            track_id, query, result_count=len(results) if results else 0
+        evaluated = (
+            evaluate_candidates(
+                results,
+                title,
+                artist,
+                max_version_tier=max_version_tier,
+                expected_duration_ms=duration_ms,
+                is_blocked=is_blocked,
+            )
+            if results
+            else []
         )
+        # Record every attempt — even empty ones — so the inspector shows
+        # the full waterfall the daemon actually walked, and why each
+        # file was turned down.
+        runtime_state.record_search(
+            track_id,
+            query,
+            result_count=len(results) if results else 0,
+            **summarize_evaluation(evaluated),
+        )
+        results_total += len(results) if results else 0
+        accepted_total += sum(1 for c in evaluated if c["accepted"])
         if not results:
             continue
         file_path = download_and_verify(
@@ -704,9 +974,17 @@ def search_and_download(
             playlist_name=playlist_name,
             track_id=track_id,
             max_version_tier=max_version_tier,
+            evaluated=evaluated,
         )
         if file_path:
             return file_path
+    # Failed grabs record their own events; this covers "nothing usable".
+    # The upgrade pass (max_version_tier) finding nothing is not a failure.
+    if accepted_total == 0 and max_version_tier is None:
+        record_history(
+            conn, "download_failed", table_name=playlist_name, track_id=track_id,
+            reason=f"no acceptable candidate ({results_total} results)",
+        )
     return None
 
 
@@ -725,6 +1003,12 @@ def _transfer_outcome(state):
     if any(w in s for w in ("failed", "aborted", "errored", "rejected", "timedout")):
         return "failed"
     return None
+
+
+# Terminal slskd states that are the peer's (or its file's) fault. Other
+# failures — "Completed, TimedOut", "Completed, Cancelled" — may be ours or
+# the network's, so they never blocklist.
+_PEER_FAULT_STATES = ("failed", "errored", "rejected", "aborted")
 
 
 def wait_for_completion(candidate, timeout=300):
@@ -753,6 +1037,7 @@ def wait_for_completion(candidate, timeout=300):
 
     if not transfer_id:
         logging.error(f"Transfer ID not found for {candidate['filename']}")
+        candidate["failure"] = "transfer not found in slskd"
         return None
 
     start = time.time()
@@ -766,21 +1051,27 @@ def wait_for_completion(candidate, timeout=300):
                     outcome = _transfer_outcome(state)
                     if outcome == "succeeded":
                         filename = _remote_basename(candidate["filename"])
-                        real_path = find_file_in_downloads(filename)
+                        real_path = _await_completed_file(filename)
                         logging.info(f"File found: {real_path}")
                         if real_path and _wait_for_external_processing(real_path):
                             return real_path
                         logging.warning(
                             f"File not confirmed after download: {filename}"
                         )
+                        candidate["failure"] = "file not found after download"
                         return None
                     if outcome == "failed":
                         logging.warning(
                             f"Transfer failed: {file['filename']} — state: {state}"
                         )
+                        candidate["failure"] = f"transfer {state}"
+                        candidate["peer_fault"] = any(
+                            w in state for w in _PEER_FAULT_STATES
+                        )
                         return None
         if time.time() - start > timeout:
             logging.warning(f"Transfer timeout for {candidate['filename']}")
+            candidate["failure"] = "transfer timed out"
             return None
         if _interruptible_sleep(2):
             return None

@@ -42,6 +42,8 @@
     </audio>
   </dd>
   {% endif %}
+  <dt>Duration</dt>
+  <dd>{{ track.duration_ms|duration_ms }}</dd>
   <dt>Attempts</dt>
   <dd>{{ track.attempts }}</dd>
   <dt>Last attempt</dt>
@@ -72,6 +74,18 @@
 </form>
 {% endif %}
 
+<h2 style="font-size:1.05rem;margin-top:2rem;">Interactive search</h2>
+<form method="POST"
+      action="{{ url_for('interactive_search_start', playlist_id=playlist_id, track_id=track.id) }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <button type="submit" class="secondary outline" style="width:auto"
+          {% if search and search.status == 'running' %}disabled{% endif %}>Search slskd now</button>
+  <small class="subtle">
+    Lists every file found, including rejected ones and why. Grabbing hands the file to the daemon.
+  </small>
+</form>
+{% with track_id = track.id %}{% include "_interactive.html" %}{% endwith %}
+
 {% if search_history %}
 <h2 style="font-size:1.05rem;margin-top:2rem;">Recent slskd searches</h2>
 <p class="subtle">
@@ -80,14 +94,46 @@
 </p>
 <div class="table-wrap">
   <table class="track-table">
-    <thead><tr><th scope="col">Query</th><th scope="col" class="num">Results</th></tr></thead>
+    <thead><tr>
+      <th scope="col">Query</th>
+      <th scope="col" class="num">Results</th>
+      <th scope="col" class="num">Accepted</th>
+      <th scope="col" class="num">Rejected</th>
+    </tr></thead>
     <tbody>
       {% for h in search_history|reverse %}
-      <tr><td><code>{{ h.query }}</code></td><td class="num">{{ h.result_count }}</td></tr>
+      <tr>
+        <td>
+          <code>{{ h.query }}</code>
+          {% if h.rejections %}
+          <details>
+            <summary class="subtle">Why files were rejected</summary>
+            <ul class="reject-list">
+              {% for r in h.rejections %}
+              <li><code>{{ r.filename }}</code> <span class="subtle">({{ r.user }})</span> — {{ r.reason }}</li>
+              {% endfor %}
+              {% if h.rejected_count and h.rejected_count > h.rejections|length %}
+              <li class="subtle">… and {{ h.rejected_count - h.rejections|length }} more</li>
+              {% endif %}
+            </ul>
+          </details>
+          {% endif %}
+        </td>
+        <td class="num">{{ h.result_count }}</td>
+        <td class="num">{{ h.candidate_count if h.candidate_count is not none else '—' }}</td>
+        <td class="num">{{ h.rejected_count if h.rejected_count is not none else '—' }}</td>
+      </tr>
       {% endfor %}
     </tbody>
   </table>
 </div>
+{% endif %}
+
+{% if history %}
+<h2 style="font-size:1.05rem;margin-top:2rem;">History</h2>
+{% set rows = history %}
+{% set show_track = false %}
+{% include "_history_rows.html" %}
 {% endif %}
 
 {% if track.tried %}

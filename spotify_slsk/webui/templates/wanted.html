@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% set active_page = 'wanted' %}
+{% block title %}Wanted · spotify-slsk{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Wanted</h1>
+    <p class="subtle">{{ total }} track{{ '' if total == 1 else 's' }} not downloaded yet, across enabled playlists.</p>
+    <p class="subtle">Re-searching does not clear <a href="{{ url_for('blocklist_page') }}">blocklisted</a> peer files or peers; remove them there to try them again.</p>
+  </div>
+  {% if total %}
+  <form method="POST" action="{{ url_for('wanted_search') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <details class="confirm">
+      <summary role="button" class="secondary outline">Search all missing…</summary>
+      <p>Clears attempts, pauses and rejected-file lists for all {{ total }} missing tracks and starts a cycle.</p>
+      <button type="submit" name="all" value="1" style="width:auto">Yes, search all {{ total }}</button>
+    </details>
+  </form>
+  {% endif %}
+</div>
+
+<form class="filter-form" method="GET" role="search" action="{{ url_for('wanted_page') }}">
+  <select name="playlist" aria-label="Playlist">
+    <option value="">All playlists</option>
+    {% for p in playlists %}
+    <option value="{{ p.playlist_id }}" {% if p.playlist_id == playlist_id %}selected{% endif %}>{{ p.name }}</option>
+    {% endfor %}
+  </select>
+  <input type="search" name="q" value="{{ query }}" style="flex:1"
+         aria-label="Filter by title, artist or album" placeholder="Filter by title, artist or album…">
+  <button type="submit" class="secondary outline">Filter</button>
+</form>
+
+{% if tracks %}
+<form method="POST" action="{{ url_for('wanted_search') }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <div class="table-wrap">
+    <table class="track-table">
+      <thead>
+        <tr>
+          <th scope="col"><span class="visually-hidden">Select</span></th>
+          <th scope="col">Track</th>
+          <th scope="col">Playlist</th>
+          <th scope="col">Status</th>
+          <th scope="col">Last failure</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for t in tracks %}
+        <tr>
+          <td>
+            <input type="checkbox" name="tracks" value="{{ t.playlist_id }}:{{ t.id }}"
+                   aria-label="Select {{ t.name }}">
+          </td>
+          <td>
+            <a class="track-title" href="{{ url_for('track_detail', playlist_id=t.playlist_id, track_id=t.id) }}">{{ t.name }}</a>
+            <div class="subtle">{{ t.artists }}</div>
+          </td>
+          <td class="subtle">{{ t.playlist_name }}</td>
+          <td class="nowrap">
+            <span class="badge badge-{{ t.status }}">{{ t.status }}</span>
+            {% if t.status == 'suspended' and t.suspended_until %}
+              <div class="subtle">until {{ t.suspended_until }}</div>
+            {% endif %}
+            {% if t.attempts %}<div class="subtle">{{ t.attempts }} attempt{{ '' if t.attempts == 1 else 's' }}</div>{% endif %}
+          </td>
+          <td class="subtle">{{ t.last_failure or '—' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p><button type="submit" style="width:auto">Search selected</button></p>
+</form>
+{% else %}
+<div class="empty">
+  <h2>Nothing wanted</h2>
+  <p>{% if query or playlist_id %}No missing track matches that filter.{% else %}Every track is downloaded.{% endif %}</p>
+</div>
+{% endif %}
+
+{% endblock %}

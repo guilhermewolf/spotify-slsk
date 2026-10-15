@@ -1,9 +1,10 @@
+import json
 import os
 import sqlite3
 import logging
 from .models import Track
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
@@ -24,6 +25,8 @@ def _ensure_schema_version(conn: sqlite3.Connection) -> None:
     """Bootstrap PRAGMA user_version so future migrations can diff cleanly."""
     try:
         current = conn.execute("PRAGMA user_version").fetchone()[0]
+        if current < 5:
+            _migrate_to_v5(conn)
         if current < SCHEMA_VERSION:
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.commit()
@@ -39,6 +42,35 @@ def _ensure_schema_version(conn: sqlite3.Connection) -> None:
             )
     except sqlite3.Error as e:
         logging.warning(f"Failed to read/set schema user_version: {e}")
+
+
+def _migrate_to_v5(conn: sqlite3.Connection) -> None:
+    """v5: per-playlist tables gain `duration_ms` (Spotify track length).
+
+    Every catalogued table is migrated here rather than lazily in
+    create_table, because the webui reads tables of playlists the daemon
+    hasn't synced since the upgrade (disabled ones, for instance). Stored
+    snapshots are cleared so the next sync re-reads every track and
+    backfills the new column; existing rows are NULL until then.
+    """
+    tables = [
+        r[0]
+        for r in conn.execute(
+            "SELECT DISTINCT m.table_name FROM playlists_meta m "
+            "JOIN sqlite_master s ON s.type = 'table' AND s.name = m.table_name"
+        )
+    ]
+    with conn:
+        for table_name in tables:
+            _add_duration_column(conn, table_name)
+        conn.execute("UPDATE playlists_meta SET snapshot_id = NULL")
+
+
+def _add_duration_column(conn: sqlite3.Connection, table_name: str) -> None:
+    cols = {row[1] for row in conn.execute(f'PRAGMA table_info("{table_name}")')}
+    if "duration_ms" not in cols:
+        conn.execute(f'ALTER TABLE "{table_name}" ADD COLUMN duration_ms INTEGER')
+        logging.info(f"Migrated {table_name}: added duration_ms column")
 
 
 def _ensure_playlists_meta_table(conn: sqlite3.Connection) -> None:
@@ -106,6 +138,54 @@ def _ensure_cycle_history_table(conn: sqlite3.Connection) -> None:
         logging.error(f"Error ensuring cycle_history: {e}")
 
 
+def _ensure_blocklist_table(conn: sqlite3.Connection) -> None:
+    """Peer files (or whole peers, filename NULL) never to be grabbed again.
+
+    Unlike the per-playlist `_tried` table, this is global and survives a
+    successful download — a peer that serves broken transfers stays out.
+    Added in schema v5.
+    """
+    try:
+        with conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS blocklist ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "username TEXT NOT NULL, "
+                "filename TEXT, "
+                "size INTEGER, "
+                "reason TEXT, "
+                "track_id TEXT, "
+                "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_blocklist_user_file "
+                "ON blocklist (username, filename)"
+            )
+    except sqlite3.Error as e:
+        logging.error(f"Error ensuring blocklist: {e}")
+
+
+def _ensure_history_table(conn: sqlite3.Connection) -> None:
+    """Persistent event log (schema v5): grabbed, imported, download_failed,
+    import_rejected, upgraded, retried, deleted_file. Pruned by age via
+    prune_history."""
+    try:
+        with conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS history ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "ts TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+                "event TEXT NOT NULL, "
+                "playlist_id TEXT, "
+                "track_id TEXT, "
+                "data_json TEXT)"
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_history_track ON history (track_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_history_ts ON history (ts)")
+    except sqlite3.Error as e:
+        logging.error(f"Error ensuring history: {e}")
+
+
 def create_connection(db_file):
     try:
         conn = sqlite3.connect(db_file, timeout=30)
@@ -113,6 +193,8 @@ def create_connection(db_file):
         _ensure_playlists_meta_table(conn)
         _ensure_settings_table(conn)
         _ensure_cycle_history_table(conn)
+        _ensure_blocklist_table(conn)
+        _ensure_history_table(conn)
         _ensure_schema_version(conn)
 
         # sqlite3.connect() succeeds on a corrupt or non-SQLite file — the
@@ -123,7 +205,8 @@ def create_connection(db_file):
         # daemon would run cycles that silently do nothing.
         conn.execute("SELECT 1 FROM playlists_meta LIMIT 1").fetchone()
 
-        logging.info(f"Connected to SQLite database: {db_file}")
+        # DEBUG: the web UI opens a connection per request.
+        logging.debug(f"Connected to SQLite database: {db_file}")
         return conn
     except sqlite3.Error as e:
         logging.error(f"Error connecting to SQLite: {e}")
@@ -171,6 +254,19 @@ def upsert_playlist_meta(conn, playlist_id, table_name, name, snapshot_id):
             )
     except sqlite3.Error as e:
         logging.error(f"Error upserting playlists_meta for {playlist_id}: {e}")
+
+
+def rename_playlist_meta(conn, playlist_id, table_name, name) -> None:
+    """Point an existing catalogue row at its real table/name without
+    touching snapshot_id or last_synced."""
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE playlists_meta SET table_name = ?, name = ? WHERE playlist_id = ?",
+                (table_name, name, playlist_id),
+            )
+    except sqlite3.Error as e:
+        logging.error(f"Error renaming playlists_meta for {playlist_id}: {e}")
 
 
 def list_playlists(conn, only_enabled: bool = False):
@@ -375,15 +471,16 @@ def playlist_stats(conn, table_name: str) -> dict:
             f'SELECT '
             f'  COUNT(*), '
             f'  COALESCE(SUM(CASE WHEN downloaded = 1 THEN 1 ELSE 0 END), 0), '
-            f'  COALESCE(SUM(CASE WHEN downloaded = 0 AND '
+            # The four statuses partition the table exactly like
+            # _track_status (and so the playlist page's filter chips):
+            # pending = never failed yet; retrying = failed at least once but
+            # not suspended. "pending" used to include the retrying rows, so
+            # the dashboard and the playlist page disagreed.
+            f'  COALESCE(SUM(CASE WHEN downloaded = 0 AND COALESCE(attempts, 0) = 0 AND '
             f'    (suspended_until IS NULL OR suspended_until < CURRENT_TIMESTAMP) '
             f'    THEN 1 ELSE 0 END), 0), '
             f'  COALESCE(SUM(CASE WHEN downloaded = 0 AND suspended_until IS NOT NULL '
             f'    AND suspended_until >= CURRENT_TIMESTAMP THEN 1 ELSE 0 END), 0), '
-            # "retrying" is a subset of "pending": not downloaded, not
-            # currently suspended, but has already failed at least once. The
-            # dashboard shows it separately so a user can tell "not tried yet"
-            # from "tried and failed".
             f'  COALESCE(SUM(CASE WHEN downloaded = 0 AND attempts > 0 AND '
             f'    (suspended_until IS NULL OR suspended_until < CURRENT_TIMESTAMP) '
             f'    THEN 1 ELSE 0 END), 0) '
@@ -422,7 +519,7 @@ def list_tracks(conn, table_name: str) -> list:
     try:
         rows = conn.execute(
             f'SELECT id, name, artists, album, downloaded, path, attempts, '
-            f'last_attempt, suspended_until, CURRENT_TIMESTAMP '
+            f'last_attempt, suspended_until, CURRENT_TIMESTAMP, duration_ms '
             f'FROM "{table_name}" ORDER BY name COLLATE NOCASE'
         ).fetchall()
         result = []
@@ -437,6 +534,7 @@ def list_tracks(conn, table_name: str) -> list:
                 "attempts": r[6] or 0,
                 "last_attempt": r[7],
                 "suspended_until": r[8],
+                "duration_ms": r[10],
             }
             d["status"] = _track_status(d["downloaded"], d["attempts"], r[8], r[9])
             result.append(d)
@@ -451,7 +549,7 @@ def get_track(conn, table_name: str, track_id: str):
     try:
         r = conn.execute(
             f'SELECT id, name, artists, album, downloaded, path, attempts, '
-            f'last_attempt, suspended_until, CURRENT_TIMESTAMP '
+            f'last_attempt, suspended_until, CURRENT_TIMESTAMP, duration_ms '
             f'FROM "{table_name}" WHERE id = ?',
             (track_id,),
         ).fetchone()
@@ -467,6 +565,7 @@ def get_track(conn, table_name: str, track_id: str):
             "attempts": r[6] or 0,
             "last_attempt": r[7],
             "suspended_until": r[8],
+            "duration_ms": r[10],
         }
         d["status"] = _track_status(d["downloaded"], d["attempts"], r[8], r[9])
         return d
@@ -507,7 +606,8 @@ def create_table(conn, playlist_name):
                                         last_attempt TIMESTAMP,
                                         suspended_until TIMESTAMP,
                                         last_upgrade_check TIMESTAMP,
-                                        tried_files TEXT DEFAULT ''
+                                        tried_files TEXT DEFAULT '',
+                                        duration_ms INTEGER
                                     );"""
         cursor = conn.cursor()
         cursor.execute(sql_create_tracks_table)
@@ -520,6 +620,8 @@ def create_table(conn, playlist_name):
                     f'ALTER TABLE "{table_name}" ADD COLUMN last_upgrade_check TIMESTAMP'
                 )
             logging.info(f"Migrated {table_name}: added last_upgrade_check column")
+        with conn:
+            _add_duration_column(conn, table_name)
         create_tried_table(conn, playlist_name)
         cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_id ON {table_name} (id);")
         logging.info(f"Index on {table_name}(id) created or already exists.")
@@ -527,14 +629,30 @@ def create_table(conn, playlist_name):
         logging.error(f"Error creating table {table_name}: {e}")
 
 def insert_track(conn, playlist_name, track):
+    """Insert (id, name, artists, album[, duration_ms]); existing ids are kept."""
     table_name = playlist_name
-    sql = f'''INSERT OR IGNORE INTO {table_name}(id, name, artists, album) VALUES (?, ?, ?, ?)'''
+    track = tuple(track) + (None,) * (5 - len(track))
+    sql = f'''INSERT OR IGNORE INTO {table_name}(id, name, artists, album, duration_ms) VALUES (?, ?, ?, ?, ?)'''
     try:
         with conn:
             conn.execute(sql, track)
         logging.info(f"Inserted track into {table_name}: {track[1]} by {track[2]}")
     except sqlite3.Error as e:
         logging.error(f"Error inserting track into {table_name}: {e}")
+
+def backfill_durations(conn, table_name, durations) -> None:
+    """Fill duration_ms for rows that don't have it yet. `durations` is
+    an iterable of (track_id, duration_ms)."""
+    try:
+        with conn:
+            conn.executemany(
+                f'UPDATE "{table_name}" SET duration_ms = ? '
+                f'WHERE id = ? AND duration_ms IS NULL',
+                [(ms, tid) for tid, ms in durations if ms],
+            )
+    except sqlite3.Error as e:
+        logging.error(f"Error backfilling durations in {table_name}: {e}")
+
 
 def fetch_all_tracks(conn, playlist_name):
     table_name = playlist_name
@@ -651,13 +769,16 @@ def get_pending_tracks(conn, playlist_name: str) -> list:
     cursor = conn.cursor()
     try:
         cursor.execute(f"""
-            SELECT id, name, artists, album
+            SELECT id, name, artists, album, duration_ms
             FROM "{playlist_name}"
             WHERE downloaded = 0
               AND (suspended_until IS NULL OR suspended_until < CURRENT_TIMESTAMP)
         """)
         rows = cursor.fetchall()
-        return [Track(row[0], row[1], row[2], row[3], playlist_name) for row in rows]
+        return [
+            Track(row[0], row[1], row[2], row[3], playlist_name, duration_ms=row[4])
+            for row in rows
+        ]
     except sqlite3.Error as e:
         logging.error(f"Failed to fetch pending tracks from {playlist_name}: {e}")
         return []
@@ -675,7 +796,7 @@ def get_upgrade_candidates(conn, playlist_name: str, interval_hours: int) -> lis
     try:
         cursor = conn.cursor()
         cursor.execute(
-            f'SELECT id, name, artists, album, path FROM "{playlist_name}" '
+            f'SELECT id, name, artists, album, path, duration_ms FROM "{playlist_name}" '
             f'WHERE downloaded = 1 '
             f"AND (last_upgrade_check IS NULL "
             f"     OR last_upgrade_check < datetime('now', ?))",
@@ -683,7 +804,7 @@ def get_upgrade_candidates(conn, playlist_name: str, interval_hours: int) -> lis
         )
         rows = cursor.fetchall()
         return [
-            (Track(r[0], r[1], r[2], r[3], playlist_name), r[4])
+            (Track(r[0], r[1], r[2], r[3], playlist_name, duration_ms=r[5]), r[4])
             for r in rows
         ]
     except sqlite3.Error as e:
@@ -708,3 +829,181 @@ def mark_upgrade_checked(conn, playlist_name: str, track_id: str) -> None:
         logging.error(
             f"Failed to update last_upgrade_check for {track_id} in {playlist_name}: {e}"
         )
+
+
+# ---- blocklist ------------------------------------------------------------
+
+
+def add_blocklist(conn, username, filename=None, size=None, reason=None, track_id=None):
+    """Blocklist one peer file, or the whole peer when `filename` is None.
+    A duplicate (username, filename) is ignored. Returns True if added."""
+    if not username:
+        return False
+    try:
+        with conn:
+            exists = conn.execute(
+                "SELECT 1 FROM blocklist WHERE username = ? AND filename IS ?",
+                (username, filename),
+            ).fetchone()
+            if exists:
+                return False
+            conn.execute(
+                "INSERT INTO blocklist (username, filename, size, reason, track_id) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (username, filename, size, reason, track_id),
+            )
+        logging.info(f"Blocklisted {username}:{filename or '*'} ({reason})")
+        return True
+    except sqlite3.Error as e:
+        logging.error(f"Could not blocklist {username}:{filename}: {e}")
+        return False
+
+
+def list_blocklist(conn, limit: int = 500) -> list:
+    """Newest first."""
+    try:
+        rows = conn.execute(
+            "SELECT id, username, filename, size, reason, track_id, created_at "
+            "FROM blocklist ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    except sqlite3.Error as e:
+        logging.warning(f"Could not list blocklist: {e}")
+        return []
+    keys = ("id", "username", "filename", "size", "reason", "track_id", "created_at")
+    return [dict(zip(keys, r)) for r in rows]
+
+
+def remove_blocklist(conn, entry_id) -> bool:
+    try:
+        with conn:
+            cur = conn.execute("DELETE FROM blocklist WHERE id = ?", (entry_id,))
+        return cur.rowcount > 0
+    except sqlite3.Error as e:
+        logging.error(f"Could not remove blocklist entry {entry_id}: {e}")
+        return False
+
+
+def load_blocklist(conn):
+    """Return a predicate is_blocked(username, filename) over a snapshot of
+    the table — one query per search instead of one per file."""
+    try:
+        rows = conn.execute("SELECT username, filename FROM blocklist").fetchall()
+    except sqlite3.Error as e:
+        logging.warning(f"Could not load blocklist: {e}")
+        rows = []
+    banned = {u for u, f in rows if f is None}
+    files = {(u, f) for u, f in rows if f is not None}
+    return lambda username, filename: username in banned or (username, filename) in files
+
+
+def is_blocklisted(conn, username, filename) -> bool:
+    return load_blocklist(conn)(username, filename)
+
+
+# ---- history --------------------------------------------------------------
+
+HISTORY_EVENTS = (
+    "grabbed",
+    "imported",
+    "download_failed",
+    "import_rejected",
+    "upgraded",
+    "retried",
+    "deleted_file",
+)
+FAILURE_EVENTS = ("download_failed", "import_rejected")
+
+
+def record_history(conn, event, *, playlist_id=None, table_name=None, track_id=None, **data):
+    """Append one history event. `table_name` resolves to its playlist_id
+    when the id isn't given. None-valued data keys are dropped. Never
+    raises — history is an audit aid, not something to fail a download on.
+    """
+    if conn is None:
+        return
+    try:
+        if playlist_id is None and table_name:
+            row = conn.execute(
+                "SELECT playlist_id FROM playlists_meta WHERE table_name = ? LIMIT 1",
+                (table_name,),
+            ).fetchone()
+            playlist_id = row[0] if row else None
+        payload = {k: v for k, v in data.items() if v is not None}
+        with conn:
+            conn.execute(
+                "INSERT INTO history (event, playlist_id, track_id, data_json) "
+                "VALUES (?, ?, ?, ?)",
+                (event, playlist_id, track_id, json.dumps(payload) if payload else None),
+            )
+    except (sqlite3.Error, TypeError, ValueError) as e:
+        logging.error(f"Could not record history event {event}: {e}")
+
+
+def list_history(conn, *, event=None, playlist_id=None, track_id=None, before_id=None, limit=200):
+    """Newest first. Each row has `data` parsed from data_json."""
+    sql = "SELECT id, ts, event, playlist_id, track_id, data_json FROM history"
+    where, args = [], []
+    for col, val in (("event", event), ("playlist_id", playlist_id), ("track_id", track_id)):
+        if val:
+            where.append(f"{col} = ?")
+            args.append(val)
+    if before_id:
+        where.append("id < ?")
+        args.append(before_id)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(limit)
+    try:
+        rows = conn.execute(sql, args).fetchall()
+    except sqlite3.Error as e:
+        logging.warning(f"Could not list history: {e}")
+        return []
+    out = []
+    for r in rows:
+        try:
+            data = json.loads(r[5]) if r[5] else {}
+        except ValueError:
+            data = {}
+        out.append({
+            "id": r[0], "ts": r[1], "event": r[2],
+            "playlist_id": r[3], "track_id": r[4], "data": data,
+        })
+    return out
+
+
+def latest_failures(conn) -> dict:
+    """{track_id: reason} from each track's most recent failure event."""
+    try:
+        rows = conn.execute(
+            "SELECT track_id, data_json FROM history WHERE id IN ("
+            "SELECT MAX(id) FROM history WHERE event IN (?, ?) "
+            "AND track_id IS NOT NULL GROUP BY track_id)",
+            FAILURE_EVENTS,
+        ).fetchall()
+    except sqlite3.Error as e:
+        logging.warning(f"Could not read latest failures: {e}")
+        return {}
+    out = {}
+    for tid, data_json in rows:
+        try:
+            out[tid] = (json.loads(data_json) if data_json else {}).get("reason")
+        except ValueError:
+            out[tid] = None
+    return out
+
+
+def prune_history(conn, retention_days: int) -> None:
+    """Delete events older than `retention_days` (at least 1, whatever the
+    env says: 0 or a negative value would wipe the whole log every cycle).
+    Indexed on ts, so cheap."""
+    retention_days = max(1, int(retention_days))
+    try:
+        with conn:
+            conn.execute(
+                "DELETE FROM history WHERE ts < datetime('now', ?)",
+                (f"-{int(retention_days)} days",),
+            )
+    except sqlite3.Error as e:
+        logging.warning(f"Could not prune history: {e}")

@@ -1,0 +1,72 @@
+{# Interactive search results. Polls itself every 2s while running. #}
+<div id="interactive"
+     {% if search and search.status == 'running' %}
+     hx-get="{{ url_for('interactive_search_results', playlist_id=playlist_id, track_id=track_id) }}"
+     hx-trigger="every 2s" hx-swap="outerHTML"
+     {% endif %}>
+  {% if not search %}
+  {% elif search.status == 'running' %}
+    <p aria-busy="true">Searching slskd… this can take a minute per query.</p>
+  {% elif search.status == 'error' %}
+    <p class="flash flash-error">Search failed: {{ search.error }}</p>
+  {% elif not search.results %}
+    <p class="subtle">No files found.</p>
+  {% else %}
+    {% set accepted = search.results|selectattr('accepted')|list %}
+    <p class="subtle">
+      {{ search.results|length }} files, {{ accepted|length }} acceptable. Results expire after 10 minutes.
+    </p>
+    <div class="table-wrap">
+      <table class="track-table interactive-table">
+        <thead>
+          <tr>
+            <th scope="col">File</th>
+            <th scope="col">Quality</th>
+            <th scope="col" class="num">Size</th>
+            <th scope="col" class="num">Length</th>
+            <th scope="col">Peer</th>
+            <th scope="col">Verdict</th>
+            <th scope="col" class="actions-col">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for c in search.results %}
+          <tr>
+            <td class="file-cell" title="{{ c.filename }}"><code>{{ c.basename or c.filename }}</code></td>
+            <td class="nowrap">
+              {{ c.ext|replace('.', '') }}
+              {% if c.bitrate %}· {{ c.bitrate }} kbps{% endif %}
+              {% if c.bit_depth %}· {{ c.bit_depth }}-bit{% endif %}
+              {% if c.sample_rate %}· {{ (c.sample_rate / 1000)|round(1) }} kHz{% endif %}
+            </td>
+            <td class="num nowrap">{{ c.size|human_bytes if c.size else '—' }}</td>
+            <td class="num">{{ (c.length * 1000)|duration_ms if c.length else '—' }}</td>
+            <td class="nowrap">
+              {{ c.user }}
+              <div class="subtle">
+                {{ 'free slot' if c.free_slot else 'no free slot' }}
+                · {{ c.user_upload_speed|human_bytes }}/s
+                {% if c.queue_length is not none %}· queue {{ c.queue_length }}{% endif %}
+              </div>
+            </td>
+            <td>
+              {% if c.accepted %}<span class="badge badge-downloaded">accepted</span>
+              {% else %}<span class="badge badge-suspended">rejected</span>
+              <div class="subtle">{{ c.reason }}</div>{% endif %}
+            </td>
+            <td class="actions-col">
+              <form method="POST" action="{{ url_for('interactive_grab', playlist_id=playlist_id, track_id=track_id) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="username" value="{{ c.user }}">
+                <input type="hidden" name="filename" value="{{ c.filename }}">
+                <input type="hidden" name="size" value="{{ c.size }}">
+                <button type="submit" class="{{ '' if c.accepted else 'secondary outline' }}">Grab</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+</div>

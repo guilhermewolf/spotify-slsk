@@ -350,6 +350,41 @@ class TestSchemaMigrations:
         assert db.get_upgrade_candidates(conn, "pl_legacy", 1)[0][0].id == "t1"
         conn.close()
 
+    def test_v4_db_upgrades_to_v5(self, tmp_path):
+        """A real v4 DB: per-playlist table without duration_ms."""
+        path = str(tmp_path / "v4.db")
+        raw = sqlite3.connect(path)
+        raw.execute(
+            "CREATE TABLE playlists_meta (playlist_id TEXT PRIMARY KEY, "
+            "table_name TEXT NOT NULL, name TEXT NOT NULL, snapshot_id TEXT, "
+            "last_synced TIMESTAMP, enabled INTEGER NOT NULL DEFAULT 1, "
+            "added_at TIMESTAMP)"
+        )
+        raw.execute("INSERT INTO playlists_meta VALUES ('pid','pl_v4','V4','snap',NULL,0,NULL)")
+        raw.execute(
+            'CREATE TABLE "pl_v4" (id TEXT PRIMARY KEY, name TEXT NOT NULL, '
+            "artists TEXT NOT NULL, album TEXT NOT NULL, downloaded INTEGER DEFAULT 0, "
+            "path TEXT, attempts INTEGER DEFAULT 0, last_attempt TIMESTAMP, "
+            "suspended_until TIMESTAMP, last_upgrade_check TIMESTAMP, "
+            "tried_files TEXT DEFAULT '')"
+        )
+        raw.execute("INSERT INTO pl_v4 (id, name, artists, album) VALUES ('t1','S','A','Alb')")
+        raw.execute("PRAGMA user_version = 4")
+        raw.commit()
+        raw.close()
+
+        conn = db.create_connection(path)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+        # Migrated without a sync (the playlist is disabled), so the webui
+        # can read it straight away.
+        track = db.get_track(conn, "pl_v4", "t1")
+        assert track is not None and track["duration_ms"] is None
+        # Snapshot cleared so the next sync backfills durations.
+        assert db.get_playlist_meta(conn, "pid")[0] is None
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {"blocklist", "history"} <= tables
+        conn.close()
+
     def test_existing_rows_survive_reopening(self, tmp_path):
         path = str(tmp_path / "reopen.db")
         conn = db.create_connection(path)
@@ -418,3 +453,109 @@ class TestCycleHistory:
         assert [r["duration_seconds"] for r in rows] == [7.0, 6.0, 5.0, 4.0, 3.0]
 
 
+
+
+class TestBlocklist:
+    def test_add_list_remove_and_predicate(self, tmp_path):
+        conn = db.create_connection(str(tmp_path / "b.db"))
+        assert db.add_blocklist(conn, "peer", "a.flac", 10, "transfer failed", "t1")
+        assert not db.add_blocklist(conn, "peer", "a.flac"), "duplicate must be ignored"
+        assert db.add_blocklist(conn, "villain", None, None, "banned")
+        assert db.is_blocklisted(conn, "peer", "a.flac")
+        assert not db.is_blocklisted(conn, "peer", "b.flac")
+        assert db.is_blocklisted(conn, "villain", "anything.flac"), "banned user covers all files"
+        rows = db.list_blocklist(conn)
+        assert [r["username"] for r in rows] == ["villain", "peer"], "newest first"
+        assert db.remove_blocklist(conn, rows[1]["id"])
+        assert not db.is_blocklisted(conn, "peer", "a.flac")
+        conn.close()
+
+
+class TestHistory:
+    def test_record_list_filter_and_paginate(self, tmp_path):
+        conn = db.create_connection(str(tmp_path / "h.db"))
+        db.upsert_playlist_meta(conn, "pid", "pl_x", "X", None)
+        db.record_history(conn, "grabbed", table_name="pl_x", track_id="t1", username="u", bitrate=None)
+        db.record_history(conn, "download_failed", table_name="pl_x", track_id="t1", reason="transfer failed")
+        db.record_history(conn, "retried", playlist_id="other", track_id="t2")
+
+        rows = db.list_history(conn)
+        assert [r["event"] for r in rows] == ["retried", "download_failed", "grabbed"]
+        assert rows[2]["playlist_id"] == "pid", "table_name resolves to playlist_id"
+        assert rows[2]["data"] == {"username": "u"}, "None values are dropped"
+        assert [r["event"] for r in db.list_history(conn, playlist_id="pid")] == [
+            "download_failed", "grabbed"]
+        assert [r["event"] for r in db.list_history(conn, event="grabbed")] == ["grabbed"]
+        assert [r["event"] for r in db.list_history(conn, before_id=rows[1]["id"])] == ["grabbed"]
+        assert db.latest_failures(conn) == {"t1": "transfer failed"}
+        conn.close()
+
+    def test_prune_keeps_recent(self, tmp_path):
+        conn = db.create_connection(str(tmp_path / "h.db"))
+        db.record_history(conn, "grabbed", track_id="new")
+        with conn:
+            conn.execute(
+                "INSERT INTO history (ts, event, track_id) VALUES (datetime('now','-100 days'), 'grabbed', 'old')"
+            )
+        db.prune_history(conn, 90)
+        assert [r["track_id"] for r in db.list_history(conn)] == ["new"]
+        conn.close()
+
+    @pytest.mark.parametrize("days", [0, -5])
+    def test_retention_below_one_day_is_clamped(self, tmp_path, days):
+        conn = db.create_connection(str(tmp_path / "h.db"))
+        db.record_history(conn, "grabbed", track_id="recent")
+        with conn:
+            conn.execute(
+                "INSERT INTO history (ts, event, track_id) VALUES (datetime('now','-2 days'), 'grabbed', 'old')"
+            )
+        db.prune_history(conn, days)
+        assert [r["track_id"] for r in db.list_history(conn)] == ["recent"]
+        conn.close()
+
+    def test_reload_settings_clamps_retention(self, tmp_path, monkeypatch):
+        from spotify_slsk import app
+        conn = db.create_connection(str(tmp_path / "h.db"))
+        monkeypatch.setenv("HISTORY_RETENTION_DAYS", "0")
+        monkeypatch.setattr(app, "_slsk_refresh_from_db", lambda c: None)
+        monkeypatch.setattr(app, "HISTORY_RETENTION_DAYS", 90)  # restored after
+        monkeypatch.setattr(app, "MIN_MATCH_SCORE", app.MIN_MATCH_SCORE)
+        app._reload_settings(conn)
+        assert app.HISTORY_RETENTION_DAYS == 1
+        conn.close()
+
+    def test_none_conn_is_a_noop(self):
+        db.record_history(None, "grabbed")
+
+
+class TestStatusCountsAgree:
+    """Dashboard (playlist_stats) and the playlist page's filter chips
+    (list_tracks statuses) count the same partition of the table."""
+
+    def test_stats_partition_matches_track_statuses(self, tmp_path):
+        conn = db.create_connection(str(tmp_path / "s.db"))
+        db.create_table(conn, "pl_s")
+        for tid in ("new", "failed_once", "suspended", "done1", "done2"):
+            db.insert_track(conn, "pl_s", (tid, tid, "A", "B"))
+        db.update_download_status(conn, "failed_once", "pl_s", success=False)
+        for _ in range(db.MAX_ATTEMPTS_BEFORE_SUSPEND):
+            db.update_download_status(conn, "suspended", "pl_s", success=False)
+        for tid in ("done1", "done2"):
+            db.update_download_status(conn, tid, "pl_s", success=True, file_path=f"/p/{tid}")
+
+        stats = db.playlist_stats(conn, "pl_s")
+        statuses = [t["status"] for t in db.list_tracks(conn, "pl_s")]
+        for key in ("downloaded", "pending", "retrying", "suspended"):
+            assert stats[key] == statuses.count(key), key
+        assert stats == {"total": 5, "downloaded": 2, "pending": 1, "retrying": 1, "suspended": 1}
+        conn.close()
+
+    def test_all_downloaded_means_nothing_pending(self, tmp_path):
+        conn = db.create_connection(str(tmp_path / "s.db"))
+        db.create_table(conn, "pl_s")
+        for i in range(3):
+            db.insert_track(conn, "pl_s", (f"t{i}", "x", "A", "B"))
+            db.update_download_status(conn, f"t{i}", "pl_s", success=False)
+            db.update_download_status(conn, f"t{i}", "pl_s", success=True, file_path="/p")
+        assert db.playlist_stats(conn, "pl_s")["pending"] == 0
+        conn.close()

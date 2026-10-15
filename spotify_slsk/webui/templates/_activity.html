@@ -1,6 +1,8 @@
 {# Reusable current-activity banner. Polled every 5s via htmx so the
    dashboard reflects the daemon's hot phase without a full reload. #}
-<div hx-get="{{ url_for('dashboard') }}" hx-trigger="every 5s" hx-swap="outerHTML" hx-select="#activity-banner">
+{# innerHTML, not outerHTML: swapping the polling wrapper out for the
+   selected banner removed hx-trigger, so the banner froze after 5s. #}
+<div hx-get="{{ url_for('dashboard') }}" hx-trigger="every 5s" hx-swap="innerHTML" hx-select="#activity-banner">
 <div id="activity-banner" class="activity {{ activity.phase }}">
   <span class="phase">{{ activity.phase|replace('_', ' ') }}</span>
   {% if activity.playlist_name %}
