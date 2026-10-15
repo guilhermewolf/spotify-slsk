@@ -240,3 +240,35 @@ class TestScoreTrackMatchRegressions:
         assert not _titles_token_equivalent("Your Eyes", "Eyes On Fire")
         assert not _titles_token_equivalent("I Love You", "You")
         assert not _titles_token_equivalent("Dream", "A Real Bad Dream")
+
+
+# Matches that need the extended artist splitting and folding.
+RIGHT_ARTIST_TAGS = [
+    ("Déjà Vu", "Beyonce", "Déjà Vu", "Beyoncé"),
+    ("Blinding Lights", "Weeknd", "Blinding Lights", "The Weeknd"),
+    ("Eyes On Fire (Bibi Remix)", "Blue Foundation; Michael Bibi",
+     "Eyes On Fire - Bibi Remix", "Blue Foundation, Michael Bibi"),
+    ("Song", "Artist1 x Artist2", "Song", "Artist2"),
+    ("Song", "Artist1 vs Artist2", "Song", "Artist2"),
+    ("Song", "Artist1 vs. Artist2", "Song", "Artist2"),
+    ("Song", "Artist1 with Artist2", "Song", "Artist2"),
+    ("Song", "Format B", "Song", "Format:B"),
+]
+
+
+class TestArtistSplitting:
+    @pytest.mark.parametrize("ft,fa,dt,da", RIGHT_ARTIST_TAGS)
+    def test_right_song_above_threshold(self, ft, fa, dt, da):
+        score, reason = score_track_match(ft, fa, dt, da)
+        assert score >= MIN_MATCH, reason
+
+    def test_separators(self):
+        from spotify_slsk.app import _split_artists
+
+        assert _split_artists("A; B") == {"a", "b"}
+        assert _split_artists("A x B") == {"a", "b"}
+        assert _split_artists("A vs B") == {"a", "b"}
+        assert _split_artists("A with B") == {"a", "b"}
+        assert _split_artists("AC/DC") == {"ac dc"}
+        assert _split_artists("Lil Nas X") == {"lil nas x"}
+        assert _split_artists("Daft Punk") == {"daft punk"}

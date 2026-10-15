@@ -45,6 +45,10 @@ from .soulseek_api import (
     _version_mismatch,
     _expected_title_tokens,
     _fold,
+    _artist_names,
+    # Splits "A, B", "A & B", "A and B", "A feat./ft./featuring B", "A; B",
+    # "A x B", "A vs B", "A with B".
+    _ARTIST_SPLIT_RE,
 )
 from .models import Track
 
@@ -110,8 +114,6 @@ _STOP_PHRASES = [
     "original mix", "extended mix", "radio edit", "remastered", "remaster",
     "edit", "version", "clean", "explicit"
 ]
-# Splitters for artists like "Disclosure, AlunaGeorge", "Artist A & B", "feat.", "ft."
-_ARTIST_SPLIT_RE = re.compile(r"\s*(?:,|&| and | feat\.? | ft\.? | featuring )\s*", re.IGNORECASE)
 
 def sanitize_input(text):
     return re.sub(r'[^A-Za-z0-9 ]+', '', text)
@@ -511,8 +513,9 @@ def _tokenize(s: str) -> set:
 def _split_artists(artist_str: str) -> set:
     if not artist_str:
         return set()
-    parts = _ARTIST_SPLIT_RE.split(artist_str)
-    return {p.strip().lower() for p in parts if p.strip()}
+    # Folded like the slskd matcher: accents, punctuation and a "The " prefix
+    # don't stop "Beyoncé"/"Beyonce" or "The Weeknd"/"Weeknd" overlapping.
+    return {n for p in _ARTIST_SPLIT_RE.split(artist_str) for n in _artist_names(p)}
 
 def _similar(a: str, b: str) -> float:
     return difflib.SequenceMatcher(a=_norm(a), b=_norm(b)).ratio()

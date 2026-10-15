@@ -376,8 +376,9 @@ _FEAT_RE = re.compile(
     re.IGNORECASE,
 )
 _BRACKETS_RE = re.compile(r"[\(\[\{][^\)\]\}]*[\)\]\}]")
+# Credit separators. "/" is deliberately absent: it is part of names (AC/DC).
 _ARTIST_SPLIT_RE = re.compile(
-    r"\s*(?:,|;|&|/|\bfeat\b\.?|\bft\b\.?|\bfeaturing\b"
+    r"\s*(?:,|;|&|\bfeat\b\.?|\bft\b\.?|\bfeaturing\b"
     r"|\s+x\s+|\s+vs\b\.?|\s+with\s+|\s+and\s+)\s*",
     re.IGNORECASE,
 )
