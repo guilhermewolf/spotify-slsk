@@ -255,6 +255,19 @@ def upsert_playlist_meta(conn, playlist_id, table_name, name, snapshot_id):
         logging.error(f"Error upserting playlists_meta for {playlist_id}: {e}")
 
 
+def rename_playlist_meta(conn, playlist_id, table_name, name) -> None:
+    """Point an existing catalogue row at its real table/name without
+    touching snapshot_id or last_synced."""
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE playlists_meta SET table_name = ?, name = ? WHERE playlist_id = ?",
+                (table_name, name, playlist_id),
+            )
+    except sqlite3.Error as e:
+        logging.error(f"Error renaming playlists_meta for {playlist_id}: {e}")
+
+
 def list_playlists(conn, only_enabled: bool = False):
     """Return a list of dicts describing every known playlist."""
     try:

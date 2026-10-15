@@ -711,3 +711,27 @@ class TestUpgradeReplacesOnlyItsOwnFile:
         monkeypatch.setattr(app, "process_downloaded_file", lambda *a, **k: (True, str(old)))
         app.try_upgrade_track(track, "pl_x", conn, str(old))
         assert old.exists()
+
+
+class TestPlaceholderPlaylistIsRepointedBeforeInsert:
+    """A playlist added while Spotify was unreachable is catalogued under its
+    id. The first sync used to repoint the catalogue only at the end, so the
+    dashboard read the empty placeholder table while rows were inserted."""
+
+    def test_meta_points_at_real_table_before_tracks_are_fetched(self, conn):
+        db.upsert_playlist_meta(conn, "pid", "pl_pid", "pid", None)
+        db.create_table(conn, "pl_pid")
+        seen = {}
+
+        class _SP(_FakeSpotify):
+            def playlist_tracks(self, pid, offset=0, limit=100):
+                seen.setdefault("table", db.get_playlist_meta(conn, "pid")[1])
+                return super().playlist_tracks(pid, offset, limit)
+
+        sp = _SP("My Mix", "snap", [_item("a"), _item("b"), _item("c")])
+        app.fetch_and_compare_tracks(conn, "pid", sp)
+
+        assert seen["table"] == "pl_my_mix"
+        _, table, name, _ = db.get_playlist_meta(conn, "pid")
+        assert (table, name) == ("pl_my_mix", "My Mix")
+        assert db.playlist_stats(conn, "pl_my_mix")["total"] == 3

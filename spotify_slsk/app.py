@@ -24,6 +24,7 @@ from .db import (
     get_track,
     get_playlist_meta,
     upsert_playlist_meta,
+    rename_playlist_meta,
     list_playlists,
     get_setting,
     get_upgrade_candidates,
@@ -153,7 +154,14 @@ def fetch_and_compare_tracks(conn, playlist_id, sp):
 
     create_table(conn, table_name)
 
-    stored_snapshot, _, _, _ = get_playlist_meta(conn, playlist_id)
+    stored_snapshot, stored_table, stored_name, _ = get_playlist_meta(conn, playlist_id)
+    # A playlist added while Spotify was unreachable is catalogued under a
+    # placeholder (its id) and table. Point the row at the real table now,
+    # not only when the snapshot is stamped at the end: rows are inserted
+    # into `table_name` below, and until then the dashboard was reading the
+    # empty placeholder table ("0 / 0 downloaded" mid-sync).
+    if stored_table is not None and (stored_table, stored_name) != (table_name, playlist_title):
+        rename_playlist_meta(conn, playlist_id, table_name, playlist_title)
     if stored_snapshot and snapshot_id and stored_snapshot == snapshot_id:
         logging.info(
             f"Playlist {playlist_title} unchanged (snapshot {snapshot_id[:8]}); "

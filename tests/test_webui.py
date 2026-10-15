@@ -792,3 +792,10 @@ class TestWantedPage:
         conn = db.create_connection(app_tmp.config["DB_PATH"])
         assert sorted(r["track_id"] for r in db.list_history(conn, event="retried")) == ["t1", "t2"]
         conn.close()
+
+
+def test_activity_banner_keeps_polling(client):
+    # outerHTML swapped the polling wrapper away after the first refresh.
+    html = client.get("/").data.decode()
+    wrapper = html[html.index('hx-select="#activity-banner"') - 200:html.index('hx-select="#activity-banner"')]
+    assert 'hx-swap="innerHTML"' in wrapper
