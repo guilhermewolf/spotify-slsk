@@ -474,7 +474,9 @@ def extract_candidates(
             if ext not in PREFERRED_FORMATS:
                 continue
 
-            reported_bitrate = file.get("bitrate")
+            # slskd sends camelCase "bitRate" (only for lossy files); the old
+            # lowercase read was always None, so the floor below never applied.
+            reported_bitrate = file.get("bitRate")
             length_sec = file.get("length")
             size_bytes = file.get("size")
             inferred_bitrate = _infer_bitrate_from_name(_remote_basename(filename))

@@ -154,7 +154,7 @@ class TestExtractCandidates:
             "files": [{
                 "filename": filename,
                 "size": size,
-                "bitrate": bitrate,
+                "bitRate": bitrate,
                 "length": length,
             }],
         }]
@@ -276,7 +276,7 @@ class TestSortCandidatesVersionTier:
             "files": [{
                 "filename": "Mat Joe - Heart To Find (Extended Mix).flac",
                 "size": 30_000_000,
-                "bitrate": 1411,
+                "bitDepth": 16, "sampleRate": 44100,
                 "length": 360,
             }],
         }]
@@ -297,13 +297,13 @@ class TestMaxVersionTierFilter:
                 {
                     "filename": "Mat Joe - Heart To Find (Original Mix).flac",
                     "size": 30_000_000,
-                    "bitrate": 1411,
+                    "bitDepth": 16, "sampleRate": 44100,
                     "length": 360,
                 },
                 {
                     "filename": "Mat Joe - Heart To Find (Extended Mix).flac",
                     "size": 50_000_000,
-                    "bitrate": 1411,
+                    "bitDepth": 16, "sampleRate": 44100,
                     "length": 480,
                 },
             ],
@@ -426,7 +426,7 @@ class TestSearchAndDownloadFallthrough:
                     "files": [{
                         "filename": "junk.wma",
                         "size": 1_000_000,
-                        "bitrate": 320,
+                        "bitRate": 320,
                         "length": 180,
                     }],
                 }]
@@ -436,7 +436,7 @@ class TestSearchAndDownloadFallthrough:
                 "files": [{
                     "filename": "Mat Joe - Heart To Find.flac",
                     "size": 30_000_000,
-                    "bitrate": 1411,
+                    "bitDepth": 16, "sampleRate": 44100,
                     "length": 360,
                 }],
             }]
@@ -537,7 +537,7 @@ class TestDownloadAndVerifyTransientErrors:
             "files": [{
                 "filename": "Artist - Track.flac",
                 "size": 30_000_000,
-                "bitrate": 1411,
+                "bitDepth": 16, "sampleRate": 44100,
                 "length": 360,
             }],
         }]
@@ -579,3 +579,27 @@ class TestDownloadAndVerifyTransientErrors:
             "transient slskd error should NOT add candidate to tried_files; "
             "got: " + repr(added)
         )
+
+
+class TestRealSlskdShape:
+    """slskd sends camelCase fields; "bitrate" (lowercase) never exists, so
+    the reported-bitrate floor used to be dead code."""
+
+    def _fixture(self):
+        import json
+        import pathlib
+
+        path = pathlib.Path(__file__).parent / "fixtures" / "slskd" / "search_responses.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_bitrate_is_parsed_and_enforced(self):
+        data = self._fixture()
+        out = extract_candidates(
+            data["responses"], data["expected"]["title"], data["expected"]["artist"]
+        )
+        by_user = {c["user"]: c for c in out}
+        assert set(by_user) == {"user1", "user2"}, by_user.keys()
+        assert by_user["user2"]["bitrate"] == 320
+        # user3's MP3 reports bitRate 128 but its size/length look like 320:
+        # only the reported bitRate can reject it.
+        assert "user3" not in by_user
