@@ -73,7 +73,7 @@ def _reload_settings(conn):
     except (TypeError, ValueError) as e:
         logging.warning(f"Bad MIN_MATCH_SCORE in DB; keeping previous: {e}")
     try:
-        HISTORY_RETENTION_DAYS = int(get_setting(conn, "HISTORY_RETENTION_DAYS", "90"))
+        HISTORY_RETENTION_DAYS = max(1, int(get_setting(conn, "HISTORY_RETENTION_DAYS", "90")))
     except (TypeError, ValueError) as e:
         logging.warning(f"Bad HISTORY_RETENTION_DAYS in DB; keeping previous: {e}")
     _slsk_refresh_from_db(conn)

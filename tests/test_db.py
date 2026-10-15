@@ -501,5 +501,28 @@ class TestHistory:
         assert [r["track_id"] for r in db.list_history(conn)] == ["new"]
         conn.close()
 
+    @pytest.mark.parametrize("days", [0, -5])
+    def test_retention_below_one_day_is_clamped(self, tmp_path, days):
+        conn = db.create_connection(str(tmp_path / "h.db"))
+        db.record_history(conn, "grabbed", track_id="recent")
+        with conn:
+            conn.execute(
+                "INSERT INTO history (ts, event, track_id) VALUES (datetime('now','-2 days'), 'grabbed', 'old')"
+            )
+        db.prune_history(conn, days)
+        assert [r["track_id"] for r in db.list_history(conn)] == ["recent"]
+        conn.close()
+
+    def test_reload_settings_clamps_retention(self, tmp_path, monkeypatch):
+        from spotify_slsk import app
+        conn = db.create_connection(str(tmp_path / "h.db"))
+        monkeypatch.setenv("HISTORY_RETENTION_DAYS", "0")
+        monkeypatch.setattr(app, "_slsk_refresh_from_db", lambda c: None)
+        monkeypatch.setattr(app, "HISTORY_RETENTION_DAYS", 90)  # restored after
+        monkeypatch.setattr(app, "MIN_MATCH_SCORE", app.MIN_MATCH_SCORE)
+        app._reload_settings(conn)
+        assert app.HISTORY_RETENTION_DAYS == 1
+        conn.close()
+
     def test_none_conn_is_a_noop(self):
         db.record_history(None, "grabbed")

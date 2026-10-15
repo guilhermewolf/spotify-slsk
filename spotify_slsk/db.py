@@ -980,7 +980,10 @@ def latest_failures(conn) -> dict:
 
 
 def prune_history(conn, retention_days: int) -> None:
-    """Delete events older than `retention_days`. Indexed on ts, so cheap."""
+    """Delete events older than `retention_days` (at least 1, whatever the
+    env says: 0 or a negative value would wipe the whole log every cycle).
+    Indexed on ts, so cheap."""
+    retention_days = max(1, int(retention_days))
     try:
         with conn:
             conn.execute(
