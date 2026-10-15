@@ -1,6 +1,8 @@
 """Unit tests for the slskd search pipeline in soulseek_api.py."""
 import os
 
+import pytest
+
 os.environ.setdefault("SLSKD_HOST_URL", "http://localhost")
 os.environ.setdefault("SLSKD_API_KEY", "x")
 
@@ -154,7 +156,7 @@ class TestExtractCandidates:
             "files": [{
                 "filename": filename,
                 "size": size,
-                "bitrate": bitrate,
+                "bitRate": bitrate,
                 "length": length,
             }],
         }]
@@ -276,7 +278,7 @@ class TestSortCandidatesVersionTier:
             "files": [{
                 "filename": "Mat Joe - Heart To Find (Extended Mix).flac",
                 "size": 30_000_000,
-                "bitrate": 1411,
+                "bitDepth": 16, "sampleRate": 44100,
                 "length": 360,
             }],
         }]
@@ -297,13 +299,13 @@ class TestMaxVersionTierFilter:
                 {
                     "filename": "Mat Joe - Heart To Find (Original Mix).flac",
                     "size": 30_000_000,
-                    "bitrate": 1411,
+                    "bitDepth": 16, "sampleRate": 44100,
                     "length": 360,
                 },
                 {
                     "filename": "Mat Joe - Heart To Find (Extended Mix).flac",
                     "size": 50_000_000,
-                    "bitrate": 1411,
+                    "bitDepth": 16, "sampleRate": 44100,
                     "length": 480,
                 },
             ],
@@ -426,7 +428,7 @@ class TestSearchAndDownloadFallthrough:
                     "files": [{
                         "filename": "junk.wma",
                         "size": 1_000_000,
-                        "bitrate": 320,
+                        "bitRate": 320,
                         "length": 180,
                     }],
                 }]
@@ -436,7 +438,7 @@ class TestSearchAndDownloadFallthrough:
                 "files": [{
                     "filename": "Mat Joe - Heart To Find.flac",
                     "size": 30_000_000,
-                    "bitrate": 1411,
+                    "bitDepth": 16, "sampleRate": 44100,
                     "length": 360,
                 }],
             }]
@@ -537,7 +539,7 @@ class TestDownloadAndVerifyTransientErrors:
             "files": [{
                 "filename": "Artist - Track.flac",
                 "size": 30_000_000,
-                "bitrate": 1411,
+                "bitDepth": 16, "sampleRate": 44100,
                 "length": 360,
             }],
         }]
@@ -589,7 +591,8 @@ class TestRejectionReasons:
         return [{"username": user, "uploadSpeed": 1000, "files": list(files)}]
 
     def _file(self, filename, bitrate=None, size=30_000_000, length=360):
-        return {"filename": filename, "size": size, "bitrate": bitrate, "length": length}
+        # slskd's real field is camelCase "bitRate" (see TestRealSlskdShape).
+        return {"filename": filename, "size": size, "bitRate": bitrate, "length": length}
 
     def _reason(self, file, title="Lose Yourself", artist="Eminem"):
         out = soulseek_api.evaluate_candidates(self._results(file), title, artist)
@@ -610,14 +613,34 @@ class TestRejectionReasons:
         )
         assert reason.startswith("effective bitrate 50 <")
 
-    def test_title_score_reason_mentions_version_mismatch(self):
+    # The wrong-song hotfix replaced the fuzzy title/artist scores with hard
+    # rules; their rejections surface as reasons too.
+    def test_version_mismatch_reason(self):
         reason = self._reason(self._file("Eminem - Lose Yourself (Walker Remix).flac", bitrate=1411))
-        assert reason.startswith("title score") and "< 80" in reason
-        assert "version mismatch" in reason
+        assert reason == "version mismatch (remix vs expected none)"
 
-    def test_artist_score_reason(self):
+    def test_artist_reason(self):
         reason = self._reason(self._file("Somebody Else - Lose Yourself.flac", bitrate=1411))
-        assert reason.startswith("artist score") and "< 70" in reason
+        assert reason == "artist not in filename or folder"
+
+    def test_missing_title_words_reason(self):
+        reason = self._reason(self._file("Eminem - Lose Control.flac", bitrate=1411))
+        assert reason == "title words missing from filename"
+
+    def test_low_title_coverage_reason(self):
+        reason = self._reason(
+            self._file("Eminem - Lose Yourself In The Endless Night Of Music.flac", bitrate=1411)
+        )
+        assert reason.startswith("title coverage ")
+
+    def test_backslash_peer_path_keeps_full_filename_and_basename(self):
+        out = soulseek_api.evaluate_candidates(
+            self._results(self._file("@@x\\Eminem\\8 Mile\\01 - Lose Yourself.flac", bitrate=1411)),
+            "Lose Yourself", "Eminem",
+        )
+        assert out[0]["accepted"], out[0]["reason"]
+        assert out[0]["filename"] == "@@x\\Eminem\\8 Mile\\01 - Lose Yourself.flac"
+        assert out[0]["basename"] == "01 - Lose Yourself.flac"
 
     def test_accepted_has_no_reason_and_matches_extract(self):
         results = self._results(
@@ -764,3 +787,90 @@ class TestInteractiveSearch:
         assert [(c["ext"], c["accepted"]) for c in out] == [
             (".flac", True), (".mp3", True), (".wma", False),
         ]
+
+
+class TestRealSlskdShape:
+    """slskd sends camelCase fields; "bitrate" (lowercase) never exists, so
+    the reported-bitrate floor used to be dead code."""
+
+    def _fixture(self):
+        import json
+        import pathlib
+
+        path = pathlib.Path(__file__).parent / "fixtures" / "slskd" / "search_responses.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_bitrate_is_parsed_and_enforced(self):
+        data = self._fixture()
+        out = extract_candidates(
+            data["responses"], data["expected"]["title"], data["expected"]["artist"]
+        )
+        by_user = {c["user"]: c for c in out}
+        assert set(by_user) == {"user1", "user2"}, by_user.keys()
+        assert by_user["user2"]["bitrate"] == 320
+        # user3's MP3 reports bitRate 128 but its size/length look like 320:
+        # only the reported bitRate can reject it.
+        assert "user3" not in by_user
+
+
+def _transfer_fixture():
+    import json
+    import pathlib
+
+    path = pathlib.Path(__file__).parent / "fixtures" / "slskd" / "transfer_states.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+_TRANSFERS = _transfer_fixture()
+
+
+class TestTransferStates:
+    """Every terminal "Completed, X" state except Succeeded is a failure, and
+    must end the wait immediately instead of running into the timeout."""
+
+    @pytest.mark.parametrize(
+        "case", _TRANSFERS["cases"], ids=[c["state"] for c in _TRANSFERS["cases"]]
+    )
+    def test_classification(self, case):
+        assert soulseek_api._transfer_outcome(case["state"]) == case["expected"]
+
+    @pytest.mark.parametrize(
+        "case",
+        [c for c in _TRANSFERS["cases"] if c["expected"]],
+        ids=[c["state"] for c in _TRANSFERS["cases"] if c["expected"]],
+    )
+    def test_wait_for_completion_returns_without_timing_out(self, case, monkeypatch):
+        import copy
+
+        payload = copy.deepcopy(_TRANSFERS["template"])
+        f = payload["directories"][0]["files"][0]
+        f["state"] = case["state"]
+        polls = []
+
+        class _Transfers:
+            def get_downloads(self, user):
+                polls.append(user)
+                return payload
+
+        class _Client:
+            transfers = _Transfers()
+
+        monkeypatch.setattr(soulseek_api, "get_client", lambda: _Client())
+        monkeypatch.setattr(soulseek_api, "find_file_in_downloads", lambda n: "/dl/" + n)
+        monkeypatch.setattr(soulseek_api, "_wait_for_external_processing", lambda p: True)
+        sleeps = []
+        # Returning True ("shutdown") turns a would-be 300 s hang into a fast,
+        # visible failure.
+        monkeypatch.setattr(
+            soulseek_api, "_interruptible_sleep", lambda s: sleeps.append(s) or True
+        )
+
+        out = soulseek_api.wait_for_completion(
+            {"user": "user1", "filename": f["filename"], "size": f["size"]}, timeout=300
+        )
+
+        assert sleeps == [], "a terminal state must not wait for another poll"
+        if case["expected"] == "succeeded":
+            assert out == "/dl/Artist - Song (Original Mix).flac"
+        else:
+            assert out is None

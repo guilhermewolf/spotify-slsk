@@ -89,9 +89,12 @@ class TestScoreTrackMatch:
         assert score >= 0.95
         assert "artist_overlap" in reason
 
-    def test_title_only_when_artist_missing(self):
+    def test_title_only_is_not_a_match(self):
+        # Used to score 0.90 ("title_tokens_only") and be accepted; a title
+        # alone is how "Your Eyes" became someone else's "Eyes On Fire".
         score, reason = score_track_match("Song Name", "", "Song Name", "Artist")
-        assert 0.85 <= score < 0.95
+        assert score == 0.0
+        assert "no_artist_overlap" in reason
 
     def test_fuzzy_fallback(self):
         score, reason = score_track_match(

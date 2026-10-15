@@ -419,6 +419,27 @@ class TestUntaggedFallback:
         )
         assert ok is False
 
+    def test_filename_uses_strict_rules(self, conn, monkeypatch, sandbox_dirs):
+        # A different version passes a fuzzy filename score but not the
+        # wrong-song rules (symmetric version keywords).
+        src, _ = self._setup(
+            conn, monkeypatch, sandbox_dirs, "Mat Joe - Heart To Find (Dub Mix).flac", 242.0
+        )
+        ok, _ = app.process_downloaded_file(
+            str(src), "pl_x", conn, expected_track=self._track()
+        )
+        assert ok is False
+
+    def test_peer_folder_may_supply_the_artist(self, conn, monkeypatch, sandbox_dirs):
+        src, _ = self._setup(
+            conn, monkeypatch, sandbox_dirs, "01 - Heart To Find.flac", 242.0
+        )
+        ok, _ = app.process_downloaded_file(
+            str(src), "pl_x", conn, expected_track=self._track(),
+            source={"user": "p", "filename": "@@m\\Mat Joe\\Single\\01 - Heart To Find.flac"},
+        )
+        assert ok is True
+
     def test_reconcile_never_uses_fallback_or_deletes(self, conn, monkeypatch, sandbox_dirs):
         src, _ = self._setup(
             conn, monkeypatch, sandbox_dirs, "Mat Joe - Heart To Find.flac", 242.0
@@ -560,3 +581,64 @@ class TestManualGrabs:
         })
         app._process_manual_grabs(conn)
         assert old.exists(), "t1's file must survive a grab that imported as t2"
+
+
+class TestVerifiesTheRequestedTrackOnly:
+    """A download is verified against the track it was requested for.
+
+    Scoring the file against every row and marking the best one assigned
+    wrong files to *other* tracks (306 paths shared by 635 rows in
+    production) while the requested track stayed pending.
+    """
+
+    def test_file_for_another_row_is_rejected_not_reassigned(
+        self, conn, monkeypatch, sandbox_dirs
+    ):
+        downloads, _ = sandbox_dirs
+        _seed(conn, "t1", "Heart To Find", "Mat Joe")
+        _seed(conn, "t2", "Lose Yourself", "Eminem")
+        _stub_metadata(monkeypatch, "Lose Yourself", "Eminem")
+        f = downloads / "Eminem - Lose Yourself.flac"
+        f.write_bytes(b"audio")
+
+        ok, _ = app.process_downloaded_file(str(f), "pl_x", conn, track_id="t1")
+
+        assert ok is False
+        assert not f.exists()
+        assert db.get_track(conn, "pl_x", "t2")["downloaded"] is False
+        assert db.get_track(conn, "pl_x", "t1")["downloaded"] is False
+        assert "Eminem - Lose Yourself.flac" in db.get_tried_files(conn, "pl_x", "t1")
+
+    def test_matching_file_marks_the_requested_row(
+        self, conn, monkeypatch, sandbox_dirs
+    ):
+        downloads, _ = sandbox_dirs
+        _seed(conn, "t1", "Heart To Find", "Mat Joe")
+        _seed(conn, "t2", "Heart To Find", "Mat Joe")  # duplicate entry
+        _stub_metadata(monkeypatch, "Heart To Find", "Mat Joe")
+        f = downloads / "Mat Joe - Heart To Find.flac"
+        f.write_bytes(b"audio")
+
+        ok, _ = app.process_downloaded_file(str(f), "pl_x", conn, track_id="t2")
+
+        assert ok is True
+        assert db.get_track(conn, "pl_x", "t2")["downloaded"] is True
+        assert db.get_track(conn, "pl_x", "t1")["downloaded"] is False
+
+    def test_handle_track_download_passes_the_track_id(self, conn, monkeypatch):
+        from spotify_slsk.models import Track
+
+        seen = {}
+        monkeypatch.setattr(app, "search_and_download", lambda **k: "/x.flac")
+
+        def _process(path, pl, c, reconcile=False, track_id=None, expected_track=None, source=None):
+            # Tier 1 passes the Track itself (its id is the requested track).
+            seen["track_id"] = track_id or expected_track.id
+            return False, None
+
+        monkeypatch.setattr(app, "process_downloaded_file", _process)
+        _seed(conn, "t1")
+        app.handle_track_download(
+            Track("t1", "Heart To Find", "Mat Joe", "Alb", "p"), "pl_x", conn
+        )
+        assert seen["track_id"] == "t1"

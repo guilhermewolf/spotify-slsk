@@ -46,6 +46,14 @@ from .soulseek_api import (
     set_shutdown_event as _slsk_set_shutdown_event,
     refresh_from_db as _slsk_refresh_from_db,
     _version_tier,
+    _version_keywords,
+    _version_mismatch,
+    _expected_title_tokens,
+    _fold,
+    _artist_names,
+    # Splits "A, B", "A & B", "A and B", "A feat./ft./featuring B", "A; B",
+    # "A x B", "A vs B", "A with B".
+    _ARTIST_SPLIT_RE,
 )
 from .models import Track
 
@@ -109,13 +117,13 @@ def wake_now() -> None:
 
 PREFERRED_FORMATS = os.getenv("SLSKD_PREFERRED_FORMATS", "mp3,flac,aiff,wav,m4a,ogg")
 AUDIO_EXTS = tuple(f".{ext.strip().lower()}" for ext in PREFERRED_FORMATS.split(","))
+# Neutral release words only. Version words (dub, vip, club mix, instrumental,
+# a named mix) are kept: stripping them collapsed different recordings into
+# one. score_track_match compares versions explicitly via _version_matches.
 _STOP_PHRASES = [
     "original mix", "extended mix", "radio edit", "remastered", "remaster",
-    "edit", "dub", "club mix", "mix", "version", "vip", "instrumental",
-    "clean", "explicit"
+    "edit", "version", "clean", "explicit"
 ]
-# Splitters for artists like "Disclosure, AlunaGeorge", "Artist A & B", "feat.", "ft."
-_ARTIST_SPLIT_RE = re.compile(r"\s*(?:,|&| and | feat\.? | ft\.? | featuring )\s*", re.IGNORECASE)
 
 def sanitize_input(text):
     return re.sub(r'[^A-Za-z0-9 ]+', '', text)
@@ -226,30 +234,36 @@ def find_closest_match(conn, table_name, title, artist):
 def score_track_match(file_title: str, file_artist: str, db_title: str, db_artist: str) -> tuple[float, str]:
     """
     Returns (score, reason). Score in [0..1]. Reason is a short string for debugging.
+
+    An artist overlap and the same version are hard requirements: a title-only
+    match used to score 0.90 (0.88 for remixes), far above MIN_MATCH_SCORE,
+    which accepted "Your Eyes" for "Eyes On Fire" by someone else.
     """
+    title_sim = _similar(file_title, db_title)
+    if not _artists_overlap(file_artist, db_artist):
+        return 0.0, f"no_artist_overlap fuzzy(title={title_sim:.2f})"
+    if not _version_matches(file_title, db_title, db_artist):
+        return 0.0, "version_mismatch"
+
     if _titles_token_equivalent(file_title, db_title):
-        if _artists_overlap(file_artist, db_artist):
-            return 0.97, "title_tokens+artist_overlap"
-        return 0.90, "title_tokens_only"
+        return 0.97, "title_tokens+artist_overlap"
 
     if _remix_equivalent(file_title, db_title):
-        if _artists_overlap(file_artist, db_artist):
-            return 0.95, "remix_equivalent+artist_overlap"
-        return 0.88, "remix_equivalent_title_only"
+        return 0.95, "remix_equivalent+artist_overlap"
 
-    title_sim = _similar(file_title, db_title)
-    artist_sim = _similar(file_artist, db_artist) if (file_artist and db_artist) else 0.0
+    score = min(1.0, title_sim * 0.85 + 0.15)
+    return score, f"fuzzy(title={title_sim:.2f})+artist_overlap"
 
-    score = max(
-        title_sim,
-        0.75 * title_sim + 0.25 * artist_sim,
-    )
 
-    if _artists_overlap(file_artist, db_artist):
-        score = max(score, min(1.0, title_sim * 0.85 + 0.15))
-
-    reason = f"fuzzy(title={title_sim:.2f}, artist={artist_sim:.2f})"
-    return score, reason
+def _version_matches(file_title: str, db_title: str, artist: str = "") -> bool:
+    """Same version keywords on both sides, and for a remix/named edit the
+    expected remixer's words must be in the file title too ("(X Remix)" is
+    not "(Y Remix)")."""
+    if _version_mismatch(db_title, file_title, artist):
+        return False
+    if not _version_keywords(db_title, artist):
+        return True
+    return _expected_title_tokens(db_title) <= set(_fold(file_title).split())
 
 def find_closest_db_match(conn, table_name: str, file_title: str, file_artist: str):
     """
@@ -282,30 +296,30 @@ def _audio_length_seconds(file_path):
     return None
 
 
-def _fallback_match_untagged(file_path, expected_track):
+def _fallback_match_untagged(file_path, expected_track, source=None):
     """Decide whether an untagged download is the track we asked slskd for.
 
-    Used only when the file has no title/artist tags. Both must hold:
-    the slskd filename (plus its parent folder as an artist hint) scores
-    at least MIN_MATCH_SCORE against the expected track, AND the file's
-    real duration is within SLSKD_MAX_DURATION_DIFF_SECONDS of Spotify's.
-    Unknown durations, or a disabled duration check (0), mean no.
-    Returns (ok, reason).
+    Used only when the file has no title/artist tags, and only against the
+    requested track. Both must hold: the file's name passes the same strict
+    rules as a search candidate (soulseek_api.filename_match: every title
+    word in the basename + coverage, whole-name artist in the name or
+    folder, same version), AND the file's real duration is within
+    SLSKD_MAX_DURATION_DIFF_SECONDS of Spotify's. The peer path from
+    `source` is preferred (it carries the share's folders); otherwise the
+    local basename plus its parent folder. Unknown durations, or a disabled
+    duration check (0), mean no. Returns (ok, reason).
     """
     tolerance = soulseek_api.MAX_DURATION_DIFF_SECONDS
     if tolerance <= 0:
         return False, "missing tags (duration check disabled)"
     if not expected_track.duration_ms:
         return False, "missing tags (no Spotify duration)"
-    stem = os.path.splitext(os.path.basename(file_path))[0]
-    artist_guess, title_guess = _derive_artist_title_from_stem(stem)
-    if not artist_guess:
-        artist_guess = os.path.basename(os.path.dirname(file_path))
-    score, _ = score_track_match(
-        title_guess, artist_guess, expected_track.name, expected_track.artist
+    name = (source or {}).get("filename") or os.path.join(
+        os.path.basename(os.path.dirname(file_path)), os.path.basename(file_path)
     )
-    if score < MIN_MATCH_SCORE:
-        return False, f"missing tags; filename score {score:.2f} < {MIN_MATCH_SCORE}"
+    _, why = soulseek_api.filename_match(name, expected_track.name, expected_track.artist)
+    if why:
+        return False, f"missing tags; filename: {why}"
     length = _audio_length_seconds(file_path)
     if length is None:
         return False, "missing tags; unreadable duration"
@@ -318,55 +332,82 @@ def _fallback_match_untagged(file_path, expected_track):
     return True, None
 
 
+def _match_requested_track(conn, table_name, track_id, title, artist):
+    """Score the file's tags against the one track that was requested.
+
+    Returns ((id, name, artists, album), score) or (None, 0.0) if the row is
+    gone. Never falls back to another row: picking the best row of the whole
+    playlist assigned wrong files to *other* tracks while the requested one
+    stayed pending and was downloaded again.
+    """
+    row = get_track(conn, table_name, track_id)
+    if not row:
+        logging.warning(f"Requested track {track_id} not found in {table_name}")
+        return None, 0.0
+    score, reason = score_track_match(title, artist, row["name"], row["artists"])
+    logging.info(
+        f"Verify '{title}' by '{artist}' against requested '{row['name']}' by "
+        f"'{row['artists']}': score={score:.2f} ({reason})"
+    )
+    return (row["id"], row["name"], row["artists"], row["album"]), score
+
+
 def process_downloaded_file(
     file_path,
     playlist_name,
     conn,
     reconcile: bool = False,
+    track_id=None,
     expected_track=None,
     source=None,
 ):
     """
     Process a file that is either freshly downloaded or already on disk.
 
+    track_id: the track this file was downloaded for. When given, the file is
+      verified against that track only. Without it (reconciling an unknown
+      file) the best-scoring row of the playlist is used.
+
     When reconcile=True:
       - Never delete files on mismatch.
       - If the file already lives in /playlists/<playlist_name>, don't move it again.
 
-    `expected_track` is the Track the download was for. When given and the
-    file has no title/artist tags, the filename + real duration are checked
+    `expected_track` is the Track the download was for (implies its
+    track_id). When given and the file has no title/artist tags, the filename + real duration are checked
     against it (see _fallback_match_untagged) instead of rejecting outright.
 
     `source` is the slskd candidate the file came from; a rejected
     download blocklists that peer file.
     """
+    if expected_track is not None and track_id is None:
+        track_id = expected_track.id
     title, artist, album = extract_metadata_from_file(file_path)
 
     if not title or not artist:
         ok, reason = (
-            _fallback_match_untagged(file_path, expected_track)
+            _fallback_match_untagged(file_path, expected_track, source)
             if expected_track is not None and not reconcile
             else (False, "invalid metadata")
         )
         if not ok:
             logging.warning(f"❌ Rejecting {file_path}: {reason}")
             _reject_and_log(
-                file_path, playlist_name, conn,
-                track_id=expected_track.id if expected_track is not None else None,
+                file_path, playlist_name, conn, track_id=track_id,
                 reason=reason, destructive=not reconcile, source=source,
             )
             return False, None
         logging.info(
             f"Untagged file accepted by filename + duration: {file_path}"
         )
-        track_id = expected_track.id
         title, artist, album = expected_track.name, expected_track.artist, None
         db_album = expected_track.album
         match_method = "filename+duration"
     else:
         match_method = "tags"
-        # Route through the robust scorer (via wrapper)
-        match, score = find_closest_match(conn, playlist_name, title, artist)
+        if track_id is not None:
+            match, score = _match_requested_track(conn, playlist_name, track_id, title, artist)
+        else:
+            match, score = find_closest_match(conn, playlist_name, title, artist)
         if not match:
             _reject_and_log(file_path, playlist_name, conn, reason="no match", destructive=not reconcile, source=source)
             return False, None
@@ -601,8 +642,9 @@ def _tokenize(s: str) -> set:
 def _split_artists(artist_str: str) -> set:
     if not artist_str:
         return set()
-    parts = _ARTIST_SPLIT_RE.split(artist_str)
-    return {p.strip().lower() for p in parts if p.strip()}
+    # Folded like the slskd matcher: accents, punctuation and a "The " prefix
+    # don't stop "Beyoncé"/"Beyonce" or "The Weeknd"/"Weeknd" overlapping.
+    return {n for p in _ARTIST_SPLIT_RE.split(artist_str) for n in _artist_names(p)}
 
 def _similar(a: str, b: str) -> float:
     return difflib.SequenceMatcher(a=_norm(a), b=_norm(b)).ratio()
@@ -620,7 +662,13 @@ def _titles_token_equivalent(file_title: str, db_title: str) -> bool:
     if not ft or not dt:
         return False
     shorter, longer = (ft, dt) if len(ft) <= len(dt) else (dt, ft)
-    return shorter.issubset(longer) or len(shorter.intersection(longer)) >= max(1, len(shorter) - 1)
+    if shorter <= longer:
+        # "Dream" is not "A Real Bad Dream": the shorter title must be at
+        # least half of the longer one.
+        return len(shorter) * 2 >= len(longer)
+    # One missing word is tolerated only for titles of 3+ words; on a
+    # 2-word title it meant one shared word ("you", "the", "eyes") passed.
+    return len(shorter) >= 3 and len(shorter & longer) >= len(shorter) - 1
 
 def _remix_equivalent(file_title: str, db_title: str) -> bool:
     # Normalize "(Walker & Royce Remix)" vs "- Walker & Royce Remix"
@@ -1249,9 +1297,8 @@ def _process_manual_grabs(conn):
             if not verified:
                 continue
             clear_tried_entries(conn, table_name, track.id)
-            # process_downloaded_file matches by tags across the whole
-            # playlist, so the file may have been filed under another track.
-            # Only replace this track's old file if the import landed here.
+            # The import is verified against this track only, but re-read the
+            # row anyway: replace the old file only if the import landed here.
             imported = get_track(conn, table_name, track.id) or {}
             old = row["path"]
             if (
