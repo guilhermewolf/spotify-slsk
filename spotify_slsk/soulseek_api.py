@@ -233,6 +233,13 @@ def perform_search(artist, title, album=None, timeout=60):
     return []
 
 
+def _remote_basename(path):
+    """Basename of a peer path. slskd paths use backslashes, which
+    os.path.basename does not split on Linux — so the whole share path,
+    folder names included, used to be scored and blacklisted."""
+    return re.split(r"[\\/]", path or "")[-1]
+
+
 def clean_filename(filename):
     """
     Clean a filename for fuzzy matching: replace brackets/parens with spaces
@@ -354,7 +361,7 @@ def extract_candidates(
             reported_bitrate = file.get("bitrate")
             length_sec = file.get("length")
             size_bytes = file.get("size")
-            inferred_bitrate = _infer_bitrate_from_name(os.path.basename(filename))
+            inferred_bitrate = _infer_bitrate_from_name(_remote_basename(filename))
             effective_bitrate = (
                 reported_bitrate if reported_bitrate is not None else inferred_bitrate
             )
@@ -381,7 +388,7 @@ def extract_candidates(
                 )
                 continue
 
-            base = os.path.basename(filename)
+            base = _remote_basename(filename)
             clean_base = clean_filename(base)
 
             title_score = fuzz.token_set_ratio(expected_title_norm, clean_base)
@@ -401,7 +408,9 @@ def extract_candidates(
                     {
                         "user": user,
                         "user_upload_speed": user_upload_speed,
-                        "filename": base,
+                        # Full peer path: slskd needs it to enqueue the transfer.
+                        "filename": filename,
+                        "basename": base,
                         "size": size_bytes,
                         "bitrate": effective_bitrate,
                         "effective_mp3": effective_mp3,
@@ -480,7 +489,7 @@ def download_and_verify(
     tried_filenames = set(get_tried_files(conn, playlist_name, track_id))
 
     for candidate in sorted_candidates:
-        basename = os.path.basename(candidate["filename"])
+        basename = _remote_basename(candidate["filename"])
 
         if basename in tried_filenames:
             logging.info(f"Skipping previously tried file: {basename}")
@@ -582,8 +591,8 @@ def wait_for_completion(candidate, timeout=300):
         for directory in downloads.get("directories", []):
             for file in directory.get("files", []):
                 if (
-                    os.path.basename(file["filename"])
-                    == os.path.basename(candidate["filename"])
+                    _remote_basename(file["filename"])
+                    == _remote_basename(candidate["filename"])
                     and file["size"] == candidate["size"]
                 ):
                     transfer_id = file["id"]
@@ -608,9 +617,7 @@ def wait_for_completion(candidate, timeout=300):
                     state = file.get("state", "").lower()
                     logging.debug(f"State for {file['filename']}: {state}")
                     if "completed" in state and "succeeded" in state:
-                        filename = os.path.basename(
-                            candidate["filename"].replace("\\", "/")
-                        )
+                        filename = _remote_basename(candidate["filename"])
                         real_path = find_file_in_downloads(filename)
                         logging.info(f"File found: {real_path}")
                         if real_path and _wait_for_external_processing(real_path):
