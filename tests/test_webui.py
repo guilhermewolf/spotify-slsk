@@ -765,6 +765,7 @@ class TestWantedPage:
         assert b"Missing One" in r.data and b"Missing Two" in r.data
         assert b"Have It" not in r.data and b"Disabled Track" not in r.data
         assert b"transfer timed out" in r.data and b"suspended" in r.data
+        assert b"does not clear" in r.data and b'href="/blocklist"' in r.data
         r = client.get("/wanted?q=two")
         assert b"Missing Two" in r.data and b"Missing One" not in r.data
 

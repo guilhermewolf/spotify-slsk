@@ -7,6 +7,7 @@
   <div>
     <h1>Wanted</h1>
     <p class="subtle">{{ total }} track{{ '' if total == 1 else 's' }} not downloaded yet, across enabled playlists.</p>
+    <p class="subtle">Re-searching does not clear <a href="{{ url_for('blocklist_page') }}">blocklisted</a> peer files or peers; remove them there to try them again.</p>
   </div>
   {% if total %}
   <form method="POST" action="{{ url_for('wanted_search') }}">
