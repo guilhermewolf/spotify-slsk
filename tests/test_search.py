@@ -1,6 +1,8 @@
 """Unit tests for the slskd search pipeline in soulseek_api.py."""
 import os
 
+import pytest
+
 os.environ.setdefault("SLSKD_HOST_URL", "http://localhost")
 os.environ.setdefault("SLSKD_API_KEY", "x")
 
@@ -154,7 +156,7 @@ class TestExtractCandidates:
             "files": [{
                 "filename": filename,
                 "size": size,
-                "bitrate": bitrate,
+                "bitRate": bitrate,
                 "length": length,
             }],
         }]
@@ -276,7 +278,7 @@ class TestSortCandidatesVersionTier:
             "files": [{
                 "filename": "Mat Joe - Heart To Find (Extended Mix).flac",
                 "size": 30_000_000,
-                "bitrate": 1411,
+                "bitDepth": 16, "sampleRate": 44100,
                 "length": 360,
             }],
         }]
@@ -297,13 +299,13 @@ class TestMaxVersionTierFilter:
                 {
                     "filename": "Mat Joe - Heart To Find (Original Mix).flac",
                     "size": 30_000_000,
-                    "bitrate": 1411,
+                    "bitDepth": 16, "sampleRate": 44100,
                     "length": 360,
                 },
                 {
                     "filename": "Mat Joe - Heart To Find (Extended Mix).flac",
                     "size": 50_000_000,
-                    "bitrate": 1411,
+                    "bitDepth": 16, "sampleRate": 44100,
                     "length": 480,
                 },
             ],
@@ -426,7 +428,7 @@ class TestSearchAndDownloadFallthrough:
                     "files": [{
                         "filename": "junk.wma",
                         "size": 1_000_000,
-                        "bitrate": 320,
+                        "bitRate": 320,
                         "length": 180,
                     }],
                 }]
@@ -436,7 +438,7 @@ class TestSearchAndDownloadFallthrough:
                 "files": [{
                     "filename": "Mat Joe - Heart To Find.flac",
                     "size": 30_000_000,
-                    "bitrate": 1411,
+                    "bitDepth": 16, "sampleRate": 44100,
                     "length": 360,
                 }],
             }]
@@ -537,7 +539,7 @@ class TestDownloadAndVerifyTransientErrors:
             "files": [{
                 "filename": "Artist - Track.flac",
                 "size": 30_000_000,
-                "bitrate": 1411,
+                "bitDepth": 16, "sampleRate": 44100,
                 "length": 360,
             }],
         }]
@@ -579,3 +581,90 @@ class TestDownloadAndVerifyTransientErrors:
             "transient slskd error should NOT add candidate to tried_files; "
             "got: " + repr(added)
         )
+
+
+class TestRealSlskdShape:
+    """slskd sends camelCase fields; "bitrate" (lowercase) never exists, so
+    the reported-bitrate floor used to be dead code."""
+
+    def _fixture(self):
+        import json
+        import pathlib
+
+        path = pathlib.Path(__file__).parent / "fixtures" / "slskd" / "search_responses.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_bitrate_is_parsed_and_enforced(self):
+        data = self._fixture()
+        out = extract_candidates(
+            data["responses"], data["expected"]["title"], data["expected"]["artist"]
+        )
+        by_user = {c["user"]: c for c in out}
+        assert set(by_user) == {"user1", "user2"}, by_user.keys()
+        assert by_user["user2"]["bitrate"] == 320
+        # user3's MP3 reports bitRate 128 but its size/length look like 320:
+        # only the reported bitRate can reject it.
+        assert "user3" not in by_user
+
+
+def _transfer_fixture():
+    import json
+    import pathlib
+
+    path = pathlib.Path(__file__).parent / "fixtures" / "slskd" / "transfer_states.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+_TRANSFERS = _transfer_fixture()
+
+
+class TestTransferStates:
+    """Every terminal "Completed, X" state except Succeeded is a failure, and
+    must end the wait immediately instead of running into the timeout."""
+
+    @pytest.mark.parametrize(
+        "case", _TRANSFERS["cases"], ids=[c["state"] for c in _TRANSFERS["cases"]]
+    )
+    def test_classification(self, case):
+        assert soulseek_api._transfer_outcome(case["state"]) == case["expected"]
+
+    @pytest.mark.parametrize(
+        "case",
+        [c for c in _TRANSFERS["cases"] if c["expected"]],
+        ids=[c["state"] for c in _TRANSFERS["cases"] if c["expected"]],
+    )
+    def test_wait_for_completion_returns_without_timing_out(self, case, monkeypatch):
+        import copy
+
+        payload = copy.deepcopy(_TRANSFERS["template"])
+        f = payload["directories"][0]["files"][0]
+        f["state"] = case["state"]
+        polls = []
+
+        class _Transfers:
+            def get_downloads(self, user):
+                polls.append(user)
+                return payload
+
+        class _Client:
+            transfers = _Transfers()
+
+        monkeypatch.setattr(soulseek_api, "get_client", lambda: _Client())
+        monkeypatch.setattr(soulseek_api, "find_file_in_downloads", lambda n: "/dl/" + n)
+        monkeypatch.setattr(soulseek_api, "_wait_for_external_processing", lambda p: True)
+        sleeps = []
+        # Returning True ("shutdown") turns a would-be 300 s hang into a fast,
+        # visible failure.
+        monkeypatch.setattr(
+            soulseek_api, "_interruptible_sleep", lambda s: sleeps.append(s) or True
+        )
+
+        out = soulseek_api.wait_for_completion(
+            {"user": "user1", "filename": f["filename"], "size": f["size"]}, timeout=300
+        )
+
+        assert sleeps == [], "a terminal state must not wait for another poll"
+        if case["expected"] == "succeeded":
+            assert out == "/dl/Artist - Song (Original Mix).flac"
+        else:
+            assert out is None

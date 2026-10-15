@@ -17,6 +17,7 @@ from .db import (
     clear_tried_entries,
     add_tried_file,
     get_pending_tracks,
+    get_track,
     get_playlist_meta,
     upsert_playlist_meta,
     list_playlists,
@@ -40,6 +41,14 @@ from .soulseek_api import (
     set_shutdown_event as _slsk_set_shutdown_event,
     refresh_from_db as _slsk_refresh_from_db,
     _version_tier,
+    _version_keywords,
+    _version_mismatch,
+    _expected_title_tokens,
+    _fold,
+    _artist_names,
+    # Splits "A, B", "A & B", "A and B", "A feat./ft./featuring B", "A; B",
+    # "A x B", "A vs B", "A with B".
+    _ARTIST_SPLIT_RE,
 )
 from .models import Track
 
@@ -98,13 +107,13 @@ def wake_now() -> None:
 
 PREFERRED_FORMATS = os.getenv("SLSKD_PREFERRED_FORMATS", "mp3,flac,aiff,wav,m4a,ogg")
 AUDIO_EXTS = tuple(f".{ext.strip().lower()}" for ext in PREFERRED_FORMATS.split(","))
+# Neutral release words only. Version words (dub, vip, club mix, instrumental,
+# a named mix) are kept: stripping them collapsed different recordings into
+# one. score_track_match compares versions explicitly via _version_matches.
 _STOP_PHRASES = [
     "original mix", "extended mix", "radio edit", "remastered", "remaster",
-    "edit", "dub", "club mix", "mix", "version", "vip", "instrumental",
-    "clean", "explicit"
+    "edit", "version", "clean", "explicit"
 ]
-# Splitters for artists like "Disclosure, AlunaGeorge", "Artist A & B", "feat.", "ft."
-_ARTIST_SPLIT_RE = re.compile(r"\s*(?:,|&| and | feat\.? | ft\.? | featuring )\s*", re.IGNORECASE)
 
 def sanitize_input(text):
     return re.sub(r'[^A-Za-z0-9 ]+', '', text)
@@ -205,30 +214,36 @@ def find_closest_match(conn, table_name, title, artist):
 def score_track_match(file_title: str, file_artist: str, db_title: str, db_artist: str) -> tuple[float, str]:
     """
     Returns (score, reason). Score in [0..1]. Reason is a short string for debugging.
+
+    An artist overlap and the same version are hard requirements: a title-only
+    match used to score 0.90 (0.88 for remixes), far above MIN_MATCH_SCORE,
+    which accepted "Your Eyes" for "Eyes On Fire" by someone else.
     """
+    title_sim = _similar(file_title, db_title)
+    if not _artists_overlap(file_artist, db_artist):
+        return 0.0, f"no_artist_overlap fuzzy(title={title_sim:.2f})"
+    if not _version_matches(file_title, db_title, db_artist):
+        return 0.0, "version_mismatch"
+
     if _titles_token_equivalent(file_title, db_title):
-        if _artists_overlap(file_artist, db_artist):
-            return 0.97, "title_tokens+artist_overlap"
-        return 0.90, "title_tokens_only"
+        return 0.97, "title_tokens+artist_overlap"
 
     if _remix_equivalent(file_title, db_title):
-        if _artists_overlap(file_artist, db_artist):
-            return 0.95, "remix_equivalent+artist_overlap"
-        return 0.88, "remix_equivalent_title_only"
+        return 0.95, "remix_equivalent+artist_overlap"
 
-    title_sim = _similar(file_title, db_title)
-    artist_sim = _similar(file_artist, db_artist) if (file_artist and db_artist) else 0.0
+    score = min(1.0, title_sim * 0.85 + 0.15)
+    return score, f"fuzzy(title={title_sim:.2f})+artist_overlap"
 
-    score = max(
-        title_sim,
-        0.75 * title_sim + 0.25 * artist_sim,
-    )
 
-    if _artists_overlap(file_artist, db_artist):
-        score = max(score, min(1.0, title_sim * 0.85 + 0.15))
-
-    reason = f"fuzzy(title={title_sim:.2f}, artist={artist_sim:.2f})"
-    return score, reason
+def _version_matches(file_title: str, db_title: str, artist: str = "") -> bool:
+    """Same version keywords on both sides, and for a remix/named edit the
+    expected remixer's words must be in the file title too ("(X Remix)" is
+    not "(Y Remix)")."""
+    if _version_mismatch(db_title, file_title, artist):
+        return False
+    if not _version_keywords(db_title, artist):
+        return True
+    return _expected_title_tokens(db_title) <= set(_fold(file_title).split())
 
 def find_closest_db_match(conn, table_name: str, file_title: str, file_artist: str):
     """
@@ -250,9 +265,33 @@ def find_closest_db_match(conn, table_name: str, file_title: str, file_artist: s
 
     return (*best_row, best_score, best_reason)
 
-def process_downloaded_file(file_path, playlist_name, conn, reconcile: bool = False):
+def _match_requested_track(conn, table_name, track_id, title, artist):
+    """Score the file's tags against the one track that was requested.
+
+    Returns ((id, name, artists, album), score) or (None, 0.0) if the row is
+    gone. Never falls back to another row: picking the best row of the whole
+    playlist assigned wrong files to *other* tracks while the requested one
+    stayed pending and was downloaded again.
+    """
+    row = get_track(conn, table_name, track_id)
+    if not row:
+        logging.warning(f"Requested track {track_id} not found in {table_name}")
+        return None, 0.0
+    score, reason = score_track_match(title, artist, row["name"], row["artists"])
+    logging.info(
+        f"Verify '{title}' by '{artist}' against requested '{row['name']}' by "
+        f"'{row['artists']}': score={score:.2f} ({reason})"
+    )
+    return (row["id"], row["name"], row["artists"], row["album"]), score
+
+
+def process_downloaded_file(file_path, playlist_name, conn, reconcile: bool = False, track_id=None):
     """
     Process a file that is either freshly downloaded or already on disk.
+
+    track_id: the track this file was downloaded for. When given, the file is
+      verified against that track only. Without it (reconciling an unknown
+      file) the best-scoring row of the playlist is used.
 
     When reconcile=True:
       - Never delete files on mismatch.
@@ -262,11 +301,13 @@ def process_downloaded_file(file_path, playlist_name, conn, reconcile: bool = Fa
 
     if not title or not artist:
         logging.warning(f"❌ Missing metadata for {file_path}. Skipping tagging and DB update.")
-        _reject_and_log(file_path, playlist_name, conn, reason="invalid metadata", destructive=not reconcile)
+        _reject_and_log(file_path, playlist_name, conn, track_id=track_id, reason="invalid metadata", destructive=not reconcile)
         return False, None
 
-    # Route through the robust scorer (via wrapper)
-    match, score = find_closest_match(conn, playlist_name, title, artist)
+    if track_id is not None:
+        match, score = _match_requested_track(conn, playlist_name, track_id, title, artist)
+    else:
+        match, score = find_closest_match(conn, playlist_name, title, artist)
     if not match:
         _reject_and_log(file_path, playlist_name, conn, reason="no match", destructive=not reconcile)
         return False, None
@@ -472,8 +513,9 @@ def _tokenize(s: str) -> set:
 def _split_artists(artist_str: str) -> set:
     if not artist_str:
         return set()
-    parts = _ARTIST_SPLIT_RE.split(artist_str)
-    return {p.strip().lower() for p in parts if p.strip()}
+    # Folded like the slskd matcher: accents, punctuation and a "The " prefix
+    # don't stop "Beyoncé"/"Beyonce" or "The Weeknd"/"Weeknd" overlapping.
+    return {n for p in _ARTIST_SPLIT_RE.split(artist_str) for n in _artist_names(p)}
 
 def _similar(a: str, b: str) -> float:
     return difflib.SequenceMatcher(a=_norm(a), b=_norm(b)).ratio()
@@ -491,7 +533,13 @@ def _titles_token_equivalent(file_title: str, db_title: str) -> bool:
     if not ft or not dt:
         return False
     shorter, longer = (ft, dt) if len(ft) <= len(dt) else (dt, ft)
-    return shorter.issubset(longer) or len(shorter.intersection(longer)) >= max(1, len(shorter) - 1)
+    if shorter <= longer:
+        # "Dream" is not "A Real Bad Dream": the shorter title must be at
+        # least half of the longer one.
+        return len(shorter) * 2 >= len(longer)
+    # One missing word is tolerated only for titles of 3+ words; on a
+    # 2-word title it meant one shared word ("you", "the", "eyes") passed.
+    return len(shorter) >= 3 and len(shorter & longer) >= len(shorter) - 1
 
 def _remix_equivalent(file_title: str, db_title: str) -> bool:
     # Normalize "(Walker & Royce Remix)" vs "- Walker & Royce Remix"
@@ -964,7 +1012,9 @@ def handle_track_download(track, playlist_name, conn):
     )
 
     if file_path:
-        verified, _final_path = process_downloaded_file(file_path, playlist_name, conn)
+        verified, _final_path = process_downloaded_file(
+            file_path, playlist_name, conn, track_id=track.id
+        )
         if verified:
             clear_tried_entries(conn, playlist_name, track.id)
             return True
@@ -1007,7 +1057,9 @@ def try_upgrade_track(track, playlist_name, conn, current_path):
         logging.info(f"[upgrade] No better-tier candidate for '{track.name}'")
         return False
 
-    verified, final_path = process_downloaded_file(new_file, playlist_name, conn)
+    verified, final_path = process_downloaded_file(
+        new_file, playlist_name, conn, track_id=track.id
+    )
     if not verified or not final_path:
         return False
 

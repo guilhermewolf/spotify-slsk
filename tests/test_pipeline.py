@@ -339,3 +339,63 @@ class TestStartupReconciliation:
         app.startup_check(conn, "pl_x")
 
         assert writes == [], "re-wrote a row whose stored path was already correct"
+
+
+class TestVerifiesTheRequestedTrackOnly:
+    """A download is verified against the track it was requested for.
+
+    Scoring the file against every row and marking the best one assigned
+    wrong files to *other* tracks (306 paths shared by 635 rows in
+    production) while the requested track stayed pending.
+    """
+
+    def test_file_for_another_row_is_rejected_not_reassigned(
+        self, conn, monkeypatch, sandbox_dirs
+    ):
+        downloads, _ = sandbox_dirs
+        _seed(conn, "t1", "Heart To Find", "Mat Joe")
+        _seed(conn, "t2", "Lose Yourself", "Eminem")
+        _stub_metadata(monkeypatch, "Lose Yourself", "Eminem")
+        f = downloads / "Eminem - Lose Yourself.flac"
+        f.write_bytes(b"audio")
+
+        ok, _ = app.process_downloaded_file(str(f), "pl_x", conn, track_id="t1")
+
+        assert ok is False
+        assert not f.exists()
+        assert db.get_track(conn, "pl_x", "t2")["downloaded"] is False
+        assert db.get_track(conn, "pl_x", "t1")["downloaded"] is False
+        assert "Eminem - Lose Yourself.flac" in db.get_tried_files(conn, "pl_x", "t1")
+
+    def test_matching_file_marks_the_requested_row(
+        self, conn, monkeypatch, sandbox_dirs
+    ):
+        downloads, _ = sandbox_dirs
+        _seed(conn, "t1", "Heart To Find", "Mat Joe")
+        _seed(conn, "t2", "Heart To Find", "Mat Joe")  # duplicate entry
+        _stub_metadata(monkeypatch, "Heart To Find", "Mat Joe")
+        f = downloads / "Mat Joe - Heart To Find.flac"
+        f.write_bytes(b"audio")
+
+        ok, _ = app.process_downloaded_file(str(f), "pl_x", conn, track_id="t2")
+
+        assert ok is True
+        assert db.get_track(conn, "pl_x", "t2")["downloaded"] is True
+        assert db.get_track(conn, "pl_x", "t1")["downloaded"] is False
+
+    def test_handle_track_download_passes_the_track_id(self, conn, monkeypatch):
+        from spotify_slsk.models import Track
+
+        seen = {}
+        monkeypatch.setattr(app, "search_and_download", lambda **k: "/x.flac")
+
+        def _process(path, pl, c, reconcile=False, track_id=None):
+            seen["track_id"] = track_id
+            return False, None
+
+        monkeypatch.setattr(app, "process_downloaded_file", _process)
+        _seed(conn, "t1")
+        app.handle_track_download(
+            Track("t1", "Heart To Find", "Mat Joe", "Alb", "p"), "pl_x", conn
+        )
+        assert seen["track_id"] == "t1"

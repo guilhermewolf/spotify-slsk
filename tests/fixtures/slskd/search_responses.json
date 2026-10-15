@@ -1,0 +1,49 @@
+{
+ "note": "Synthetic GET /api/v0/searches/{id}/responses payload in slskd's real field shape (camelCase; bitRate only on lossy files, bitDepth/sampleRate on lossless; backslash peer paths).",
+ "expected": {"title": "Heavy Water/I'd Rather Be Sleeping", "artist": "Grouper"},
+ "responses": [
+  {
+   "fileCount": 1,
+   "files": [
+    {"bitDepth": 16, "code": 1, "extension": "flac",
+     "filename": "Music\\Grouper\\Dragging a Dead Deer up a Hill (2008)\\02 - Heavy Water + I’d Rather Be Sleeping.flac",
+     "length": 173, "sampleRate": 44100, "size": 15448872, "isLocked": false}
+   ],
+   "hasFreeUploadSlot": true, "lockedFileCount": 0, "lockedFiles": [],
+   "queueLength": 0, "token": 1, "uploadSpeed": 717824, "username": "user1"
+  },
+  {
+   "fileCount": 2,
+   "files": [
+    {"bitRate": 320, "code": 1, "extension": "",
+     "filename": "Organized Music\\Grouper\\Dragging a Dead Deer up a Hill\\02 - Heavy Water _ I'd Rather Be Sleeping.mp3",
+     "isVariableBitRate": false, "length": 173, "size": 6924029, "isLocked": false},
+    {"code": 1, "extension": "lrc",
+     "filename": "Organized Music\\Grouper\\Dragging a Dead Deer up a Hill\\02 - Heavy Water _ I'd Rather Be Sleeping.lrc",
+     "size": 1046, "isLocked": false}
+   ],
+   "hasFreeUploadSlot": true, "lockedFileCount": 0, "lockedFiles": [],
+   "queueLength": 8, "token": 1, "uploadSpeed": 4838886, "username": "user2"
+  },
+  {
+   "fileCount": 1,
+   "files": [
+    {"bitRate": 128, "code": 1, "extension": "mp3",
+     "filename": "music\\Grouper\\Dragging A Dead Deer Up A Hill\\02 Heavy Water_I'd Rather Be Sleeping.mp3",
+     "isVariableBitRate": false, "length": 173, "size": 7000000, "isLocked": false}
+   ],
+   "hasFreeUploadSlot": true, "lockedFileCount": 0, "lockedFiles": [],
+   "queueLength": 0, "token": 1, "uploadSpeed": 2599186, "username": "user3"
+  },
+  {
+   "fileCount": 1,
+   "files": [
+    {"bitDepth": 16, "code": 1, "extension": "flac",
+     "filename": "Music\\Grouper\\Dragging a Dead Deer up a Hill (2008)\\03 - Stuck.flac",
+     "length": 160, "sampleRate": 44100, "size": 14000000, "isLocked": false}
+   ],
+   "hasFreeUploadSlot": true, "lockedFileCount": 0, "lockedFiles": [],
+   "queueLength": 0, "token": 1, "uploadSpeed": 717824, "username": "user4"
+  }
+ ]
+}
