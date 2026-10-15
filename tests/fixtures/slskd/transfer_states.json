@@ -1,0 +1,43 @@
+{
+ "note": "Synthetic GET /api/v0/transfers/downloads/{username} payloads in slskd's real shape, one per transfer state observed in production. expected: what wait_for_completion must conclude.",
+ "cases": [
+  {"state": "Completed, Succeeded", "expected": "succeeded"},
+  {"state": "Completed, Errored", "expected": "failed", "exception": "Application shut down"},
+  {"state": "Completed, Rejected", "expected": "failed", "exception": "File read error."},
+  {"state": "Completed, TimedOut", "expected": "failed", "exception": "The wait timed out after 15000 milliseconds"},
+  {"state": "Completed, Aborted", "expected": "failed", "exception": "Transfer aborted: the remote size of 1 does not match expected size 2"},
+  {"state": "Completed, Cancelled", "expected": "failed"},
+  {"state": "Queued, Remotely", "expected": null},
+  {"state": "Queued, Locally", "expected": null},
+  {"state": "Requested", "expected": null},
+  {"state": "Initializing", "expected": null},
+  {"state": "InProgress", "expected": null}
+ ],
+ "template": {
+  "username": "user1",
+  "directories": [
+   {
+    "directory": "Shared\\Artist\\Album",
+    "fileCount": 1,
+    "files": [
+     {
+      "id": "00000000-0000-0000-0000-000000000001",
+      "username": "user1",
+      "direction": "Download",
+      "filename": "Shared\\Artist\\Album\\Artist - Song (Original Mix).flac",
+      "size": 40933942,
+      "state": "",
+      "requestedAt": "2026-07-29T08:19:32.4043903",
+      "enqueuedAt": "2026-07-29T08:19:53.9389327",
+      "bytesTransferred": 0,
+      "averageSpeed": 0,
+      "attempts": 1,
+      "removed": false,
+      "bytesRemaining": 40933942,
+      "percentComplete": 0
+     }
+    ]
+   }
+  ]
+ }
+}

@@ -700,6 +700,23 @@ def search_and_download(
     return None
 
 
+def _transfer_outcome(state):
+    """Classify a slskd transfer state: "succeeded", "failed", or None while
+    it is still queued/in progress.
+
+    slskd's terminal states are all "Completed, <reason>". Only Succeeded is
+    a success; Rejected, TimedOut, Errored, Aborted, Cancelled... are
+    failures. Matching only failed/aborted/errored let "Completed, Rejected"
+    and "Completed, TimedOut" run into the 300 s timeout.
+    """
+    s = (state or "").lower()
+    if "completed" in s:
+        return "succeeded" if "succeeded" in s else "failed"
+    if any(w in s for w in ("failed", "aborted", "errored", "rejected", "timedout")):
+        return "failed"
+    return None
+
+
 def wait_for_completion(candidate, timeout=300):
     client = get_client()
     logging.debug(f"Waiting for transfer of {candidate['filename']} to complete...")
@@ -736,7 +753,8 @@ def wait_for_completion(candidate, timeout=300):
                 if file["id"] == transfer_id:
                     state = file.get("state", "").lower()
                     logging.debug(f"State for {file['filename']}: {state}")
-                    if "completed" in state and "succeeded" in state:
+                    outcome = _transfer_outcome(state)
+                    if outcome == "succeeded":
                         filename = _remote_basename(candidate["filename"])
                         real_path = find_file_in_downloads(filename)
                         logging.info(f"File found: {real_path}")
@@ -746,7 +764,7 @@ def wait_for_completion(candidate, timeout=300):
                             f"File not confirmed after download: {filename}"
                         )
                         return None
-                    if any(w in state for w in ("failed", "aborted", "errored")):
+                    if outcome == "failed":
                         logging.warning(
                             f"Transfer failed: {file['filename']} — state: {state}"
                         )
