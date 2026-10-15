@@ -451,7 +451,8 @@ class TestUntaggedFallback:
 
 
 class TestRejectionBlocklists:
-    def test_rejected_download_blocklists_its_source(self, conn, monkeypatch, sandbox_dirs):
+    def test_mismatch_goes_to_tried_not_blocklist(self, conn, monkeypatch, sandbox_dirs):
+        # A file that isn't the requested track may be right for another one.
         downloads, _ = sandbox_dirs
         _seed(conn)
         _stub_metadata(monkeypatch, "Something Totally Different", "Other Artist")
@@ -459,9 +460,39 @@ class TestRejectionBlocklists:
         bad.write_bytes(b"audio")
         source = {"user": "peer", "filename": "@@a\\x.flac", "size": 5}
 
+        app.process_downloaded_file(str(bad), "pl_x", conn, track_id="t1", source=source)
+
+        assert db.list_blocklist(conn) == []
+        assert "x.flac" in db.get_tried_files(conn, "pl_x", "t1")
+        assert [r["event"] for r in db.list_history(conn)][-1] == "import_rejected"
+
+    def test_untagged_file_blocklists_its_source(self, conn, monkeypatch, sandbox_dirs):
+        downloads, _ = sandbox_dirs
+        _seed(conn)
+        _stub_metadata(monkeypatch, None, None)
+        bad = downloads / "x.flac"
+        bad.write_bytes(b"audio")
+        source = {"user": "peer", "filename": "@@a\\x.flac", "size": 5}
+
         app.process_downloaded_file(str(bad), "pl_x", conn, source=source)
 
         assert db.is_blocklisted(conn, "peer", "@@a\\x.flac")
+
+    def test_truncated_file_blocklists_its_source(self, conn, monkeypatch, sandbox_dirs):
+        from spotify_slsk import soulseek_api
+        downloads, _ = sandbox_dirs
+        _seed(conn)
+        _stub_metadata(monkeypatch, "Heart To Find", "Mat Joe")
+        monkeypatch.setattr(soulseek_api, "MAX_DURATION_DIFF_SECONDS", 15)
+        monkeypatch.setattr(app, "_audio_length_seconds", lambda p: 30.0)
+        bad = downloads / "Mat Joe - Heart To Find.flac"
+        bad.write_bytes(b"audio")
+        source = {"user": "peer", "filename": "@@a\\y.flac", "size": 5, "length": 240}
+
+        ok, _ = app.process_downloaded_file(str(bad), "pl_x", conn, track_id="t1", source=source)
+
+        assert ok is False and not bad.exists()
+        assert db.is_blocklisted(conn, "peer", "@@a\\y.flac")
 
     def test_reconcile_never_blocklists(self, conn, monkeypatch, sandbox_dirs):
         downloads, _ = sandbox_dirs

@@ -373,14 +373,37 @@ def process_downloaded_file(
       - If the file already lives in /playlists/<playlist_name>, don't move it again.
 
     `expected_track` is the Track the download was for (implies its
-    track_id). When given and the file has no title/artist tags, the filename + real duration are checked
-    against it (see _fallback_match_untagged) instead of rejecting outright.
+    track_id). When given and the file has no title/artist tags, the
+    filename + real duration are checked against it (see
+    _fallback_match_untagged) instead of rejecting outright.
 
-    `source` is the slskd candidate the file came from; a rejected
-    download blocklists that peer file.
+    `source` is the slskd candidate the file came from. A rejection only
+    blocklists that peer file when the fault is the file's own, whatever
+    track it is for: no usable tags, unreadable audio, or a real length
+    far from what the peer advertised (truncated/corrupt). A mismatch
+    against the *requested* track ("no match", "low score", a filename or
+    Spotify-duration miss) is recorded in the track's _tried list and
+    history only — the same file can be exactly right for another track,
+    and a global ban would hide it there.
     """
     if expected_track is not None and track_id is None:
         track_id = expected_track.id
+
+    advertised = (source or {}).get("length")
+    if advertised and not reconcile and soulseek_api.MAX_DURATION_DIFF_SECONDS > 0:
+        actual = _audio_length_seconds(file_path)
+        if actual is not None and abs(actual - advertised) > soulseek_api.MAX_DURATION_DIFF_SECONDS:
+            reason = (
+                f"duration {soulseek_api.fmt_duration(actual)} vs advertised "
+                f"{soulseek_api.fmt_duration(advertised)} (truncated or corrupt)"
+            )
+            logging.warning(f"❌ Rejecting {file_path}: {reason}")
+            _reject_and_log(
+                file_path, playlist_name, conn, track_id=track_id, reason=reason,
+                source=source, peer_fault=True,
+            )
+            return False, None
+
     title, artist, album = extract_metadata_from_file(file_path)
 
     if not title or not artist:
@@ -394,6 +417,7 @@ def process_downloaded_file(
             _reject_and_log(
                 file_path, playlist_name, conn, track_id=track_id,
                 reason=reason, destructive=not reconcile, source=source,
+                peer_fault=reason in _PEER_FAULT_REASONS,
             )
             return False, None
         logging.info(
@@ -453,10 +477,16 @@ def process_downloaded_file(
     return False, None
 
 
-def _reject_and_log(file_path, playlist_name, conn, track_id=None, reason="unknown", destructive: bool = True, source=None):
+# Rejections that condemn the peer file for every track (see
+# process_downloaded_file). Everything else is a per-track mismatch.
+_PEER_FAULT_REASONS = ("invalid metadata", "missing tags; unreadable duration")
+
+
+def _reject_and_log(file_path, playlist_name, conn, track_id=None, reason="unknown", destructive: bool = True, source=None, peer_fault: bool = False):
     """
     On normal downloads we delete bad files; on reconcile we never delete.
-    A rejected download with a known slskd `source` is also blocklisted.
+    The file always goes to the track's _tried list; a known slskd `source`
+    is blocklisted globally only when `peer_fault` (the file itself is bad).
     """
     filename = os.path.basename(file_path)
 
@@ -484,7 +514,7 @@ def _reject_and_log(file_path, playlist_name, conn, track_id=None, reason="unkno
     else:
         logging.debug(f"Skipping add_tried_file() because track ID is unknown for: {filename}")
 
-    if destructive and source:
+    if destructive and source and peer_fault:
         add_blocklist(
             conn,
             source.get("user"),
