@@ -526,3 +526,36 @@ class TestHistory:
 
     def test_none_conn_is_a_noop(self):
         db.record_history(None, "grabbed")
+
+
+class TestStatusCountsAgree:
+    """Dashboard (playlist_stats) and the playlist page's filter chips
+    (list_tracks statuses) count the same partition of the table."""
+
+    def test_stats_partition_matches_track_statuses(self, tmp_path):
+        conn = db.create_connection(str(tmp_path / "s.db"))
+        db.create_table(conn, "pl_s")
+        for tid in ("new", "failed_once", "suspended", "done1", "done2"):
+            db.insert_track(conn, "pl_s", (tid, tid, "A", "B"))
+        db.update_download_status(conn, "failed_once", "pl_s", success=False)
+        for _ in range(db.MAX_ATTEMPTS_BEFORE_SUSPEND):
+            db.update_download_status(conn, "suspended", "pl_s", success=False)
+        for tid in ("done1", "done2"):
+            db.update_download_status(conn, tid, "pl_s", success=True, file_path=f"/p/{tid}")
+
+        stats = db.playlist_stats(conn, "pl_s")
+        statuses = [t["status"] for t in db.list_tracks(conn, "pl_s")]
+        for key in ("downloaded", "pending", "retrying", "suspended"):
+            assert stats[key] == statuses.count(key), key
+        assert stats == {"total": 5, "downloaded": 2, "pending": 1, "retrying": 1, "suspended": 1}
+        conn.close()
+
+    def test_all_downloaded_means_nothing_pending(self, tmp_path):
+        conn = db.create_connection(str(tmp_path / "s.db"))
+        db.create_table(conn, "pl_s")
+        for i in range(3):
+            db.insert_track(conn, "pl_s", (f"t{i}", "x", "A", "B"))
+            db.update_download_status(conn, f"t{i}", "pl_s", success=False)
+            db.update_download_status(conn, f"t{i}", "pl_s", success=True, file_path="/p")
+        assert db.playlist_stats(conn, "pl_s")["pending"] == 0
+        conn.close()

@@ -457,15 +457,16 @@ def playlist_stats(conn, table_name: str) -> dict:
             f'SELECT '
             f'  COUNT(*), '
             f'  COALESCE(SUM(CASE WHEN downloaded = 1 THEN 1 ELSE 0 END), 0), '
-            f'  COALESCE(SUM(CASE WHEN downloaded = 0 AND '
+            # The four statuses partition the table exactly like
+            # _track_status (and so the playlist page's filter chips):
+            # pending = never failed yet; retrying = failed at least once but
+            # not suspended. "pending" used to include the retrying rows, so
+            # the dashboard and the playlist page disagreed.
+            f'  COALESCE(SUM(CASE WHEN downloaded = 0 AND COALESCE(attempts, 0) = 0 AND '
             f'    (suspended_until IS NULL OR suspended_until < CURRENT_TIMESTAMP) '
             f'    THEN 1 ELSE 0 END), 0), '
             f'  COALESCE(SUM(CASE WHEN downloaded = 0 AND suspended_until IS NOT NULL '
             f'    AND suspended_until >= CURRENT_TIMESTAMP THEN 1 ELSE 0 END), 0), '
-            # "retrying" is a subset of "pending": not downloaded, not
-            # currently suspended, but has already failed at least once. The
-            # dashboard shows it separately so a user can tell "not tried yet"
-            # from "tried and failed".
             f'  COALESCE(SUM(CASE WHEN downloaded = 0 AND attempts > 0 AND '
             f'    (suspended_until IS NULL OR suspended_until < CURRENT_TIMESTAMP) '
             f'    THEN 1 ELSE 0 END), 0) '
