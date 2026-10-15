@@ -1,4 +1,4 @@
-"""Unit tests for the slskd search pipeline in soulseek_api.py."""
+"""Unit tests for the slskd search pipeline (slskd/ and matching/candidates)."""
 import os
 
 import pytest
@@ -18,13 +18,17 @@ from spotify_slsk.matching.normalize import (
     version_mismatch,
     version_tier,
 )
-from spotify_slsk.soulseek_api import (
+from spotify_slsk.slskd.search import (
     _build_search_queries,
     _is_ascii,
     _normalize_query_text,
     download_and_verify,
 )
-from spotify_slsk import config, soulseek_api
+from spotify_slsk import config
+from spotify_slsk.matching import candidates as matching_candidates
+from spotify_slsk.slskd import client as slskd_client
+from spotify_slsk.slskd import search as slskd_search
+from spotify_slsk.slskd import transfers as slskd_transfers
 from spotify_slsk.config import normalize_ext_list
 
 
@@ -333,15 +337,15 @@ class TestMaxVersionTierFilter:
         class _Client:
             transfers = _Transfers()
 
-        monkeypatch.setattr(soulseek_api, "get_client", lambda: _Client())
+        monkeypatch.setattr(slskd_client, "get_client", lambda: _Client())
         # Every attempt "fails" so the loop walks all permitted candidates.
-        monkeypatch.setattr(soulseek_api, "wait_for_completion", lambda c: None)
+        monkeypatch.setattr(slskd_transfers, "wait_for_completion", lambda c: None)
 
         conn = _db.create_connection(str(tmp_path / "t.db"))
         _db.create_table(conn, "pl_x")
         _db.insert_track(conn, "pl_x", ("t1", "Heart To Find", "Mat Joe", "Alb"))
         try:
-            soulseek_api.download_and_verify(
+            slskd_search.download_and_verify(
                 search_results=self._two_versions_search_result(),
                 expected_title="Heart To Find",
                 expected_artist="Mat Joe",
@@ -389,8 +393,8 @@ class TestRunOneSearch:
         fake.searches.state = lambda sid: {"state": "Completed"}
         fake.searches.search_responses = lambda sid: [{"username": "u", "files": []}]
         fake.searches.delete = lambda sid: None
-        monkeypatch.setattr(soulseek_api, "get_client", lambda: fake)
-        out = soulseek_api._run_one_search("hello", timeout=2)
+        monkeypatch.setattr(slskd_client, "get_client", lambda: fake)
+        out = slskd_search._run_one_search("hello", timeout=2)
         assert out and out[0]["username"] == "u"
 
     def test_returns_empty_on_no_search_id(self, monkeypatch):
@@ -398,8 +402,8 @@ class TestRunOneSearch:
         fake.searches = type("S", (), {})()
         fake.searches.search_text = lambda **kw: {}
         fake.searches.delete = lambda sid: None
-        monkeypatch.setattr(soulseek_api, "get_client", lambda: fake)
-        assert soulseek_api._run_one_search("hello", timeout=2) == []
+        monkeypatch.setattr(slskd_client, "get_client", lambda: fake)
+        assert slskd_search._run_one_search("hello", timeout=2) == []
 
     def test_returns_empty_on_timeout(self, monkeypatch):
         fake = type("F", (), {})()
@@ -407,10 +411,10 @@ class TestRunOneSearch:
         fake.searches.search_text = lambda **kw: {"id": "sid"}
         fake.searches.state = lambda sid: {"state": "InProgress"}
         fake.searches.delete = lambda sid: None
-        monkeypatch.setattr(soulseek_api, "get_client", lambda: fake)
+        monkeypatch.setattr(slskd_client, "get_client", lambda: fake)
         # Skip the real sleep so the test runs fast.
-        monkeypatch.setattr(soulseek_api, "_interruptible_sleep", lambda s: False)
-        assert soulseek_api._run_one_search("hello", timeout=0) == []
+        monkeypatch.setattr(slskd_client, "interruptible_sleep", lambda s: False)
+        assert slskd_search._run_one_search("hello", timeout=0) == []
 
 
 class TestSearchAndDownloadFallthrough:
@@ -456,10 +460,10 @@ class TestSearchAndDownloadFallthrough:
             )
             return "/downloads/Mat Joe - Heart To Find.flac" if cands else None
 
-        monkeypatch.setattr(soulseek_api, "_run_one_search", fake_run_one_search)
-        monkeypatch.setattr(soulseek_api, "download_and_verify", fake_download_and_verify)
+        monkeypatch.setattr(slskd_search, "_run_one_search", fake_run_one_search)
+        monkeypatch.setattr(slskd_search, "download_and_verify", fake_download_and_verify)
 
-        out = soulseek_api.search_and_download(
+        out = slskd_search.search_and_download(
             artist="Mat Joe",
             title="Heart To Find",
             conn=None,
@@ -471,11 +475,11 @@ class TestSearchAndDownloadFallthrough:
         assert len(calls) >= 2
 
     def test_returns_none_when_all_queries_exhausted(self, monkeypatch):
-        monkeypatch.setattr(soulseek_api, "_run_one_search", lambda q, timeout=60: [])
+        monkeypatch.setattr(slskd_search, "_run_one_search", lambda q, timeout=60: [])
         monkeypatch.setattr(
-            soulseek_api, "download_and_verify", lambda **kw: None
+            slskd_search, "download_and_verify", lambda **kw: None
         )
-        out = soulseek_api.search_and_download(
+        out = slskd_search.search_and_download(
             artist="X", title="Y", conn=None, playlist_name="pl", track_id="t",
         )
         assert out is None
@@ -554,7 +558,7 @@ class TestDownloadAndVerifyTransientErrors:
                 @staticmethod
                 def enqueue(**kw):
                     raise ValueError("Expecting value: line 1 column 1 (char 0)")
-        monkeypatch.setattr(soulseek_api, "get_client", lambda: FakeClient())
+        monkeypatch.setattr(slskd_client, "get_client", lambda: FakeClient())
 
         added = []
         captured_tried = {"v": []}
@@ -566,8 +570,8 @@ class TestDownloadAndVerifyTransientErrors:
             added.append(fname)
             captured_tried["v"].append(fname)
 
-        monkeypatch.setattr(soulseek_api, "get_tried_files", fake_get_tried_files)
-        monkeypatch.setattr(soulseek_api, "add_tried_file", fake_add_tried_file)
+        monkeypatch.setattr(slskd_search, "get_tried_files", fake_get_tried_files)
+        monkeypatch.setattr(slskd_transfers, "add_tried_file", fake_add_tried_file)
         return results, added
 
     def test_transient_api_error_does_not_blacklist(self, monkeypatch):
@@ -599,7 +603,7 @@ class TestRejectionReasons:
         return {"filename": filename, "size": size, "bitRate": bitrate, "length": length}
 
     def _reason(self, file, title="Lose Yourself", artist="Eminem"):
-        out = soulseek_api.evaluate_candidates(self._results(file), title, artist)
+        out = matching_candidates.evaluate_candidates(self._results(file), title, artist)
         assert len(out) == 1
         return out[0]["reason"]
 
@@ -638,7 +642,7 @@ class TestRejectionReasons:
         assert reason.startswith("title coverage ")
 
     def test_backslash_peer_path_keeps_full_filename_and_basename(self):
-        out = soulseek_api.evaluate_candidates(
+        out = matching_candidates.evaluate_candidates(
             self._results(self._file("@@x\\Eminem\\8 Mile\\01 - Lose Yourself.flac", bitrate=1411)),
             "Lose Yourself", "Eminem",
         )
@@ -651,13 +655,13 @@ class TestRejectionReasons:
             self._file("Eminem - Lose Yourself.flac", bitrate=1411),
             self._file("Eminem - Lose Yourself.wma"),
         )
-        evaluated = soulseek_api.evaluate_candidates(results, "Lose Yourself", "Eminem")
+        evaluated = matching_candidates.evaluate_candidates(results, "Lose Yourself", "Eminem")
         accepted = [c for c in evaluated if c["accepted"]]
         assert len(accepted) == 1 and accepted[0]["reason"] is None
         assert accepted == extract_candidates(results, "Lose Yourself", "Eminem")
 
     def test_upgrade_cap_reason(self):
-        out = soulseek_api.evaluate_candidates(
+        out = matching_candidates.evaluate_candidates(
             self._results(self._file("Eminem - Lose Yourself (Original Mix).flac", bitrate=1411)),
             "Lose Yourself", "Eminem", max_version_tier=1,
         )
@@ -670,9 +674,9 @@ class TestRejectionReasons:
             self._file("Eminem - Lose Yourself.flac", bitrate=1411),
             self._file("Eminem - Lose Yourself.wma"),
         )
-        monkeypatch.setattr(soulseek_api, "_run_one_search", lambda q, timeout=60: results)
-        monkeypatch.setattr(soulseek_api, "download_and_verify", lambda **kw: "/x.flac")
-        soulseek_api.search_and_download(
+        monkeypatch.setattr(slskd_search, "_run_one_search", lambda q, timeout=60: results)
+        monkeypatch.setattr(slskd_search, "download_and_verify", lambda **kw: "/x.flac")
+        slskd_search.search_and_download(
             artist="Eminem", title="Lose Yourself", conn=None,
             playlist_name="pl", track_id="t-reasons",
         )
@@ -691,7 +695,7 @@ class TestDurationFilter:
 
     def test_rejects_when_too_far_off(self, monkeypatch):
         monkeypatch.setattr(config, "MAX_DURATION_DIFF_SECONDS", 15)
-        out = soulseek_api.evaluate_candidates(
+        out = matching_candidates.evaluate_candidates(
             self._results(190), "Lose Yourself", "Eminem", expected_duration_ms=242_000
         )
         assert out[0]["accepted"] is False
@@ -699,14 +703,14 @@ class TestDurationFilter:
 
     def test_accepts_within_tolerance(self, monkeypatch):
         monkeypatch.setattr(config, "MAX_DURATION_DIFF_SECONDS", 15)
-        out = soulseek_api.evaluate_candidates(
+        out = matching_candidates.evaluate_candidates(
             self._results(250), "Lose Yourself", "Eminem", expected_duration_ms=242_000
         )
         assert out[0]["accepted"] is True
 
     def test_zero_disables(self, monkeypatch):
         monkeypatch.setattr(config, "MAX_DURATION_DIFF_SECONDS", 0)
-        out = soulseek_api.evaluate_candidates(
+        out = matching_candidates.evaluate_candidates(
             self._results(100), "Lose Yourself", "Eminem", expected_duration_ms=242_000
         )
         assert out[0]["accepted"] is True
@@ -717,7 +721,7 @@ class TestDurationFilter:
         monkeypatch.setattr(config, "MAX_DURATION_DIFF_SECONDS", 15)
 
         def judge(length):
-            return soulseek_api.evaluate_candidates(
+            return matching_candidates.evaluate_candidates(
                 [{"username": "u", "uploadSpeed": 1, "files": [{
                     "filename": "Sem Jacobs - Blue Berries (Extended Mix).flac",
                     "size": 40_000_000, "length": length}]}],
@@ -728,10 +732,10 @@ class TestDurationFilter:
 
     def test_unknown_durations_are_not_rejected(self, monkeypatch):
         monkeypatch.setattr(config, "MAX_DURATION_DIFF_SECONDS", 15)
-        assert soulseek_api.evaluate_candidates(
+        assert matching_candidates.evaluate_candidates(
             self._results(None), "Lose Yourself", "Eminem", expected_duration_ms=242_000
         )[0]["accepted"]
-        assert soulseek_api.evaluate_candidates(
+        assert matching_candidates.evaluate_candidates(
             self._results(100), "Lose Yourself", "Eminem", expected_duration_ms=None
         )[0]["accepted"]
 
@@ -746,7 +750,7 @@ class TestBlocklistFiltering:
         ]
 
     def test_blocklisted_file_is_rejected_with_reason(self):
-        out = soulseek_api.evaluate_candidates(
+        out = matching_candidates.evaluate_candidates(
             self._results(), "Lose Yourself", "Eminem",
             is_blocked=lambda u, f: u == "bad",
         )
@@ -765,25 +769,25 @@ class TestBlocklistFiltering:
                 def enqueue(username, files):
                     enqueued.append(username)
 
-        monkeypatch.setattr(soulseek_api, "get_client", lambda: _Client())
+        monkeypatch.setattr(slskd_client, "get_client", lambda: _Client())
 
         def _fail(candidate):
             candidate["failure"] = "transfer completed, errored"
             candidate["peer_fault"] = True
             return None
 
-        monkeypatch.setattr(soulseek_api, "wait_for_completion", _fail)
+        monkeypatch.setattr(slskd_transfers, "wait_for_completion", _fail)
         conn = _db.create_connection(str(tmp_path / "t.db"))
         _db.create_table(conn, "pl_x")
         _db.insert_track(conn, "pl_x", ("t1", "Lose Yourself", "Eminem", "Alb"))
         results = self._results()[:1]
-        soulseek_api.download_and_verify(results, "Lose Yourself", "Eminem", conn, "pl_x", "t1")
+        slskd_search.download_and_verify(results, "Lose Yourself", "Eminem", conn, "pl_x", "t1")
         assert _db.is_blocklisted(conn, "bad", "Eminem - Lose Yourself.flac")
 
         # Retry clears _tried; the blocklist still keeps the peer file out.
         _db.retry_track(conn, "pl_x", "t1")
         enqueued.clear()
-        soulseek_api.download_and_verify(results, "Lose Yourself", "Eminem", conn, "pl_x", "t1")
+        slskd_search.download_and_verify(results, "Lose Yourself", "Eminem", conn, "pl_x", "t1")
         assert enqueued == []
         conn.close()
 
@@ -801,13 +805,13 @@ class TestBlocklistPolicy:
                 def enqueue(username, files):
                     pass
 
-        monkeypatch.setattr(soulseek_api, "get_client", lambda: _Client())
-        monkeypatch.setattr(soulseek_api, "wait_for_completion", outcome)
+        monkeypatch.setattr(slskd_client, "get_client", lambda: _Client())
+        monkeypatch.setattr(slskd_transfers, "wait_for_completion", outcome)
         conn = _db.create_connection(str(tmp_path / "t.db"))
         _db.create_table(conn, "pl_x")
         _db.insert_track(conn, "pl_x", ("t1", "Lose Yourself", "Eminem", "Alb"))
         cand = {"user": "peer", "filename": "@@a\\Eminem - Lose Yourself.flac", "size": 1}
-        assert soulseek_api.grab_candidate(cand, conn, "pl_x", "t1") is None
+        assert slskd_transfers.grab_candidate(cand, conn, "pl_x", "t1") is None
         out = (
             _db.list_blocklist(conn),
             _db.get_tried_files(conn, "pl_x", "t1"),
@@ -822,7 +826,7 @@ class TestBlocklistPolicy:
     def test_explicit_peer_failure_blocklists(self, monkeypatch, tmp_path, state):
         def outcome(c):
             c["failure"] = f"transfer {state}"
-            c["peer_fault"] = any(w in state for w in soulseek_api._PEER_FAULT_STATES)
+            c["peer_fault"] = any(w in state for w in slskd_transfers._PEER_FAULT_STATES)
             return None
 
         blocked, tried, _ = self._run(monkeypatch, tmp_path, outcome)
@@ -855,15 +859,15 @@ class TestBlocklistPolicy:
                     def get_downloads(user):
                         return payload
 
-            monkeypatch.setattr(soulseek_api, "get_client", lambda: _Client())
+            monkeypatch.setattr(slskd_client, "get_client", lambda: _Client())
             cand = {"user": "u", "filename": "a\\b.flac", "size": 1}
-            assert soulseek_api.wait_for_completion(cand) is None
+            assert slskd_transfers.wait_for_completion(cand) is None
             assert cand["peer_fault"] is fault, state
 
 
 class TestInteractiveSearch:
     def test_collects_all_queries_accepted_first_and_deduped(self, monkeypatch):
-        monkeypatch.setattr(soulseek_api, "new_client", lambda: object())
+        monkeypatch.setattr(slskd_client, "new_client", lambda: object())
         good = {"filename": "Eminem - Lose Yourself.flac", "size": 1, "bitrate": 1411, "length": 300}
         bad = {"filename": "Eminem - Lose Yourself.wma", "size": 1, "bitrate": 320, "length": 300}
         mp3 = {"filename": "Eminem - Lose Yourself.mp3", "size": 12_000_000, "bitrate": 320, "length": 300}
@@ -874,9 +878,9 @@ class TestInteractiveSearch:
             # Same files on every query: must be de-duplicated.
             return [{"username": "u", "uploadSpeed": 1, "files": [bad, mp3, good]}]
 
-        monkeypatch.setattr(soulseek_api, "_run_one_search", fake)
-        out = soulseek_api.interactive_search("Eminem", "Lose Yourself")
-        assert len(calls) == len(soulseek_api._build_search_queries("Eminem", "Lose Yourself"))
+        monkeypatch.setattr(slskd_search, "_run_one_search", fake)
+        out = slskd_search.interactive_search("Eminem", "Lose Yourself")
+        assert len(calls) == len(slskd_search._build_search_queries("Eminem", "Lose Yourself"))
         assert [(c["ext"], c["accepted"]) for c in out] == [
             (".flac", True), (".mp3", True), (".wma", False),
         ]
@@ -925,7 +929,7 @@ class TestTransferStates:
         "case", _TRANSFERS["cases"], ids=[c["state"] for c in _TRANSFERS["cases"]]
     )
     def test_classification(self, case):
-        assert soulseek_api._transfer_outcome(case["state"]) == case["expected"]
+        assert slskd_transfers._transfer_outcome(case["state"]) == case["expected"]
 
     @pytest.mark.parametrize(
         "case",
@@ -948,17 +952,17 @@ class TestTransferStates:
         class _Client:
             transfers = _Transfers()
 
-        monkeypatch.setattr(soulseek_api, "get_client", lambda: _Client())
-        monkeypatch.setattr(soulseek_api, "_await_completed_file", lambda n: "/dl/" + n)
-        monkeypatch.setattr(soulseek_api, "_wait_for_external_processing", lambda p: True)
+        monkeypatch.setattr(slskd_client, "get_client", lambda: _Client())
+        monkeypatch.setattr(slskd_transfers, "_await_completed_file", lambda n: "/dl/" + n)
+        monkeypatch.setattr(slskd_transfers, "_wait_for_external_processing", lambda p: True)
         sleeps = []
         # Returning True ("shutdown") turns a would-be 300 s hang into a fast,
         # visible failure.
         monkeypatch.setattr(
-            soulseek_api, "_interruptible_sleep", lambda s: sleeps.append(s) or True
+            slskd_client, "interruptible_sleep", lambda s: sleeps.append(s) or True
         )
 
-        out = soulseek_api.wait_for_completion(
+        out = slskd_transfers.wait_for_completion(
             {"user": "user1", "filename": f["filename"], "size": f["size"]}, timeout=300
         )
 
@@ -977,10 +981,10 @@ class TestCompletedFileGrace:
     def test_incomplete_dir_is_never_a_hit(self, tmp_path):
         (tmp_path / "incomplete" / "Album").mkdir(parents=True)
         (tmp_path / "incomplete" / "Album" / "a.flac").write_bytes(b"x")
-        assert soulseek_api.find_file_in_downloads("a.flac", str(tmp_path)) is None
+        assert slskd_transfers.find_file_in_downloads("a.flac", str(tmp_path)) is None
         (tmp_path / "Album").mkdir()
         (tmp_path / "Album" / "a.flac").write_bytes(b"x")
-        assert soulseek_api.find_file_in_downloads("a.flac", str(tmp_path)) == str(
+        assert slskd_transfers.find_file_in_downloads("a.flac", str(tmp_path)) == str(
             tmp_path / "Album" / "a.flac"
         )
 
@@ -997,8 +1001,8 @@ class TestCompletedFileGrace:
                 (tmp_path / "incomplete" / "a.flac").rename(tmp_path / "done" / "a.flac")
             return False
 
-        monkeypatch.setattr(soulseek_api, "_interruptible_sleep", fake_sleep)
-        assert soulseek_api._await_completed_file("a.flac", grace=30) == str(
+        monkeypatch.setattr(slskd_client, "interruptible_sleep", fake_sleep)
+        assert slskd_transfers._await_completed_file("a.flac", grace=30) == str(
             tmp_path / "done" / "a.flac"
         )
         assert len(sleeps) == 3
@@ -1006,14 +1010,14 @@ class TestCompletedFileGrace:
     def test_gives_up_after_grace_and_on_shutdown(self, tmp_path, monkeypatch):
         monkeypatch.setattr(config, "DOWNLOAD_DIR", str(tmp_path))
         clock = [1000.0]
-        monkeypatch.setattr(soulseek_api.time, "time", lambda: clock[0])
+        monkeypatch.setattr(slskd_transfers.time, "time", lambda: clock[0])
 
         def fake_sleep(s):
             clock[0] += s
             return False
 
-        monkeypatch.setattr(soulseek_api, "_interruptible_sleep", fake_sleep)
-        assert soulseek_api._await_completed_file("a.flac", grace=5) is None
+        monkeypatch.setattr(slskd_client, "interruptible_sleep", fake_sleep)
+        assert slskd_transfers._await_completed_file("a.flac", grace=5) is None
         assert clock[0] == 1005.0
-        monkeypatch.setattr(soulseek_api, "_interruptible_sleep", lambda s: True)
-        assert soulseek_api._await_completed_file("a.flac", grace=30) is None
+        monkeypatch.setattr(slskd_client, "interruptible_sleep", lambda s: True)
+        assert slskd_transfers._await_completed_file("a.flac", grace=30) is None

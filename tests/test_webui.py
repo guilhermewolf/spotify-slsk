@@ -695,7 +695,8 @@ class TestInteractiveSearchUI:
 
     def _search(self, app_tmp, client, monkeypatch):
         import time as _time
-        from spotify_slsk import runtime_state, soulseek_api
+        from spotify_slsk import runtime_state
+        from spotify_slsk.slskd import search as slskd_search
 
         self._seed(app_tmp)
         captured = {}
@@ -704,7 +705,7 @@ class TestInteractiveSearchUI:
             captured.update(artist=artist, title=title, duration_ms=duration_ms)
             return [dict(self.CAND_OK), dict(self.CAND_BAD)]
 
-        monkeypatch.setattr(soulseek_api, "interactive_search", fake)
+        monkeypatch.setattr(slskd_search, "interactive_search", fake)
         runtime_state._interactive.pop(("pid1", "t1"), None)
         runtime_state.pop_manual_grabs()
         r = post(client, "/track/pid1/t1/search")

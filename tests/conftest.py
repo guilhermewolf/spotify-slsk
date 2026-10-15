@@ -90,15 +90,15 @@ def _no_real_slskd_client(monkeypatch):
     def _blocked(*args, **kwargs):
         raise AssertionError(
             "A test tried to construct a real slskd client. Monkeypatch "
-            "soulseek_api.get_client instead."
+            "spotify_slsk.slskd.client.get_client instead."
         )
 
     monkeypatch.setattr(slskd_api, "SlskdClient", _blocked)
     # get_client() caches its client in a module global; make sure a client
     # built by an earlier test can never leak into this one.
-    from spotify_slsk import soulseek_api
+    from spotify_slsk.slskd import client as slskd_client
 
-    monkeypatch.setattr(soulseek_api, "_client", None)
+    monkeypatch.setattr(slskd_client, "_client", None)
 
 
 @pytest.fixture(autouse=True)

@@ -9,7 +9,7 @@ import os
 
 import pytest
 
-from spotify_slsk import soulseek_api
+from spotify_slsk.slskd import client as slskd_client
 
 
 class TestEnvironmentIsolation:
@@ -48,7 +48,7 @@ class TestOutboundBoundariesAreBlocked:
 
     def test_building_a_real_slskd_client_raises(self):
         with pytest.raises(AssertionError, match="real slskd client"):
-            soulseek_api.get_client()
+            slskd_client.get_client()
 
     def test_real_http_request_raises(self):
         import requests

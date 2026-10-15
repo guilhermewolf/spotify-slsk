@@ -9,6 +9,7 @@ import threading
 import pytest
 
 from spotify_slsk import app, config
+from spotify_slsk.slskd import client as slskd_client
 
 
 @pytest.fixture(autouse=True)
@@ -83,7 +84,7 @@ class TestSlskdHealthWait:
 
     def test_returns_false_on_timeout_instead_of_raising(self, monkeypatch):
         monkeypatch.setattr(
-            app, "get_slskd_client", lambda: self._client_always_failing()
+            slskd_client, "get_client", lambda: self._client_always_failing()
         )
         # Previously this raised RuntimeError, which propagated out of main()
         # and killed the process — including the web UI.
@@ -97,7 +98,8 @@ class TestSlskdHealthWait:
         class _Client:
             application = _App()
 
-        monkeypatch.setattr(app, "get_slskd_client", lambda: _Client())
+        monkeypatch.setattr(
+            slskd_client, "get_client", lambda: _Client())
         assert app.wait_for_slskd_healthy("http://x", "k", timeout=5) is True
 
     def test_not_logged_in_is_not_healthy(self, monkeypatch):
@@ -108,7 +110,8 @@ class TestSlskdHealthWait:
         class _Client:
             application = _App()
 
-        monkeypatch.setattr(app, "get_slskd_client", lambda: _Client())
+        monkeypatch.setattr(
+            slskd_client, "get_client", lambda: _Client())
         assert app.wait_for_slskd_healthy("http://x", "k", timeout=0) is False
 
     def test_block_until_healthy_exits_on_shutdown(self, monkeypatch):

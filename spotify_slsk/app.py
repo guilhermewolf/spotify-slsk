@@ -40,12 +40,9 @@ from mutagen.mp3 import MP3
 from .utils import fmt_duration, get_playlist_id, sanitize_table_name
 from spotipy.oauth2 import SpotifyClientCredentials
 from spotipy.cache_handler import CacheFileHandler
-from . import soulseek_api
-from .soulseek_api import (
-    search_and_download,
-    get_client as get_slskd_client,
-    set_shutdown_event as _slsk_set_shutdown_event,
-)
+from .slskd import client as slskd_client
+from .slskd import transfers
+from .slskd.search import search_and_download
 from .matching.candidates import filename_match
 from .matching.normalize import version_tier
 from .matching.tracks import (
@@ -771,7 +768,7 @@ def wait_for_slskd_healthy(host, api_key, timeout=90, check_interval=1):
     during exactly that outage. `block_until_slskd_healthy` owns the retrying.
     """
     logging.info(f"Waiting for slskd at {host} (timeout: {timeout}s)...")
-    client = get_slskd_client()
+    client = slskd_client.get_client()
 
     start = time.time()
     last_err = None
@@ -917,7 +914,7 @@ def handle_track_download(track, playlist_name, conn):
     if file_path:
         verified, _final_path = process_downloaded_file(
             file_path, playlist_name, conn, expected_track=track,
-            source=soulseek_api.last_download,
+            source=transfers.last_download,
         )
         if verified:
             clear_tried_entries(conn, playlist_name, track.id)
@@ -964,7 +961,7 @@ def try_upgrade_track(track, playlist_name, conn, current_path):
 
     verified, final_path = process_downloaded_file(
         new_file, playlist_name, conn, expected_track=track,
-        source=soulseek_api.last_download,
+        source=transfers.last_download,
     )
     if not verified or not final_path:
         return False
@@ -1062,7 +1059,7 @@ def _process_manual_grabs(conn):
             track_artist=track.artist,
         )
         try:
-            file_path = soulseek_api.grab_candidate(
+            file_path = transfers.grab_candidate(
                 candidate, conn, table_name, track.id, source="manual"
             )
             if not file_path:
@@ -1144,7 +1141,7 @@ def main():
 
     setup_logging()
     _install_signal_handlers()
-    _slsk_set_shutdown_event(_shutdown)
+    slskd_client.set_shutdown_event(_shutdown)
     logging.info("Starting main process")
     runtime_state.set_activity("starting", detail="Daemon booting")
 

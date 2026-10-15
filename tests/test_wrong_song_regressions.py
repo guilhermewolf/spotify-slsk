@@ -9,7 +9,10 @@ import pytest
 os.environ.setdefault("SLSKD_HOST_URL", "http://localhost")
 os.environ.setdefault("SLSKD_API_KEY", "x")
 
-from spotify_slsk import soulseek_api
+from spotify_slsk.matching import candidates as matching_candidates
+from spotify_slsk.slskd import client as slskd_client
+from spotify_slsk.slskd import search as slskd_search
+from spotify_slsk.slskd import transfers as slskd_transfers
 from spotify_slsk.matching.candidates import extract_candidates, filename_match
 from spotify_slsk.slskd.models import remote_basename
 
@@ -71,13 +74,13 @@ class TestRemotePathSplitting:
         class _Client:
             transfers = _Transfers()
 
-        monkeypatch.setattr(soulseek_api, "get_client", lambda: _Client())
-        monkeypatch.setattr(soulseek_api, "wait_for_completion", lambda c: None)
-        monkeypatch.setattr(soulseek_api, "get_tried_files", lambda *a: [])
+        monkeypatch.setattr(slskd_client, "get_client", lambda: _Client())
+        monkeypatch.setattr(slskd_transfers, "wait_for_completion", lambda c: None)
+        monkeypatch.setattr(slskd_search, "get_tried_files", lambda *a: [])
         monkeypatch.setattr(
-            soulseek_api, "add_tried_file", lambda c, p, t, f: added.append(f)
+            slskd_transfers, "add_tried_file", lambda c, p, t, f: added.append(f)
         )
-        soulseek_api.download_and_verify(
+        slskd_search.download_and_verify(
             _results("music\\Mat Joe\\Mat Joe - Heart To Find.flac"),
             "Heart To Find", "Mat Joe", None, "pl_x", "t1",
         )
@@ -151,7 +154,7 @@ class TestCandidateKeepsRightSongs:
         assert len(extract_candidates(_results(filename), title, artist)) == 1
 
     def test_extended_mix_still_ranks_first(self):
-        out = soulseek_api.sort_candidates(extract_candidates(_results(
+        out = matching_candidates.sort_candidates(extract_candidates(_results(
             "Mat Joe - Heart To Find (Original Mix).flac",
             "Mat Joe - Heart To Find.flac",
             "Mat Joe - Heart To Find (Extended Mix).flac",

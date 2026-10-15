@@ -535,17 +535,17 @@ class TestHistoryEvents:
         assert db.list_history(conn) == []
 
     def test_nothing_acceptable_records_download_failed(self, conn, monkeypatch):
-        from spotify_slsk import soulseek_api
-        monkeypatch.setattr(soulseek_api, "_run_one_search", lambda q, timeout=60: [])
-        soulseek_api.search_and_download("Mat Joe", "Heart To Find", conn, "pl_x", "t1")
+        from spotify_slsk.slskd import search as slskd_search
+        monkeypatch.setattr(slskd_search, "_run_one_search", lambda q, timeout=60: [])
+        slskd_search.search_and_download("Mat Joe", "Heart To Find", conn, "pl_x", "t1")
         rows = db.list_history(conn)
         assert [r["event"] for r in rows] == ["download_failed"]
         assert rows[0]["data"]["reason"].startswith("no acceptable candidate")
 
     def test_upgrade_pass_finding_nothing_is_not_a_failure(self, conn, monkeypatch):
-        from spotify_slsk import soulseek_api
-        monkeypatch.setattr(soulseek_api, "_run_one_search", lambda q, timeout=60: [])
-        soulseek_api.search_and_download(
+        from spotify_slsk.slskd import search as slskd_search
+        monkeypatch.setattr(slskd_search, "_run_one_search", lambda q, timeout=60: [])
+        slskd_search.search_and_download(
             "Mat Joe", "Heart To Find", conn, "pl_x", "t1", max_version_tier=1
         )
         assert db.list_history(conn) == []
@@ -553,7 +553,8 @@ class TestHistoryEvents:
 
 class TestManualGrabs:
     def test_daemon_downloads_and_imports_a_queued_grab(self, conn, monkeypatch, sandbox_dirs):
-        from spotify_slsk import runtime_state, soulseek_api
+        from spotify_slsk import runtime_state
+        from spotify_slsk.slskd import transfers as slskd_transfers
         downloads, playlists = sandbox_dirs
         _seed(conn)
         _stub_metadata(monkeypatch, "Heart To Find", "Mat Joe")
@@ -565,7 +566,7 @@ class TestManualGrabs:
             seen.update(table=table, tid=tid, source=source)
             return str(src)
 
-        monkeypatch.setattr(soulseek_api, "grab_candidate", fake_grab)
+        monkeypatch.setattr(slskd_transfers, "grab_candidate", fake_grab)
         runtime_state.pop_manual_grabs()
         runtime_state.enqueue_manual_grab({
             "playlist_id": "pid", "table_name": "pl_x", "track_id": "t1",
@@ -581,9 +582,10 @@ class TestManualGrabs:
         assert runtime_state.pop_manual_grabs() == []
 
     def test_failed_manual_grab_does_not_count_an_attempt(self, conn, monkeypatch):
-        from spotify_slsk import runtime_state, soulseek_api
+        from spotify_slsk import runtime_state
+        from spotify_slsk.slskd import transfers as slskd_transfers
         _seed(conn)
-        monkeypatch.setattr(soulseek_api, "grab_candidate", lambda *a, **k: None)
+        monkeypatch.setattr(slskd_transfers, "grab_candidate", lambda *a, **k: None)
         runtime_state.enqueue_manual_grab({
             "playlist_id": "pid", "table_name": "pl_x", "track_id": "t1",
             "candidate": {"user": "peer", "filename": "x.flac", "size": 5},
@@ -592,7 +594,8 @@ class TestManualGrabs:
         assert db.get_track(conn, "pl_x", "t1")["attempts"] == 0
 
     def test_manual_grab_replaces_old_file_only_for_its_own_track(self, conn, monkeypatch, sandbox_dirs):
-        from spotify_slsk import runtime_state, soulseek_api
+        from spotify_slsk import runtime_state
+        from spotify_slsk.slskd import transfers as slskd_transfers
         downloads, playlists = sandbox_dirs
         _seed(conn)
         _seed(conn, "t2", name="Another Song", artists="Someone")
@@ -603,7 +606,7 @@ class TestManualGrabs:
         _stub_metadata(monkeypatch, "Another Song", "Someone")
         src = downloads / "Someone - Another Song.flac"
         src.write_bytes(b"audio")
-        monkeypatch.setattr(soulseek_api, "grab_candidate", lambda *a, **k: str(src))
+        monkeypatch.setattr(slskd_transfers, "grab_candidate", lambda *a, **k: str(src))
         runtime_state.enqueue_manual_grab({
             "playlist_id": "pid", "table_name": "pl_x", "track_id": "t1",
             "candidate": {"user": "peer", "filename": "x.flac", "size": 5},

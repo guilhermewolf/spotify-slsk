@@ -30,7 +30,7 @@ import requests
 
 from .. import db
 from .. import runtime_state
-from .. import soulseek_api
+from ..slskd import search as slskd_search
 from ..config import SETTINGS_SPEC, validate_setting
 from ..utils import fmt_duration
 from ..utils import get_playlist_id, sanitize_table_name
@@ -517,7 +517,7 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
 
             def _run():
                 try:
-                    results = soulseek_api.interactive_search(
+                    results = slskd_search.interactive_search(
                         track["artists"],
                         track["name"],
                         album=track["album"],
