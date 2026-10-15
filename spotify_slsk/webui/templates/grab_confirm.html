@@ -3,7 +3,7 @@
 {% block title %}Grab anyway? · spotify-slsk{% endblock %}
 {% block content %}
 
-<a class="back-link" href="{{ url_for('track_detail', playlist_id=playlist_id, track_id=track.id) }}">
+<a class="back-link" href="{{ url_for('tracks.track_detail', playlist_id=playlist_id, track_id=track.id) }}">
   &larr; {{ track.name }}
 </a>
 
@@ -18,7 +18,7 @@
   deleted like any other mismatch.
 </p>
 
-<form method="POST" action="{{ url_for('interactive_grab', playlist_id=playlist_id, track_id=track.id) }}">
+<form method="POST" action="{{ url_for('tracks.interactive_grab', playlist_id=playlist_id, track_id=track.id) }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <input type="hidden" name="username" value="{{ candidate.user }}">
   <input type="hidden" name="filename" value="{{ candidate.filename }}">

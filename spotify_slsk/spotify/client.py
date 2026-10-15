@@ -1,7 +1,9 @@
 """Building the Spotify client."""
 import logging
 import os
+import time
 
+import requests
 import spotipy
 from spotipy.cache_handler import CacheFileHandler
 from spotipy.oauth2 import SpotifyClientCredentials
@@ -34,3 +36,26 @@ def setup_spotify_client():
         return None
     logging.info("Spotify client setup complete")
     return sp
+
+
+# The daemon and this web thread share one spotipy client, and spotipy's
+# underlying requests.Session is not thread-safe; a stale pooled connection
+# also shows up here as RemoteDisconnected. Retry a couple of times before
+# giving up — a retry gets a fresh socket.
+SPOTIFY_TRANSPORT_RETRIES = 3
+
+
+def fetch_playlist_name(sp: spotipy.Spotify, pid: str) -> str:
+    """Name of playlist `pid`, retrying transport errors (used by the web UI)."""
+    last_exc = None
+    for attempt in range(SPOTIFY_TRANSPORT_RETRIES):
+        try:
+            return sp.playlist(pid, fields="name")["name"]
+        except requests.exceptions.RequestException as e:
+            last_exc = e
+            logging.warning(
+                f"Spotify transport error for {pid} "
+                f"(attempt {attempt + 1}/{SPOTIFY_TRANSPORT_RETRIES}): {e}"
+            )
+            time.sleep(0.5 * (attempt + 1))
+    raise last_exc

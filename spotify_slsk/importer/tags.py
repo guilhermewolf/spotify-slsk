@@ -1,4 +1,10 @@
-"""Reading and writing audio tags, and reading the real audio length."""
+"""Reading and writing audio tags, and reading the real audio length.
+
+One tag writer (`write_tags`) serves both the daemon (via the non-raising
+`tag_audio_file`) and the web UI's re-tag action.
+"""
+from __future__ import annotations
+
 import logging
 import os
 
@@ -7,6 +13,7 @@ from mutagen.aiff import AIFF
 from mutagen.flac import FLAC
 from mutagen.id3 import ID3, TALB, TIT2, TPE1
 from mutagen.mp3 import MP3
+
 
 def audio_length_seconds(file_path):
     """Actual audio duration via mutagen, or None if unreadable."""
@@ -61,46 +68,56 @@ def extract_metadata_from_file(file_path):
         return None, None, None
 
 
-def tag_audio_file(file_path, title, artist, album):
-    ext = os.path.splitext(file_path)[1].lower()
+def write_tags(path: str, title: str | None, artist: str | None, album: str | None) -> None:
+    """Write title/artist/album tags. Supports mp3, flac and aiff.
 
-    # Ensure all metadata fields are non-None strings
+    Raises ValueError for any other extension and lets mutagen errors
+    propagate - the web UI's re-tag action reports them to the operator.
+    The daemon goes through `tag_audio_file`, which logs instead.
+    """
     title = title or ""
     artist = artist or ""
     album = album or ""
+    ext = os.path.splitext(path)[1].lower()
 
+    if ext == ".mp3":
+        audio = MP3(path, ID3=ID3)
+        if audio.tags is None:
+            audio.add_tags()
+        audio.tags.add(TIT2(encoding=3, text=title))
+        audio.tags.add(TPE1(encoding=3, text=artist))
+        audio.tags.add(TALB(encoding=3, text=album))
+        audio.save()
+    elif ext == ".flac":
+        audio = FLAC(path)
+        audio["title"] = title
+        audio["artist"] = artist
+        audio["album"] = album
+        audio.save()
+    elif ext == ".aiff":
+        audio = AIFF(path)
+        if audio.tags is None:
+            audio.add_tags()
+        audio.tags.add(TIT2(encoding=3, text=title))
+        audio.tags.add(TPE1(encoding=3, text=artist))
+        audio.tags.add(TALB(encoding=3, text=album))
+        audio.save()
+    else:
+        raise ValueError(f"Unsupported extension for retag: {ext}")
+
+
+def tag_audio_file(file_path: str, title: str | None, artist: str | None, album: str | None) -> bool:
+    """Daemon-side tagging: never raises. WAV is skipped (counts as done),
+    other unsupported formats and mutagen errors log and return False."""
+    ext = os.path.splitext(file_path)[1].lower()
     try:
-        if ext == '.mp3':
-            audio = MP3(file_path, ID3=ID3)
-            if audio.tags is None:
-                audio.add_tags()
-            audio.tags.add(TIT2(encoding=3, text=title))
-            audio.tags.add(TPE1(encoding=3, text=artist))
-            audio.tags.add(TALB(encoding=3, text=album))
-            audio.save()
-
-        elif ext == '.flac':
-            audio = FLAC(file_path)
-            audio['title'] = title
-            audio['artist'] = artist
-            audio['album'] = album
-            audio.save()
-
-        elif ext == '.aiff':
-            audio = AIFF(file_path)
-            if audio.tags is None:
-                audio.add_tags()
-            audio.tags.add(TIT2(encoding=3, text=title))
-            audio.tags.add(TPE1(encoding=3, text=artist))
-            audio.tags.add(TALB(encoding=3, text=album))
-            audio.save()
-
-        elif ext == '.wav':
+        if ext == '.wav':
             logging.warning("WAV tagging is not fully supported; skipping tags.")
-
-        else:
+        elif ext not in ('.mp3', '.flac', '.aiff'):
             logging.warning(f"Unsupported format for tagging: {ext}")
             return False
+        else:
+            write_tags(file_path, title, artist, album)
 
         logging.info(f"Tagged {file_path} successfully.")
         return True

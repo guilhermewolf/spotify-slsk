@@ -7,10 +7,10 @@
   <div>
     <h1>Wanted</h1>
     <p class="subtle">{{ total }} track{{ '' if total == 1 else 's' }} not downloaded yet, across enabled playlists.</p>
-    <p class="subtle">Re-searching does not clear <a href="{{ url_for('blocklist_page') }}">blocklisted</a> peer files or peers; remove them there to try them again.</p>
+    <p class="subtle">Re-searching does not clear <a href="{{ url_for('wanted.blocklist_page') }}">blocklisted</a> peer files or peers; remove them there to try them again.</p>
   </div>
   {% if total %}
-  <form method="POST" action="{{ url_for('wanted_search') }}">
+  <form method="POST" action="{{ url_for('wanted.wanted_search') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <details class="confirm">
       <summary role="button" class="secondary outline">Search all missing…</summary>
@@ -21,7 +21,7 @@
   {% endif %}
 </div>
 
-<form class="filter-form" method="GET" role="search" action="{{ url_for('wanted_page') }}">
+<form class="filter-form" method="GET" role="search" action="{{ url_for('wanted.wanted_page') }}">
   <select name="playlist" aria-label="Playlist">
     <option value="">All playlists</option>
     {% for p in playlists %}
@@ -34,7 +34,7 @@
 </form>
 
 {% if tracks %}
-<form method="POST" action="{{ url_for('wanted_search') }}">
+<form method="POST" action="{{ url_for('wanted.wanted_search') }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <div class="table-wrap">
     <table class="track-table">
@@ -55,7 +55,7 @@
                    aria-label="Select {{ t.name }}">
           </td>
           <td>
-            <a class="track-title" href="{{ url_for('track_detail', playlist_id=t.playlist_id, track_id=t.id) }}">{{ t.name }}</a>
+            <a class="track-title" href="{{ url_for('tracks.track_detail', playlist_id=t.playlist_id, track_id=t.id) }}">{{ t.name }}</a>
             <div class="subtle">{{ t.artists }}</div>
           </td>
           <td class="subtle">{{ t.playlist_name }}</td>

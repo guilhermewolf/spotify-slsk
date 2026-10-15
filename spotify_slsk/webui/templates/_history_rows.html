@@ -17,7 +17,7 @@
         {% if show_track %}
         <td>
           {% if h.track_label %}
-            <a href="{{ url_for('track_detail', playlist_id=h.playlist_id, track_id=h.track_id) }}">{{ h.track_label }}</a>
+            <a href="{{ url_for('tracks.track_detail', playlist_id=h.playlist_id, track_id=h.track_id) }}">{{ h.track_label }}</a>
           {% else %}<span class="subtle">{{ h.track_id or '—' }}</span>{% endif %}
         </td>
         {% endif %}

@@ -741,3 +741,27 @@ class TestPlaceholderPlaylistIsRepointedBeforeInsert:
         _, table, name, _ = db.get_playlist_meta(conn, "pid")
         assert (table, name) == ("pl_my_mix", "My Mix")
         assert db.playlist_stats(conn, "pl_my_mix")["total"] == 3
+
+
+class TestTagWriters:
+    """One tag writer serves the daemon and the web UI's re-tag action; the
+    daemon wrapper must keep its never-raise contract."""
+
+    def test_wav_is_skipped_but_counts_as_tagged(self, tmp_path):
+        from spotify_slsk.importer.tags import tag_audio_file
+        assert tag_audio_file(str(tmp_path / "a.wav"), "t", "a", "b") is True
+
+    def test_unsupported_format_is_reported_not_raised(self, tmp_path):
+        from spotify_slsk.importer.tags import tag_audio_file
+        assert tag_audio_file(str(tmp_path / "a.ogg"), "t", "a", "b") is False
+
+    def test_unreadable_file_is_reported_not_raised(self, tmp_path):
+        from spotify_slsk.importer.tags import tag_audio_file
+        bad = tmp_path / "a.mp3"
+        bad.write_bytes(b"not audio")
+        assert tag_audio_file(str(bad), "t", "a", "b") is False
+
+    def test_write_tags_raises_for_the_ui_to_report(self, tmp_path):
+        from spotify_slsk.importer.tags import write_tags
+        with pytest.raises(ValueError, match="Unsupported extension"):
+            write_tags(str(tmp_path / "a.wav"), "t", "a", "b")

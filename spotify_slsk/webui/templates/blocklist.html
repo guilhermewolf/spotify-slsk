@@ -13,7 +13,7 @@
   </div>
 </div>
 
-<form class="filter-form" method="POST" action="{{ url_for('blocklist_ban_user') }}">
+<form class="filter-form" method="POST" action="{{ url_for('wanted.blocklist_ban_user') }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <input type="text" name="username" required maxlength="200" style="flex:1"
          aria-label="Soulseek username" placeholder="Soulseek username to ban">
@@ -46,7 +46,7 @@
         <td>{{ e.reason or '—' }}</td>
         <td class="nowrap subtle">{{ e.created_at }}</td>
         <td class="nowrap">
-          <form method="POST" action="{{ url_for('blocklist_delete', entry_id=e.id) }}">
+          <form method="POST" action="{{ url_for('wanted.blocklist_delete', entry_id=e.id) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="secondary outline">Remove</button>
           </form>
