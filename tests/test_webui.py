@@ -271,6 +271,7 @@ class TestCsrfProtection:
         ("/blocklist/ban-user", {"username": "x"}),
         ("/track/pid1/t1/search", {}),
         ("/track/pid1/t1/grab", {"username": "u", "filename": "f", "size": "1"}),
+        ("/wanted/search", {"all": "1"}),
     ]
 
     @pytest.mark.parametrize("route,data", MUTATING_ROUTES)
@@ -734,3 +735,53 @@ class TestInteractiveSearchUI:
         post(client, "/track/pid1/t1/grab",
              {"username": "evil", "filename": "/etc/passwd", "size": "1", "force": "1"})
         assert runtime_state.pop_manual_grabs() == []
+
+
+class TestWantedPage:
+    def _seed(self, app_tmp):
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        db.upsert_playlist_meta(conn, "pid1", "pl_x", "X", "s")
+        db.create_table(conn, "pl_x")
+        db.insert_track(conn, "pl_x", ("t1", "Missing One", "Artist", "Album"))
+        db.insert_track(conn, "pl_x", ("t2", "Missing Two", "Artist", "Album"))
+        db.insert_track(conn, "pl_x", ("t3", "Have It", "Artist", "Album"))
+        db.update_download_status(conn, "t3", "pl_x", success=True, file_path="/p/x.flac")
+        db.update_download_status(conn, "t1", "pl_x", success=False)
+        db.update_download_status(conn, "t1", "pl_x", success=False)
+        db.record_history(conn, "download_failed", playlist_id="pid1", track_id="t1",
+                          reason="transfer timed out")
+        db.upsert_playlist_meta(conn, "pid2", "pl_off", "Off", "s")
+        db.create_table(conn, "pl_off")
+        db.insert_track(conn, "pl_off", ("t9", "Disabled Track", "A", "B"))
+        db.set_playlist_enabled(conn, "pid2", False)
+        conn.close()
+
+    def test_lists_missing_from_enabled_playlists(self, app_tmp, client):
+        self._seed(app_tmp)
+        r = client.get("/wanted")
+        assert r.status_code == 200
+        assert b"Missing One" in r.data and b"Missing Two" in r.data
+        assert b"Have It" not in r.data and b"Disabled Track" not in r.data
+        assert b"transfer timed out" in r.data and b"suspended" in r.data
+        r = client.get("/wanted?q=two")
+        assert b"Missing Two" in r.data and b"Missing One" not in r.data
+
+    def test_search_selected_clears_suspension_and_records_history(self, app_tmp, client):
+        self._seed(app_tmp)
+        woke = []
+        app_tmp.config["WAKE_DAEMON"] = lambda: woke.append(1)
+        post(client, "/wanted/search", {"tracks": ["pid1:t1", "pid2:t9", "bogus"]})
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        t1 = db.get_track(conn, "pl_x", "t1")
+        assert (t1["attempts"], t1["suspended_until"]) == (0, None)
+        retried = db.list_history(conn, event="retried")
+        assert [r["track_id"] for r in retried] == ["t1"], "disabled playlist not touched"
+        conn.close()
+        assert woke == [1]
+
+    def test_search_all_missing(self, app_tmp, client):
+        self._seed(app_tmp)
+        post(client, "/wanted/search", {"all": "1"})
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        assert sorted(r["track_id"] for r in db.list_history(conn, event="retried")) == ["t1", "t2"]
+        conn.close()

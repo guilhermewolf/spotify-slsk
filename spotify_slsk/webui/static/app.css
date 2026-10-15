@@ -539,3 +539,11 @@ button.outline.danger:focus {
 /* Rejection reasons under a search-history row. */
 .reject-list { margin: 0.25rem 0 0; padding-left: 1rem; font-size: 0.85rem; }
 .reject-list li { margin: 0; list-style: disc; }
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap;
+}
+/* <details> used as a no-JS confirm step. */
+details.confirm { margin: 0; }
+details.confirm[open] { max-width: 22rem; }

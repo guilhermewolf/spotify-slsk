@@ -638,6 +638,78 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
         flash("Grab queued. The daemon will download it next.", "success")
         return redirect(back)
 
+    # ---- wanted -------------------------------------------------------
+
+    def _wanted_tracks():
+        """Every not-downloaded track across enabled playlists."""
+        rows = []
+        for pl in db.list_playlists(g.conn, only_enabled=True):
+            for t in db.list_tracks(g.conn, pl["table_name"]):
+                if not t["downloaded"]:
+                    t["playlist_id"] = pl["playlist_id"]
+                    t["playlist_name"] = pl["name"]
+                    t["table_name"] = pl["table_name"]
+                    rows.append(t)
+        return rows
+
+    @app.route("/wanted")
+    def wanted_page():
+        all_tracks = _wanted_tracks()
+        playlist_id = request.args.get("playlist") or None
+        query = (request.args.get("q") or "").strip()
+        tracks = all_tracks
+        if playlist_id:
+            tracks = [t for t in tracks if t["playlist_id"] == playlist_id]
+        if query:
+            needle = query.lower()
+            tracks = [
+                t
+                for t in tracks
+                if needle in (t["name"] or "").lower()
+                or needle in (t["artists"] or "").lower()
+                or needle in (t["album"] or "").lower()
+            ]
+        failures = db.latest_failures(g.conn)
+        for t in tracks:
+            t["last_failure"] = failures.get(t["id"])
+        return render_template(
+            "wanted.html",
+            tracks=tracks,
+            total=len(all_tracks),
+            playlists=db.list_playlists(g.conn, only_enabled=True),
+            playlist_id=playlist_id,
+            query=query,
+        )
+
+    @app.route("/wanted/search", methods=["POST"])
+    def wanted_search():
+        if request.form.get("all") == "1":
+            targets = [(t["playlist_id"], t["table_name"], t["id"]) for t in _wanted_tracks()]
+        else:
+            tables = {
+                p["playlist_id"]: p["table_name"]
+                for p in db.list_playlists(g.conn, only_enabled=True)
+            }
+            targets = []
+            for value in request.form.getlist("tracks"):
+                pid, _, tid = value.partition(":")
+                if pid in tables and tid:
+                    targets.append((pid, tables[pid], tid))
+        count = 0
+        for pid, table_name, tid in targets:
+            track = db.get_track(g.conn, table_name, tid)
+            if not track or track["downloaded"]:
+                continue
+            db.retry_track(g.conn, table_name, tid)
+            db.record_history(g.conn, "retried", playlist_id=pid, track_id=tid, bulk=True)
+            count += 1
+        if count:
+            _wake()
+            flash(f"Cleared attempts for {count} track(s). Cycle starting now.", "success")
+        else:
+            flash("No tracks selected.", "error")
+        return redirect(url_for("wanted_page"))
+
     # ---- history ------------------------------------------------------
 
     @app.route("/history")
