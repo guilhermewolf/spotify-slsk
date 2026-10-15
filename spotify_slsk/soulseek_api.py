@@ -2,9 +2,9 @@ import os
 import time
 import logging
 import re
+import unicodedata
 
 import slskd_api
-from rapidfuzz import fuzz
 
 from .db import get_tried_files, add_tried_file, get_setting
 from . import runtime_state
@@ -328,21 +328,117 @@ def _effective_mp3_kbps(size_bytes, length_sec):
         return None
 
 
+# --- Candidate title/artist matching ------------------------------------------
+# The old scorer ran token_set_ratio over the whole name, which is 100 whenever
+# every expected title word appears *anywhere*, and let one shared word clear
+# the artist bar ("super flu" vs "...Super Supergirl" = 71). Title and artist
+# are now judged separately against the basename.
+
+# Neutral release words: not required when matching the expected title.
+_NEUTRAL_TITLE_WORDS = frozenset({
+    "original", "extended", "radio", "album", "single", "mix", "edit",
+    "version", "remastered", "remaster", "mono", "stereo", "and",
+})
+# Filename noise that is neither title nor artist.
+_FILENAME_NOISE = frozenset({
+    "flac", "mp3", "wav", "aiff", "m4a", "ogg", "kbps", "web", "cd",
+    "vinyl", "lossless", "hq", "bit", "khz",
+})
+# Share of the basename's title-ish words that must be the expected title.
+# Rejects "Dream" -> "A Real Bad Dream" while tolerating an album name in the
+# filename ("Daft Punk - Random Access Memories - 08 - Get Lucky" = 0.4).
+MIN_TITLE_COVERAGE = 0.4
+# An artist matched with spaces removed ("FormatB" for "Format:B") must be at
+# least this long, so short names can't hide inside other words.
+MIN_COMPACT_ARTIST_LEN = 6
+
+_FEAT_RE = re.compile(
+    r"[\(\[]\s*(?:feat|ft|featuring)\b[^\)\]]*[\)\]]"
+    r"|\b(?:feat|ft|featuring)\b.*?(?=\s[-–—]\s|[\(\[]|$)",
+    re.IGNORECASE,
+)
+_BRACKETS_RE = re.compile(r"[\(\[\{][^\)\]\}]*[\)\]\}]")
+_ARTIST_SPLIT_RE = re.compile(
+    r"\s*(?:,|;|&|/|\bfeat\b\.?|\bft\b\.?|\bfeaturing\b"
+    r"|\s+x\s+|\s+vs\b\.?|\s+with\s+|\s+and\s+)\s*",
+    re.IGNORECASE,
+)
+
+
+def _fold(text) -> str:
+    """Lowercase, strip accents, collapse every non-alphanumeric run to a space."""
+    t = unicodedata.normalize("NFKD", text or "")
+    t = "".join(c for c in t if not unicodedata.combining(c)).lower()
+    return " ".join(re.findall(r"[^\W_]+", t))
+
+
+def _expected_title_tokens(title) -> set:
+    """Words a file must contain to be this title. Featured artists, neutral
+    release words and bare numbers (years) are not required."""
+    folded = _fold(_FEAT_RE.sub(" ", title or "")).split()
+    core = {t for t in folded if t not in _NEUTRAL_TITLE_WORDS and not t.isdigit()}
+    return core or {t for t in folded if not t.isdigit()} or set(folded)
+
+
+def _artist_names(artist_str) -> list:
+    """The full credit plus each credited artist, folded, "The " dropped."""
+    names = []
+    for part in [artist_str or ""] + _ARTIST_SPLIT_RE.split(artist_str or ""):
+        name = _fold(part)
+        if name.startswith("the "):
+            name = name[4:]
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _artist_in(name, folded_text) -> bool:
+    """Whole-name match: the artist's words as a contiguous run, never a
+    single shared word ("kris m" is not in "kris kross")."""
+    if f" {name} " in f" {folded_text} ":
+        return True
+    compact = name.replace(" ", "")
+    return len(compact) >= MIN_COMPACT_ARTIST_LEN and compact in folded_text.replace(" ", "")
+
+
+def _title_coverage(expected_tokens, stem, artist_names, folder_tokens) -> float:
+    """0.0 unless every expected title word is in the basename; otherwise the
+    share of the basename's title-ish words (outside brackets, minus artists,
+    featured credits, numbers, noise and folder words) that are the title."""
+    if not expected_tokens or not expected_tokens <= set(_fold(stem).split()):
+        return 0.0
+    outside = " " + _fold(_BRACKETS_RE.sub(" ", _FEAT_RE.sub(" ", stem))) + " "
+    for name in artist_names:
+        outside = outside.replace(f" {name} ", " ")
+    extras = [
+        t for t in outside.split()
+        if t not in expected_tokens
+        and t not in _NEUTRAL_TITLE_WORDS
+        and t not in _FILENAME_NOISE
+        and t not in folder_tokens
+        and not t.isdigit()
+    ]
+    return len(expected_tokens) / (len(expected_tokens) + len(extras))
+
+
 def extract_candidates(
     search_results,
     expected_title,
     expected_artist,
-    min_title_score=80,
-    min_artist_score=70,
 ):
     """
     Extract valid file candidates from slskd search results based on title and
     artist matching. Unknown MP3 bitrates are allowed (slskd often reports None);
     files are hard-rejected only when we *know* quality is too low.
+
+    Title evidence comes from the basename only. Artist evidence may also come
+    from the peer's folders: real shares are laid out Artist\\Album\\NN - Title,
+    so the basename often lacks the artist. Folder text never supplies title
+    words - that is how a "Vespers (All-Night Vigil)" folder matched "All Night".
     """
     candidates = []
-    expected_title_norm = " ".join(expected_title.lower().replace("-", " ").split())
-    expected_artists = [a.strip().lower() for a in expected_artist.split(",")]
+    expected_tokens = _expected_title_tokens(expected_title)
+    artist_names = _artist_names(expected_artist)
 
     for result in search_results:
         user = result.get("username", "unknown")
@@ -389,37 +485,39 @@ def extract_candidates(
                 continue
 
             base = _remote_basename(filename)
-            clean_base = clean_filename(base)
+            stem = os.path.splitext(base)[0]
+            folder_folded = _fold(" ".join(re.split(r"[\\/]", filename)[:-1]))
 
-            title_score = fuzz.token_set_ratio(expected_title_norm, clean_base)
-            artist_scores = [
-                fuzz.token_set_ratio(a, clean_base) for a in expected_artists
-            ]
-            max_artist_score = max(artist_scores) if artist_scores else 0
-
-            # Version-gate penalty: if expected track doesn't mention a version
-            # (remix/live/...) but the file does (or vice versa), or they mention
-            # different versions, penalize the title score.
+            title_coverage = _title_coverage(
+                expected_tokens, stem, artist_names, set(folder_folded.split())
+            )
+            if title_coverage < MIN_TITLE_COVERAGE:
+                continue
+            base_folded = _fold(stem)
+            if not any(
+                _artist_in(n, base_folded) or _artist_in(n, folder_folded)
+                for n in artist_names
+            ):
+                continue
+            # A different version (remix/live/... on one side only) is never usable.
             if _version_mismatch(expected_title, base):
-                title_score = max(0, title_score - 25)
+                continue
 
-            if title_score >= min_title_score and max_artist_score >= min_artist_score:
-                candidates.append(
-                    {
-                        "user": user,
-                        "user_upload_speed": user_upload_speed,
-                        # Full peer path: slskd needs it to enqueue the transfer.
-                        "filename": filename,
-                        "basename": base,
-                        "size": size_bytes,
-                        "bitrate": effective_bitrate,
-                        "effective_mp3": effective_mp3,
-                        "ext": ext,
-                        "title_score": title_score,
-                        "artist_score": max_artist_score,
-                        "version_tier": _version_tier(base),
-                    }
-                )
+            candidates.append(
+                {
+                    "user": user,
+                    "user_upload_speed": user_upload_speed,
+                    # Full peer path: slskd needs it to enqueue the transfer.
+                    "filename": filename,
+                    "basename": base,
+                    "size": size_bytes,
+                    "bitrate": effective_bitrate,
+                    "effective_mp3": effective_mp3,
+                    "ext": ext,
+                    "title_coverage": round(title_coverage, 2),
+                    "version_tier": _version_tier(base),
+                }
+            )
 
     return candidates
 

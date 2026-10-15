@@ -4,6 +4,8 @@ observed on the NAS: expected track -> wrong file that was accepted.
 """
 import os
 
+import pytest
+
 os.environ.setdefault("SLSKD_HOST_URL", "http://localhost")
 os.environ.setdefault("SLSKD_API_KEY", "x")
 
@@ -67,3 +69,75 @@ class TestRemotePathSplitting:
             "Heart To Find", "Mat Joe", None, "pl_x", "t1",
         )
         assert added == ["Mat Joe - Heart To Find.flac"]
+
+
+# (expected title, expected artist, wrong file that production accepted)
+WRONG_CANDIDATES = [
+    ("All Night", "InsertFX", "HOYO-MiX - We Shall Sing All Night.flac"),
+    ("The City", "Jake Dile", "Tina Turner - Nutbush City Limits.flac"),
+    ("Really Really", "Super Flu", "Andy Partridge - That's Really Super Supergirl.flac"),
+    ("Dream", "Kris m", "Kris Kross - A Real Bad Dream.flac"),
+    ("Your Eyes", "Eudi",
+     "Blue Foundation; Michael Bibi - Eyes On Fire (Bibi Remix).flac"),
+    ("The Scoop", "Format:B", "Robbie Doherty - Pour the Milk.flac"),
+    ("Together", "Hollaphonic", "Öwnboss - Come Together.flac"),
+    ("Odyssey - Kyle Watson Remix", "Justin Martin",
+     "War - Low Rider (Kyle Watson Remix).flac"),
+    ("Dustup - Mefjus Remix", "Noisia", "Noisia - Dustup (Original Mix).flac"),
+    ("Cold Outside - Kris m Remix", "Toxic Wraith",
+     "Toxic Wraith - Cold Outside (Original Mix).flac"),
+    ("All Night", "AVE",
+     "@@abc\\music\\Рахманинов\\Vespers (All-Night Vigil)\\06 Ave Maria.flac"),
+]
+
+
+class TestCandidateRejectsWrongSongs:
+    @pytest.mark.parametrize("title,artist,filename", WRONG_CANDIDATES)
+    def test_rejected(self, title, artist, filename):
+        assert extract_candidates(_results(filename), title, artist) == []
+
+
+# (expected title, expected artist, correct file that must still match)
+RIGHT_CANDIDATES = [
+    ("Get Lucky (feat. Pharrell Williams)", "Daft Punk", "Daft Punk - Get Lucky.flac"),
+    ("Get Lucky", "Daft Punk, Pharrell Williams",
+     "Daft Punk feat. Pharrell Williams - Get Lucky.flac"),
+    ("Get Lucky", "Daft Punk",
+     "music\\Daft Punk\\Random Access Memories\\08 - Get Lucky "
+     "(feat. Pharrell Williams and Nile Rodgers).flac"),
+    ("Get Lucky", "Daft Punk", "Daft Punk - Random Access Memories - 08 - Get Lucky.flac"),
+    ("Song", "Artist1, Artist2", "Artist1 & Artist2 - Song.flac"),
+    ("Song", "Artist1 & Artist2", "Artist2 - Song.flac"),
+    ("Heart To Find", "Mat Joe", "Mat Joe - Heart To Find (Extended Mix).flac"),
+    ("Heart To Find", "Mat Joe", "Mat Joe - Heart To Find (Original Mix).flac"),
+    ("Heart To Find", "Mat Joe", "Mat Joe - Heart To Find - Extended Mix.flac"),
+    ("Heart To Find", "Mat Joe", "02. mat_joe-heart_to_find [320].flac"),
+    ("Déjà Vu", "Beyoncé", "Beyonce - Deja Vu.flac"),
+    ("Don't Stop Me Now", "Queen", "QUEEN - Don’t Stop Me Now!.flac"),
+    ("Blinding Lights", "The Weeknd", "Weeknd - Blinding Lights.flac"),
+    ("Blinding Lights", "The Weeknd", "The Weeknd - Blinding Lights.flac"),
+    ("Here Comes The Sun - Remastered 2019", "The Beatles",
+     "The Beatles - Here Comes The Sun.flac"),
+    ("Here Comes The Sun - 2009 Remaster", "The Beatles",
+     "The Beatles - Here Comes The Sun (Remastered).flac"),
+    ("群青", "YOASOBI", "YOASOBI - 群青.flac"),
+    ("First Love", "宇多田ヒカル", "Music\\宇多田ヒカル Utada Hikaru\\First Love\\04 First Love.mp3"),
+    ("Odyssey - Kyle Watson Remix", "Justin Martin",
+     "Justin Martin - Odyssey (Kyle Watson Remix).flac"),
+    ("The Scoop", "Format:B", "FormatB - The Scoop (Original Mix).flac"),
+]
+
+
+class TestCandidateKeepsRightSongs:
+    @pytest.mark.parametrize("title,artist,filename", RIGHT_CANDIDATES)
+    def test_accepted(self, title, artist, filename):
+        assert len(extract_candidates(_results(filename), title, artist)) == 1
+
+    def test_extended_mix_still_ranks_first(self):
+        out = soulseek_api.sort_candidates(extract_candidates(_results(
+            "Mat Joe - Heart To Find (Original Mix).flac",
+            "Mat Joe - Heart To Find.flac",
+            "Mat Joe - Heart To Find (Extended Mix).flac",
+        ), "Heart To Find", "Mat Joe"))
+        assert len(out) == 3
+        assert "Extended Mix" in out[0]["basename"]
