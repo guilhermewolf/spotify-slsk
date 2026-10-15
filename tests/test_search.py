@@ -930,7 +930,7 @@ class TestTransferStates:
             transfers = _Transfers()
 
         monkeypatch.setattr(soulseek_api, "get_client", lambda: _Client())
-        monkeypatch.setattr(soulseek_api, "find_file_in_downloads", lambda n: "/dl/" + n)
+        monkeypatch.setattr(soulseek_api, "_await_completed_file", lambda n: "/dl/" + n)
         monkeypatch.setattr(soulseek_api, "_wait_for_external_processing", lambda p: True)
         sleeps = []
         # Returning True ("shutdown") turns a would-be 300 s hang into a fast,
@@ -948,3 +948,53 @@ class TestTransferStates:
             assert out == "/dl/Artist - Song (Original Mix).flac"
         else:
             assert out is None
+
+
+class TestCompletedFileGrace:
+    """slskd 0.23 reported "Completed, Succeeded" while the file was still
+    under /downloads/incomplete; the move landed moments later. That was
+    treated as "file not found" and the good peer was blocklisted."""
+
+    def test_incomplete_dir_is_never_a_hit(self, tmp_path):
+        (tmp_path / "incomplete" / "Album").mkdir(parents=True)
+        (tmp_path / "incomplete" / "Album" / "a.flac").write_bytes(b"x")
+        assert soulseek_api.find_file_in_downloads("a.flac", str(tmp_path)) is None
+        (tmp_path / "Album").mkdir()
+        (tmp_path / "Album" / "a.flac").write_bytes(b"x")
+        assert soulseek_api.find_file_in_downloads("a.flac", str(tmp_path)) == str(
+            tmp_path / "Album" / "a.flac"
+        )
+
+    def test_waits_for_the_file_to_leave_incomplete(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(soulseek_api, "DOWNLOAD_DIR", str(tmp_path))
+        (tmp_path / "incomplete").mkdir()
+        (tmp_path / "incomplete" / "a.flac").write_bytes(b"x")
+        sleeps = []
+
+        def fake_sleep(s):
+            sleeps.append(s)
+            if len(sleeps) == 3:  # slskd moves the file during the grace period
+                (tmp_path / "done").mkdir()
+                (tmp_path / "incomplete" / "a.flac").rename(tmp_path / "done" / "a.flac")
+            return False
+
+        monkeypatch.setattr(soulseek_api, "_interruptible_sleep", fake_sleep)
+        assert soulseek_api._await_completed_file("a.flac", grace=30) == str(
+            tmp_path / "done" / "a.flac"
+        )
+        assert len(sleeps) == 3
+
+    def test_gives_up_after_grace_and_on_shutdown(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(soulseek_api, "DOWNLOAD_DIR", str(tmp_path))
+        clock = [1000.0]
+        monkeypatch.setattr(soulseek_api.time, "time", lambda: clock[0])
+
+        def fake_sleep(s):
+            clock[0] += s
+            return False
+
+        monkeypatch.setattr(soulseek_api, "_interruptible_sleep", fake_sleep)
+        assert soulseek_api._await_completed_file("a.flac", grace=5) is None
+        assert clock[0] == 1005.0
+        monkeypatch.setattr(soulseek_api, "_interruptible_sleep", lambda s: True)
+        assert soulseek_api._await_completed_file("a.flac", grace=30) is None

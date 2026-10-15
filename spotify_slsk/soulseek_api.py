@@ -717,13 +717,34 @@ def interactive_search(
     return accepted + [c for c in evaluated if not c["accepted"]]
 
 
+# slskd can report "Completed, Succeeded" while the file still sits in its
+# incomplete directory; the move to the final location lands moments later.
+COMPLETION_GRACE_SECONDS = 30
+
+
 def find_file_in_downloads(filename, base_dir=None):
+    """Path of a *finished* download named `filename`, or None. slskd's
+    incomplete directory is never searched: a hit there is still being
+    written."""
     if base_dir is None:
         base_dir = DOWNLOAD_DIR
-    for root, _, files in os.walk(base_dir):
+    for root, dirs, files in os.walk(base_dir):
+        dirs[:] = [d for d in dirs if d != "incomplete"]
         if filename in files:
             return os.path.join(root, filename)
     return None
+
+
+def _await_completed_file(filename, grace=None):
+    """Poll for a finished download for up to `grace` seconds (1 s steps,
+    interruptible by shutdown). Returns the path or None."""
+    deadline = time.time() + (COMPLETION_GRACE_SECONDS if grace is None else grace)
+    while True:
+        path = find_file_in_downloads(filename)
+        if path or time.time() >= deadline:
+            return path
+        if _interruptible_sleep(1):
+            return None
 
 
 def download_and_verify(
@@ -1006,7 +1027,7 @@ def wait_for_completion(candidate, timeout=300):
                     outcome = _transfer_outcome(state)
                     if outcome == "succeeded":
                         filename = _remote_basename(candidate["filename"])
-                        real_path = find_file_in_downloads(filename)
+                        real_path = _await_completed_file(filename)
                         logging.info(f"File found: {real_path}")
                         if real_path and _wait_for_external_processing(real_path):
                             return real_path
