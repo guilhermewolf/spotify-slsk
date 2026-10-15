@@ -663,11 +663,12 @@ class TestHistoryPage:
 class TestInteractiveSearchUI:
     CAND_OK = {
         "user": "peer", "filename": "Artist - Song.flac", "size": 123, "ext": ".flac",
+        "basename": "Artist - Song.flac",
         "bitrate": 1411, "bit_depth": 16, "sample_rate": 44100, "length": 200,
         "free_slot": True, "user_upload_speed": 1000, "queue_length": 0,
         "accepted": True, "reason": None,
     }
-    CAND_BAD = dict(CAND_OK, filename="Artist - Song.wma", ext=".wma",
+    CAND_BAD = dict(CAND_OK, filename="Artist - Song.wma", basename="Artist - Song.wma", ext=".wma",
                     accepted=False, reason="format not allowed: .wma")
 
     def _seed(self, app_tmp):
@@ -707,6 +708,9 @@ class TestInteractiveSearchUI:
         assert b"Artist - Song.flac" in r.data
         assert b"format not allowed: .wma" in r.data
         assert b"hx-trigger" not in r.data, "finished search must stop polling"
+        # The filename cell wraps (full path in title); Grab column is pinned.
+        assert b'class="file-cell" title="Artist - Song.flac"' in r.data
+        assert r.data.count(b'class="actions-col"') == 3
         assert b"Artist - Song.flac" in client.get("/track/pid1/t1").data
 
     def test_grab_accepted_queues_for_daemon_and_wakes(self, app_tmp, client, monkeypatch):

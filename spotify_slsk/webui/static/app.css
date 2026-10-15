@@ -344,6 +344,22 @@ button.danger:focus {
 .track-title { font-weight: 600; }
 .track-table tbody tr:hover { background: var(--pico-card-sectioning-background-color); }
 
+/* Interactive search: long peer filenames wrap (full path in the cell's
+   title) and the Grab column stays pinned while the table scrolls. */
+.table-wrap { max-width: 100%; min-width: 0; }
+.interactive-table .file-cell { min-width: 12rem; max-width: 26rem; }
+.interactive-table .file-cell code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.interactive-table .actions-col {
+  position: sticky;
+  right: 0;
+  background: var(--pico-background-color);
+  box-shadow: -1px 0 0 var(--pico-muted-border-color);
+}
+.interactive-table .actions-col button { margin: 0; width: auto; }
+
 /* ---- detail lists --------------------------------------------------- */
 
 .detail-grid {

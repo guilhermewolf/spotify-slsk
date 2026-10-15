@@ -17,7 +17,7 @@
       {{ search.results|length }} files, {{ accepted|length }} acceptable. Results expire after 10 minutes.
     </p>
     <div class="table-wrap">
-      <table class="track-table">
+      <table class="track-table interactive-table">
         <thead>
           <tr>
             <th scope="col">File</th>
@@ -26,13 +26,13 @@
             <th scope="col" class="num">Length</th>
             <th scope="col">Peer</th>
             <th scope="col">Verdict</th>
-            <th scope="col">Actions</th>
+            <th scope="col" class="actions-col">Actions</th>
           </tr>
         </thead>
         <tbody>
         {% for c in search.results %}
           <tr>
-            <td><code>{{ c.filename }}</code></td>
+            <td class="file-cell" title="{{ c.filename }}"><code>{{ c.basename or c.filename }}</code></td>
             <td class="nowrap">
               {{ c.ext|replace('.', '') }}
               {% if c.bitrate %}· {{ c.bitrate }} kbps{% endif %}
@@ -54,7 +54,7 @@
               {% else %}<span class="badge badge-suspended">rejected</span>
               <div class="subtle">{{ c.reason }}</div>{% endif %}
             </td>
-            <td>
+            <td class="actions-col">
               <form method="POST" action="{{ url_for('interactive_grab', playlist_id=playlist_id, track_id=track_id) }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="username" value="{{ c.user }}">
