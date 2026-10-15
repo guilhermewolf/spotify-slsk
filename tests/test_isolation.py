@@ -27,7 +27,7 @@ class TestEnvironmentIsolation:
             assert "not-real" in os.environ[key], f"{key} is not a sandbox value"
 
     def test_playlists_dir_is_a_temp_dir_not_the_music_library(self):
-        # app._reject_and_log will os.remove() from under this root, so it
+        # importer.process._reject_and_log will os.remove() from under this root, so it
         # must never point at a real library.
         playlists = os.environ["SLSKD_PLAYLISTS_DIR"]
         assert "isolated-env" in playlists

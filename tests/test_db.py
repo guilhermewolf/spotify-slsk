@@ -215,7 +215,7 @@ class TestTriedFiles:
     def test_clear_tried_entries_actually_clears_the_history(self, conn):
         """The rejected-filename history must be readable-then-empty.
 
-        app.handle_track_download calls clear_tried_entries after a verified
+        acquire.handle_track_download calls clear_tried_entries after a verified
         download so a filename rejected once isn't blacklisted forever. It
         previously wrote to a dead `tried_files` column while the history
         lived in the `_tried` table, making the call a silent no-op.

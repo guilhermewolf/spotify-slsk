@@ -5,7 +5,7 @@ the variable is already exported. A developer who had sourced the real
 ``.env`` into their shell before running pytest therefore ran the suite
 against their production configuration: ``SLSKD_HOST_URL`` pointing at the
 real slskd daemon and ``SLSKD_PLAYLISTS_DIR`` at their actual music library,
-which ``app._reject_and_log`` is willing to ``os.remove`` from.
+which ``importer.process._reject_and_log`` is willing to ``os.remove`` from.
 
 The autouse fixtures below *override* rather than default, so the suite is
 isolated regardless of the ambient environment, and they are autouse so no
