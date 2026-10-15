@@ -39,7 +39,7 @@ and CI all agree; the Makefile defaults to `python3.12`). Individual targets:
   findings rather than adding ignores.
 - `make typecheck` — mypy over `spotify_slsk/` (`ignore_missing_imports`,
   `check_untyped_defs`). Every public function is annotated; keep it that way.
-- `make test` — 556 tests. Fast (~3s); no network, no external services.
+- `make test` — 558 tests. Fast (~3s); no network, no external services.
 - `make audit` — `pip-audit` against the pinned `requirements.txt`. Advisories
   fail CI, so dependency CVEs surface on a PR rather than in production.
 - CI also builds the image and asserts it runs as uid 1000 and that no
@@ -275,7 +275,7 @@ Files enter via the shared `/downloads` volume, then move to `/playlists/<table>
 Deploy-time / infra (env only):
 - `SPOTIPY_CLIENT_ID`, `SPOTIPY_CLIENT_SECRET`, `SLSKD_API_KEY`, `NTFY_URL`, `NTFY_TOPIC`
 - `SLSKD_HOST_URL`, `SLSKD_URL_BASE`, `SLSKD_DOWNLOADS_DIR`, `SLSKD_PLAYLISTS_DIR`
-- `CYCLE_INTERVAL_SECONDS` (300), `CYCLE_ERROR_BACKOFF_SECONDS` (60)
+- `CYCLE_INTERVAL_SECONDS` (300), `CYCLE_ERROR_BACKOFF_SECONDS` (60), `SLSKD_HTTP_TIMEOUT` (30)
 - `HEARTBEAT_FILE`, `HEARTBEAT_STALE_SECONDS`
 - `LOGLEVEL`, `LIB_LOGLEVEL`, `TIMEZONE`
 - `PUID`/`PGID` (compose user override; the image itself is `USER 1000:1000`)
@@ -313,7 +313,7 @@ threaded through the download call chain. The real per-track cap is
 - **Validated settings matter**: `config.reload` silently keeps the previous value when a stored value won't parse, so an unvalidated save would report success for a setting that never applies.
 - **slskd versions.** Compose pins the slskd server at **0.26.1** (0.26 moved `global`/`groups` under `transfers` and renamed `integration` → `integrations`; README has the migration). `slskd-api==0.2.4` is a thin HTTP wrapper; the transfer-state strings come from the **server**. `Transfer.outcome` treats any `"Completed, X"` other than `"Completed, Succeeded"` as a failure (Rejected, TimedOut, Errored, Aborted, Cancelled); only Errored/Rejected/Aborted (and "failed") are a peer fault. `tests/test_slskd_contract.py` pins every production state plus 401/404/500/connection/timeout handling at every call site — run it when bumping either.
 - **slskd fields are camelCase** (`bitRate`, `bitDepth`, `sampleRate`, `isVariableBitRate`, `uploadSpeed`). A lowercase `bitrate` read silently returned None for years. Read slskd JSON only through `slskd/models.py`; `tests/fixtures/slskd/` holds payloads in the real shape.
-- **The slskd client has no request timeout** (`new_client` passes none to `SlskdClient`), so a hung slskd connection blocks the daemon thread; the heartbeat then goes stale and Docker restarts the container. Known, unfixed.
+- **slskd HTTP timeout.** `new_client` passes `timeout=SLSKD_HTTP_TIMEOUT` (default 30s) to `SlskdClient`; slskd-api's default is none, and a slskd that accepts but never answers would otherwise block the daemon thread until the healthcheck restarts the container. Every slskd call is a short request, so 30s is generous.
 - **SQLite WAL mode** means the DB file is always accompanied by `-wal` and `-shm` files. Backups must capture all three or run `PRAGMA wal_checkpoint(TRUNCATE)` first.
 - **Tracks removed from a Spotify playlist upstream are kept locally** — the library is append-only. `tests/test_pipeline.py` pins this so a change is deliberate.
 - **Schema version is 5.** v5 (`db/connection.py::_migrate_to_v5`, run from `_ensure_schema_version`) adds `duration_ms` to every catalogued per-playlist table at connect time — not lazily in `create_table`, because the UI reads tables of playlists the daemon hasn't synced since the upgrade — and clears every stored `snapshot_id` so the next sync re-reads Spotify and backfills durations (`db.backfill_durations`). `blocklist` and `history` are `CREATE TABLE IF NOT EXISTS`. `TestSchemaMigrations.test_v4_db_upgrades_to_v5` builds a real v4 DB. Upgrading from an older DB is automatic and tested (`TestSchemaMigrations`): the ALTER TABLE guards in `_ensure_playlists_meta_table` handle v2 DBs, `create_table` adds `last_upgrade_check` to older per-playlist tables, `CREATE TABLE IF NOT EXISTS` handles settings, and v4 added `cycle_history` (one row per completed cycle, capped to ~200 rows by `db.record_cycle`). The `tried_files` column on per-playlist tables is dead — nothing reads it; it is retained only so existing DBs need no migration.

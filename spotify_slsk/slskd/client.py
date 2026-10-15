@@ -39,6 +39,10 @@ def new_client() -> slskd_api.SlskdClient:
         host=os.getenv("SLSKD_HOST_URL", "http://slskd:5030"),
         api_key=os.getenv("SLSKD_API_KEY"),
         url_base=os.getenv("SLSKD_URL_BASE", ""),
+        # Per-request timeout. Without it a slskd that accepts the connection
+        # but never answers blocks the daemon thread forever: no shutdown, no
+        # heartbeat, until the healthcheck kills the container.
+        timeout=float(os.getenv("SLSKD_HTTP_TIMEOUT", "30")),
     )
 
 

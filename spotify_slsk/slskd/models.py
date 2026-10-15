@@ -103,7 +103,7 @@ class SearchResponse:
     def from_json(cls, data: Any) -> SearchResponse:
         d = _dict(data)
         return cls(
-            username=d.get("username", "unknown"),
+            username=d.get("username") or "unknown",
             upload_speed=_num(d.get("uploadSpeed")) or 0,
             has_free_upload_slot=_bool(d.get("hasFreeUploadSlot")),
             queue_length=_num(d.get("queueLength")),

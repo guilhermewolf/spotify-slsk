@@ -117,6 +117,19 @@ class TestSearchResponseParsing:
         assert peer.files[0].length is None and peer.files[0].bit_rate is None
         assert peer.files[1].filename == ""
 
+    def test_null_username_defaults(self):
+        assert SearchResponse.from_json({"username": None, "files": []}).username == "unknown"
+
+    def test_client_has_an_http_timeout(self, monkeypatch):
+        # A slskd that accepts but never answers must not hang the daemon.
+        seen = {}
+        monkeypatch.setattr(
+            slskd_client.slskd_api, "SlskdClient", lambda **kw: seen.update(kw)
+        )
+        monkeypatch.delenv("SLSKD_HTTP_TIMEOUT", raising=False)
+        slskd_client.new_client()
+        assert seen["timeout"] == 30.0
+
     @pytest.mark.parametrize("garbage", [None, [], "x", 3])
     def test_non_dict_payloads_parse_to_empty_values(self, garbage):
         assert SearchResponse.from_json(garbage).files == []
