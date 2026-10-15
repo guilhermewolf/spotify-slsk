@@ -40,6 +40,7 @@ from mutagen.aiff import AIFF
 from mutagen.mp3 import MP3
 from .utils import sanitize_table_name, get_playlist_id
 from spotipy.oauth2 import SpotifyClientCredentials
+from spotipy.cache_handler import CacheFileHandler
 from . import soulseek_api
 from .soulseek_api import (
     search_and_download,
@@ -921,7 +922,15 @@ def setup_spotify_client():
     """
     logging.info("Setting up Spotify client")
     try:
-        auth_manager = SpotifyClientCredentials()
+        # SpotifyClientCredentials ignores SPOTIPY_CACHE_PATH and defaults to
+        # ./.cache, which the non-root container user can't write: spotipy
+        # warned "Couldn't write token to cache" on every call. Point the
+        # cache at the data dir (the tests point it into their sandbox).
+        auth_manager = SpotifyClientCredentials(
+            cache_handler=CacheFileHandler(
+                cache_path=os.getenv("SPOTIPY_CACHE_PATH", "./data/.spotipy-cache")
+            )
+        )
         sp = spotipy.Spotify(auth_manager=auth_manager)
     except Exception as e:
         logging.error(
@@ -1403,9 +1412,8 @@ def _migrate_env_playlists(conn, sp):
 
 
 def main():
-    # Persist the Spotipy auth token across restarts on the data volume, and
-    # silence the "Couldn't write token to cache at: .cache" warning that
-    # spams otherwise (WORKDIR isn't writable by the non-root container user).
+    # Persist the Spotipy auth token across restarts on the data volume
+    # (read by setup_spotify_client's cache handler).
     os.environ.setdefault("SPOTIPY_CACHE_PATH", "/app/data/.spotipy-cache")
 
     setup_logging()

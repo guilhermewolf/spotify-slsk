@@ -205,7 +205,8 @@ def create_connection(db_file):
         # daemon would run cycles that silently do nothing.
         conn.execute("SELECT 1 FROM playlists_meta LIMIT 1").fetchone()
 
-        logging.info(f"Connected to SQLite database: {db_file}")
+        # DEBUG: the web UI opens a connection per request.
+        logging.debug(f"Connected to SQLite database: {db_file}")
         return conn
     except sqlite3.Error as e:
         logging.error(f"Error connecting to SQLite: {e}")
