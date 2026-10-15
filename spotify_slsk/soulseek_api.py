@@ -290,6 +290,7 @@ _VERSION_KEYWORDS = (
     "remix", "dub", "vip", "club mix", "live", "acoustic", "unplugged",
     "instrumental", "karaoke", "cover", "sped up", "slowed", "nightcore", "8d",
     "bootleg", "rework", "remake", "reedit", "flip", "mashup", "acapella",
+    "hotmix", "megamix",
 )
 _VERSION_WORDS = frozenset(w for kw in _VERSION_KEYWORDS for w in kw.split())
 # "<word> Mix" / "<word> Edit" is a named version ("Kris M Edit", "Strings
@@ -424,12 +425,21 @@ def _artist_in(name, folded_text) -> bool:
 def _title_coverage(expected_tokens, stem, artist_names, folder_tokens) -> float:
     """0.0 unless every expected title word is in the basename; otherwise the
     share of the basename's title-ish words (outside brackets, minus artists,
-    featured credits, numbers, noise and folder words) that are the title."""
+    featured credits, numbers, noise and folder words) that are the title.
+    A " - " segment naming an expected artist is the artist credit and is
+    dropped whole, co-credits included ("Daft Punk, Pharrell Williams - ...")."""
     if not expected_tokens or not expected_tokens <= set(_fold(stem).split()):
         return 0.0
-    outside = " " + _fold(_BRACKETS_RE.sub(" ", _FEAT_RE.sub(" ", stem))) + " "
-    for name in artist_names:
-        outside = outside.replace(f" {name} ", " ")
+    segments = re.split(r"\s+[-–—]\s+", _BRACKETS_RE.sub(" ", _FEAT_RE.sub(" ", stem)))
+    outside = " "
+    for seg in segments:
+        folded = " " + _fold(seg) + " "
+        credit = any(_artist_in(n, folded.strip()) for n in artist_names)
+        if credit and not expected_tokens <= set(folded.split()):
+            continue  # pure artist credit
+        for name in artist_names:
+            folded = folded.replace(f" {name} ", " ")
+        outside += folded
     extras = [
         t for t in outside.split()
         if t not in expected_tokens

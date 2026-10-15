@@ -88,6 +88,8 @@ WRONG_CANDIDATES = [
      "Toxic Wraith - Cold Outside (Original Mix).flac"),
     ("All Night", "AVE",
      "@@abc\\music\\Рахманинов\\Vespers (All-Night Vigil)\\06 Ave Maria.flac"),
+    ("Dream", "Kris m", "Kris M A Real Bad Dream.flac"),
+    ("Get Lucky", "Daft Punk", "Daft Punk - Get Lucky (DMC Hotmix).mp3"),
 ]
 
 
@@ -125,6 +127,8 @@ RIGHT_CANDIDATES = [
     ("Odyssey - Kyle Watson Remix", "Justin Martin",
      "Justin Martin - Odyssey (Kyle Watson Remix).flac"),
     ("The Scoop", "Format:B", "FormatB - The Scoop (Original Mix).flac"),
+    ("Get Lucky", "Daft Punk",
+     "Daft Punk, Pharrell Williams, Nile Rodgers - Get Lucky - USQX91300108.flac"),
 ]
 
 
