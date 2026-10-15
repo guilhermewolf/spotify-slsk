@@ -1196,12 +1196,15 @@ def try_upgrade_track(track, playlist_name, conn, current_path):
     if not verified or not final_path:
         return False
 
-    # Delete the old file iff it differs from the new one. Same-basename is
-    # possible when the upgrade winner happens to share a filename — in that
-    # case shutil.move already overwrote it.
+    # Delete the old file only if the import landed on *this* track (re-read
+    # the row, like _process_manual_grabs) and it differs from the new one.
+    # Same-basename is possible when the upgrade winner happens to share a
+    # filename — in that case shutil.move already overwrote it.
+    imported = get_track(conn, playlist_name, track.id) or {}
     try:
         if (
-            current_path
+            imported.get("path") == final_path
+            and current_path
             and os.path.isfile(current_path)
             and os.path.abspath(current_path) != os.path.abspath(final_path)
         ):

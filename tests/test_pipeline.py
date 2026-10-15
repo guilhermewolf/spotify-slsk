@@ -642,3 +642,41 @@ class TestVerifiesTheRequestedTrackOnly:
             Track("t1", "Heart To Find", "Mat Joe", "Alb", "p"), "pl_x", conn
         )
         assert seen["track_id"] == "t1"
+
+
+class TestUpgradeReplacesOnlyItsOwnFile:
+    def _setup(self, conn, monkeypatch, sandbox_dirs):
+        from spotify_slsk.models import Track
+        _, playlists = sandbox_dirs
+        _seed(conn)
+        old = playlists / "Mat Joe - Heart To Find.flac"
+        old.write_bytes(b"old")
+        db.update_download_status(conn, "t1", "pl_x", success=True, file_path=str(old))
+        new = playlists / "Mat Joe - Heart To Find (Extended Mix).flac"
+        new.write_bytes(b"new")
+        monkeypatch.setattr(app, "search_and_download", lambda **k: str(new))
+        return Track("t1", "Heart To Find", "Mat Joe", "Alb", "pl_x"), old, new
+
+    def test_old_file_kept_when_import_did_not_land_on_this_track(self, conn, monkeypatch, sandbox_dirs):
+        track, old, new = self._setup(conn, monkeypatch, sandbox_dirs)
+        # Verified, but the row still points at the old file.
+        monkeypatch.setattr(app, "process_downloaded_file", lambda *a, **k: (True, str(new)))
+        app.try_upgrade_track(track, "pl_x", conn, str(old))
+        assert old.exists()
+
+    def test_old_file_replaced_when_import_landed_here(self, conn, monkeypatch, sandbox_dirs):
+        track, old, new = self._setup(conn, monkeypatch, sandbox_dirs)
+
+        def _process(*a, **k):
+            db.update_download_status(conn, "t1", "pl_x", success=True, file_path=str(new))
+            return True, str(new)
+
+        monkeypatch.setattr(app, "process_downloaded_file", _process)
+        assert app.try_upgrade_track(track, "pl_x", conn, str(old)) is True
+        assert not old.exists() and new.exists()
+
+    def test_same_path_is_never_deleted(self, conn, monkeypatch, sandbox_dirs):
+        track, old, _ = self._setup(conn, monkeypatch, sandbox_dirs)
+        monkeypatch.setattr(app, "process_downloaded_file", lambda *a, **k: (True, str(old)))
+        app.try_upgrade_track(track, "pl_x", conn, str(old))
+        assert old.exists()
