@@ -577,3 +577,23 @@ class TestExtraEndpoints:
         assert r.status_code == 200
         assert b"missing" in r.data.lower()
 
+
+
+class TestTrackSearchHistoryReasons:
+    def test_track_page_shows_rejection_reasons(self, app_tmp, client):
+        from spotify_slsk import runtime_state
+
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        db.upsert_playlist_meta(conn, "pid1", "pl_x", "X", "s")
+        db.create_table(conn, "pl_x")
+        db.insert_track(conn, "pl_x", ("t-why", "Song", "Artist", "Album"))
+        conn.close()
+        runtime_state.record_search(
+            "t-why", "song artist", result_count=3, candidate_count=1,
+            rejected_count=2,
+            rejections=[{"user": "peer", "filename": "x.wma", "reason": "format not allowed: .wma"}],
+        )
+        r = client.get("/track/pid1/t-why")
+        assert r.status_code == 200
+        assert b"format not allowed: .wma" in r.data
+        assert b"and 1 more" in r.data

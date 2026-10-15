@@ -323,69 +323,92 @@ def _effective_mp3_kbps(size_bytes, length_sec):
         return None
 
 
-def extract_candidates(
+def evaluate_candidates(
     search_results,
     expected_title,
     expected_artist,
     min_title_score=80,
     min_artist_score=70,
+    max_version_tier=None,
 ):
     """
-    Extract valid file candidates from slskd search results based on title and
-    artist matching. Unknown MP3 bitrates are allowed (slskd often reports None);
-    files are hard-rejected only when we *know* quality is too low.
+    Judge every file in slskd search results against the expected track.
+
+    Returns one dict per file (in response order) carrying the candidate
+    fields plus ``accepted`` and, when rejected, a short human ``reason``
+    ("format not allowed: .wma", "bitrate 192 < 320", ...). Unknown MP3
+    bitrates are allowed (slskd often reports None); files are hard-rejected
+    only when we *know* quality is too low.
+
+    `max_version_tier`, when set, rejects anything not *strictly better*
+    (used by the upgrade pass).
     """
-    candidates = []
+    evaluated = []
     expected_title_norm = " ".join(expected_title.lower().replace("-", " ").split())
     expected_artists = [a.strip().lower() for a in expected_artist.split(",")]
 
     for result in search_results:
         user = result.get("username", "unknown")
         user_upload_speed = result.get("uploadSpeed", 0) or 0
-        files = result.get("files", [])
 
-        for file in files:
+        for file in result.get("files", []):
             filename = file.get("filename")
             if not filename:
                 continue
 
             ext = os.path.splitext(filename)[1].lower()
-            if ext not in PREFERRED_FORMATS:
-                continue
-
             reported_bitrate = file.get("bitrate")
             length_sec = file.get("length")
             size_bytes = file.get("size")
-            inferred_bitrate = _infer_bitrate_from_name(os.path.basename(filename))
+            base = os.path.basename(filename)
+            inferred_bitrate = _infer_bitrate_from_name(base)
             effective_bitrate = (
                 reported_bitrate if reported_bitrate is not None else inferred_bitrate
             )
             effective_mp3 = (
                 _effective_mp3_kbps(size_bytes, length_sec) if ext == ".mp3" else None
             )
+            entry = {
+                "user": user,
+                "user_upload_speed": user_upload_speed,
+                "filename": base,
+                "size": size_bytes,
+                "bitrate": effective_bitrate,
+                "effective_mp3": effective_mp3,
+                "ext": ext,
+                "length": length_sec,
+                "sample_rate": file.get("sampleRate"),
+                "bit_depth": file.get("bitDepth"),
+                "free_slot": result.get("hasFreeUploadSlot"),
+                "queue_length": result.get("queueLength"),
+                "title_score": None,
+                "artist_score": None,
+                "version_tier": _version_tier(base),
+                "accepted": False,
+                "reason": None,
+            }
+            evaluated.append(entry)
 
+            if ext not in PREFERRED_FORMATS:
+                entry["reason"] = f"format not allowed: {ext or '(none)'}"
             # Reject MP3s whose reported/inferred bitrate is known-low.
-            if ext == ".mp3" and effective_bitrate is not None and effective_bitrate < 320:
-                logging.debug(
-                    f"Skipped {filename}: reported bitrate {effective_bitrate} < 320"
-                )
-                continue
-
+            elif ext == ".mp3" and effective_bitrate is not None and effective_bitrate < 320:
+                entry["reason"] = f"bitrate {effective_bitrate} < 320"
             # Reject MP3s whose size/duration shows they're effectively below the
             # configured floor — catches 128 kbps files retagged as 320.
-            if (
+            elif (
                 ext == ".mp3"
                 and effective_mp3 is not None
                 and effective_mp3 < MIN_EFFECTIVE_MP3_KBPS
             ):
-                logging.debug(
-                    f"Skipped {filename}: effective bitrate {effective_mp3} < {MIN_EFFECTIVE_MP3_KBPS}"
+                entry["reason"] = (
+                    f"effective bitrate {effective_mp3} < {MIN_EFFECTIVE_MP3_KBPS}"
                 )
+            if entry["reason"]:
+                logging.debug(f"Skipped {filename}: {entry['reason']}")
                 continue
 
-            base = os.path.basename(filename)
             clean_base = clean_filename(base)
-
             title_score = fuzz.token_set_ratio(expected_title_norm, clean_base)
             artist_scores = [
                 fuzz.token_set_ratio(a, clean_base) for a in expected_artists
@@ -395,26 +418,61 @@ def extract_candidates(
             # Version-gate penalty: if expected track doesn't mention a version
             # (remix/live/...) but the file does (or vice versa), or they mention
             # different versions, penalize the title score.
-            if _version_mismatch(expected_title, base):
+            mismatch = _version_mismatch(expected_title, base)
+            if mismatch:
                 title_score = max(0, title_score - 25)
+            entry["title_score"] = title_score
+            entry["artist_score"] = max_artist_score
 
-            if title_score >= min_title_score and max_artist_score >= min_artist_score:
-                candidates.append(
-                    {
-                        "user": user,
-                        "user_upload_speed": user_upload_speed,
-                        "filename": base,
-                        "size": size_bytes,
-                        "bitrate": effective_bitrate,
-                        "effective_mp3": effective_mp3,
-                        "ext": ext,
-                        "title_score": title_score,
-                        "artist_score": max_artist_score,
-                        "version_tier": _version_tier(base),
-                    }
+            if title_score < min_title_score:
+                entry["reason"] = (
+                    f"title score {title_score:.0f} < {min_title_score}"
+                    + (" (version mismatch)" if mismatch else "")
                 )
+            elif max_artist_score < min_artist_score:
+                entry["reason"] = f"artist score {max_artist_score:.0f} < {min_artist_score}"
+            elif max_version_tier is not None and entry["version_tier"] >= max_version_tier:
+                entry["reason"] = "not a better version than the current file"
+            else:
+                entry["accepted"] = True
+            if entry["reason"]:
+                logging.debug(f"Skipped {filename}: {entry['reason']}")
 
-    return candidates
+    return evaluated
+
+
+def extract_candidates(
+    search_results,
+    expected_title,
+    expected_artist,
+    min_title_score=80,
+    min_artist_score=70,
+):
+    """Return only the accepted candidates from `evaluate_candidates`."""
+    return [
+        c
+        for c in evaluate_candidates(
+            search_results,
+            expected_title,
+            expected_artist,
+            min_title_score=min_title_score,
+            min_artist_score=min_artist_score,
+        )
+        if c["accepted"]
+    ]
+
+
+def summarize_evaluation(evaluated, limit=50):
+    """Compact form of an evaluation for the per-track search history."""
+    rejected = [c for c in evaluated if not c["accepted"]]
+    return {
+        "candidate_count": len(evaluated) - len(rejected),
+        "rejected_count": len(rejected),
+        "rejections": [
+            {"user": c["user"], "filename": c["filename"], "reason": c["reason"]}
+            for c in rejected[:limit]
+        ],
+    }
 
 
 def sort_candidates(candidates):
@@ -461,19 +519,26 @@ def download_and_verify(
     playlist_name,
     track_id,
     max_version_tier=None,
+    evaluated=None,
 ):
     """Filter, sort, and try to download the best candidate from one search.
 
     `max_version_tier`, when set, restricts candidates to *strictly better*
     version tiers (used by the upgrade pass — Original Mix already on disk
     means we'll only consider tier 0 = Extended Mix).
+
+    `evaluated` lets a caller that already ran `evaluate_candidates` (to
+    record rejection reasons) pass the result instead of recomputing it.
     """
     client = get_client()
-    candidates = extract_candidates(search_results, expected_title, expected_artist)
-    if max_version_tier is not None:
-        candidates = [
-            c for c in candidates if c.get("version_tier", 2) < max_version_tier
-        ]
+    if evaluated is None:
+        evaluated = evaluate_candidates(
+            search_results,
+            expected_title,
+            expected_artist,
+            max_version_tier=max_version_tier,
+        )
+    candidates = [c for c in evaluated if c["accepted"]]
     if not candidates:
         logging.warning("No valid candidates found.")
         return None
@@ -552,10 +617,21 @@ def search_and_download(
         return None
     for query in queries:
         results = _run_one_search(query, timeout)
+        evaluated = (
+            evaluate_candidates(
+                results, title, artist, max_version_tier=max_version_tier
+            )
+            if results
+            else []
+        )
         # Record every attempt — even empty ones — so the inspector shows
-        # the full waterfall the daemon actually walked.
+        # the full waterfall the daemon actually walked, and why each
+        # file was turned down.
         runtime_state.record_search(
-            track_id, query, result_count=len(results) if results else 0
+            track_id,
+            query,
+            result_count=len(results) if results else 0,
+            **summarize_evaluation(evaluated),
         )
         if not results:
             continue
@@ -567,6 +643,7 @@ def search_and_download(
             playlist_name=playlist_name,
             track_id=track_id,
             max_version_tier=max_version_tier,
+            evaluated=evaluated,
         )
         if file_path:
             return file_path

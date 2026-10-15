@@ -137,8 +137,14 @@ def record_search(
     *,
     result_count: int = 0,
     candidate_count: Optional[int] = None,
+    rejected_count: Optional[int] = None,
+    rejections: Optional[list] = None,
 ) -> None:
-    """Record one query attempt for a track. No-op if ``track_id`` is falsy."""
+    """Record one query attempt for a track. No-op if ``track_id`` is falsy.
+
+    ``candidate_count``/``rejected_count`` are the accepted and rejected
+    files; ``rejections`` is a capped list of {user, filename, reason}.
+    """
     if not track_id:
         return
     entry = {
@@ -148,6 +154,8 @@ def record_search(
         "candidate_count": (
             None if candidate_count is None else int(candidate_count)
         ),
+        "rejected_count": None if rejected_count is None else int(rejected_count),
+        "rejections": list(rejections or []),
     }
     with _search_lock:
         bucket = _search_history.get(track_id)

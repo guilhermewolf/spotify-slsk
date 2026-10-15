@@ -531,3 +531,7 @@ button.outline.danger:focus {
   width: auto;
   color: var(--pico-muted-color);
 }
+
+/* Rejection reasons under a search-history row. */
+.reject-list { margin: 0.25rem 0 0; padding-left: 1rem; font-size: 0.85rem; }
+.reject-list li { margin: 0; list-style: disc; }

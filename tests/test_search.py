@@ -579,3 +579,77 @@ class TestDownloadAndVerifyTransientErrors:
             "transient slskd error should NOT add candidate to tried_files; "
             "got: " + repr(added)
         )
+
+
+class TestRejectionReasons:
+    """evaluate_candidates explains every rejected file; accepted ones are
+    exactly what extract_candidates returns."""
+
+    def _results(self, *files, user="u1"):
+        return [{"username": user, "uploadSpeed": 1000, "files": list(files)}]
+
+    def _file(self, filename, bitrate=None, size=30_000_000, length=360):
+        return {"filename": filename, "size": size, "bitrate": bitrate, "length": length}
+
+    def _reason(self, file, title="Lose Yourself", artist="Eminem"):
+        out = soulseek_api.evaluate_candidates(self._results(file), title, artist)
+        assert len(out) == 1
+        return out[0]["reason"]
+
+    def test_format_reason(self):
+        assert self._reason(self._file("Eminem - Lose Yourself.wma")) == "format not allowed: .wma"
+
+    def test_reported_bitrate_reason(self):
+        assert self._reason(
+            self._file("Eminem - Lose Yourself.mp3", bitrate=192, size=5_000_000, length=200)
+        ) == "bitrate 192 < 320"
+
+    def test_effective_bitrate_reason(self):
+        reason = self._reason(
+            self._file("Eminem - Lose Yourself.mp3", bitrate=320, size=1_000_000, length=160)
+        )
+        assert reason.startswith("effective bitrate 50 <")
+
+    def test_title_score_reason_mentions_version_mismatch(self):
+        reason = self._reason(self._file("Eminem - Lose Yourself (Walker Remix).flac", bitrate=1411))
+        assert reason.startswith("title score") and "< 80" in reason
+        assert "version mismatch" in reason
+
+    def test_artist_score_reason(self):
+        reason = self._reason(self._file("Somebody Else - Lose Yourself.flac", bitrate=1411))
+        assert reason.startswith("artist score") and "< 70" in reason
+
+    def test_accepted_has_no_reason_and_matches_extract(self):
+        results = self._results(
+            self._file("Eminem - Lose Yourself.flac", bitrate=1411),
+            self._file("Eminem - Lose Yourself.wma"),
+        )
+        evaluated = soulseek_api.evaluate_candidates(results, "Lose Yourself", "Eminem")
+        accepted = [c for c in evaluated if c["accepted"]]
+        assert len(accepted) == 1 and accepted[0]["reason"] is None
+        assert accepted == extract_candidates(results, "Lose Yourself", "Eminem")
+
+    def test_upgrade_cap_reason(self):
+        out = soulseek_api.evaluate_candidates(
+            self._results(self._file("Eminem - Lose Yourself (Original Mix).flac", bitrate=1411)),
+            "Lose Yourself", "Eminem", max_version_tier=1,
+        )
+        assert out[0]["reason"] == "not a better version than the current file"
+
+    def test_search_history_records_counts_and_reasons(self, monkeypatch):
+        from spotify_slsk import runtime_state
+
+        results = self._results(
+            self._file("Eminem - Lose Yourself.flac", bitrate=1411),
+            self._file("Eminem - Lose Yourself.wma"),
+        )
+        monkeypatch.setattr(soulseek_api, "_run_one_search", lambda q, timeout=60: results)
+        monkeypatch.setattr(soulseek_api, "download_and_verify", lambda **kw: "/x.flac")
+        soulseek_api.search_and_download(
+            artist="Eminem", title="Lose Yourself", conn=None,
+            playlist_name="pl", track_id="t-reasons",
+        )
+        entry = runtime_state.get_search_history("t-reasons")[-1]
+        assert entry["candidate_count"] == 1
+        assert entry["rejected_count"] == 1
+        assert entry["rejections"][0]["reason"] == "format not allowed: .wma"
