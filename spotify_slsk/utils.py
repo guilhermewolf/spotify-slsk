@@ -22,3 +22,9 @@ def get_playlist_id(playlist_url):
             f"Failed to extract playlist ID from URL {playlist_url!r}: {e}"
         )
         return None
+
+
+def fmt_duration(seconds) -> str:
+    """Seconds -> "m:ss"."""
+    seconds = int(round(seconds or 0))
+    return f"{seconds // 60}:{seconds % 60:02d}"

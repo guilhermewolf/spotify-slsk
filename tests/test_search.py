@@ -6,19 +6,23 @@ import pytest
 os.environ.setdefault("SLSKD_HOST_URL", "http://localhost")
 os.environ.setdefault("SLSKD_API_KEY", "x")
 
-from spotify_slsk.soulseek_api import (
-    _build_search_queries,
+from spotify_slsk.matching.candidates import (
     _effective_mp3_kbps,
-    _has_version_marker,
     _infer_bitrate_from_name,
-    _is_ascii,
-    _normalize_query_text,
-    _version_mismatch,
-    _version_tier,
     clean_filename,
-    download_and_verify,
     extract_candidates,
     sort_candidates,
+)
+from spotify_slsk.matching.normalize import (
+    has_version_marker,
+    version_mismatch,
+    version_tier,
+)
+from spotify_slsk.soulseek_api import (
+    _build_search_queries,
+    _is_ascii,
+    _normalize_query_text,
+    download_and_verify,
 )
 from spotify_slsk import config, soulseek_api
 from spotify_slsk.config import normalize_ext_list
@@ -75,30 +79,30 @@ class TestBuildSearchQueries:
 
 class TestVersionMarker:
     def test_detects_remix(self):
-        assert _has_version_marker("Song (Walker Remix)") == "remix"
+        assert has_version_marker("Song (Walker Remix)") == "remix"
 
     def test_detects_live(self):
-        assert _has_version_marker("Song - Live at the BBC") == "live"
+        assert has_version_marker("Song - Live at the BBC") == "live"
 
     def test_none_for_plain(self):
-        assert _has_version_marker("Song Name") is None
+        assert has_version_marker("Song Name") is None
 
     def test_remix_marker_takes_priority_over_suffix(self):
-        assert _has_version_marker("Song Remix Edit") == "remix"
+        assert has_version_marker("Song Remix Edit") == "remix"
 
 
 class TestVersionMismatch:
     def test_one_side_remix_other_plain(self):
-        assert _version_mismatch("Song", "Song (Remix).mp3")
+        assert version_mismatch("Song", "Song (Remix).mp3")
 
     def test_both_plain(self):
-        assert not _version_mismatch("Song", "Song.mp3")
+        assert not version_mismatch("Song", "Song.mp3")
 
     def test_both_same_marker(self):
-        assert not _version_mismatch("Song (Remix)", "Song (Remix).mp3")
+        assert not version_mismatch("Song (Remix)", "Song (Remix).mp3")
 
     def test_different_markers(self):
-        assert _version_mismatch("Song (Remix)", "Song (Live).mp3")
+        assert version_mismatch("Song (Remix)", "Song (Live).mp3")
 
 
 class TestEffectiveMp3Kbps:
@@ -220,23 +224,23 @@ class TestSortCandidates:
 
 class TestVersionTier:
     def test_extended_mix(self):
-        assert _version_tier("Heart To Find (Extended Mix).flac") == 0
+        assert version_tier("Heart To Find (Extended Mix).flac") == 0
 
     def test_extended_version(self):
-        assert _version_tier("Track - Extended Version.mp3") == 0
+        assert version_tier("Track - Extended Version.mp3") == 0
 
     def test_original_mix(self):
-        assert _version_tier("Heart To Find - Original Mix.flac") == 1
+        assert version_tier("Heart To Find - Original Mix.flac") == 1
 
     def test_original_version(self):
-        assert _version_tier("Track (Original Version).flac") == 1
+        assert version_tier("Track (Original Version).flac") == 1
 
     def test_plain_title(self):
-        assert _version_tier("Heart To Find.flac") == 2
+        assert version_tier("Heart To Find.flac") == 2
 
     def test_remix_is_not_extended(self):
         # A remix is a different track rewrite, not the DJ extended cut.
-        assert _version_tier("Track (Walker Remix).flac") == 2
+        assert version_tier("Track (Walker Remix).flac") == 2
 
 
 class TestSortCandidatesVersionTier:

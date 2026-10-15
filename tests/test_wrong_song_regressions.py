@@ -10,7 +10,8 @@ os.environ.setdefault("SLSKD_HOST_URL", "http://localhost")
 os.environ.setdefault("SLSKD_API_KEY", "x")
 
 from spotify_slsk import soulseek_api
-from spotify_slsk.soulseek_api import _remote_basename, extract_candidates, filename_match
+from spotify_slsk.matching.candidates import extract_candidates, filename_match
+from spotify_slsk.slskd.models import remote_basename
 
 
 def _results(*filenames, user="user1"):
@@ -27,13 +28,13 @@ def _results(*filenames, user="user1"):
 
 class TestRemotePathSplitting:
     def test_backslash_path(self):
-        assert _remote_basename(
+        assert remote_basename(
             "@@abc\\music\\Рахманинов\\Vespers (All-Night Vigil)\\06 Ave Maria.flac"
         ) == "06 Ave Maria.flac"
 
     def test_forward_slash_and_bare(self):
-        assert _remote_basename("a/b/c.mp3") == "c.mp3"
-        assert _remote_basename("c.mp3") == "c.mp3"
+        assert remote_basename("a/b/c.mp3") == "c.mp3"
+        assert remote_basename("c.mp3") == "c.mp3"
 
     def test_folder_names_are_not_scored_as_title(self):
         # Expected "AVE - All Night": the folder "All-Night Vigil" used to
@@ -199,7 +200,7 @@ class TestVersionSymmetry:
         )) == 1
 
 
-from spotify_slsk.app import _titles_token_equivalent, score_track_match  # noqa: E402
+from spotify_slsk.matching.tracks import _titles_token_equivalent, score_track_match  # noqa: E402
 
 MIN_MATCH = 0.62  # app default
 
@@ -279,7 +280,7 @@ class TestArtistSplitting:
         assert score >= MIN_MATCH, reason
 
     def test_separators(self):
-        from spotify_slsk.app import _split_artists
+        from spotify_slsk.matching.tracks import _split_artists
 
         assert _split_artists("A; B") == {"a", "b"}
         assert _split_artists("A x B") == {"a", "b"}

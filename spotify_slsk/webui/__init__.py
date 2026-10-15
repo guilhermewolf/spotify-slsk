@@ -32,7 +32,7 @@ from .. import db
 from .. import runtime_state
 from .. import soulseek_api
 from ..config import SETTINGS_SPEC, validate_setting
-from ..soulseek_api import fmt_duration
+from ..utils import fmt_duration
 from ..utils import get_playlist_id, sanitize_table_name
 
 

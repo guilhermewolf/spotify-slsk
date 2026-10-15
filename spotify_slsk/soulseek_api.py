@@ -2,7 +2,6 @@ import os
 import time
 import logging
 import re
-import unicodedata
 
 import slskd_api
 
@@ -14,6 +13,12 @@ from .db import (
     record_history,
 )
 from . import config, runtime_state
+from .matching.candidates import (
+    evaluate_candidates,
+    sort_candidates,
+    summarize_evaluation,
+)
+from .slskd.models import remote_basename
 
 _client = None
 _shutdown_event = None
@@ -188,457 +193,6 @@ def perform_search(artist, title, album=None, timeout=60):
     return []
 
 
-def _remote_basename(path):
-    """Basename of a peer path. slskd paths use backslashes, which
-    os.path.basename does not split on Linux — so the whole share path,
-    folder names included, used to be scored and blacklisted."""
-    return re.split(r"[\\/]", path or "")[-1]
-
-
-def clean_filename(filename):
-    """
-    Clean a filename for fuzzy matching: replace brackets/parens with spaces
-    (keep their content), normalize separators, drop the extension and
-    obvious tag noise.
-
-    We *don't* strip parenthesized content because real filenames embed
-    version info there ("(Walker & Royce Remix)", "(Extended Mix)") that the
-    title scorer needs to see. token_set_ratio is robust to extra tokens
-    like a leftover "[FLAC]", so leaving them in costs us nothing.
-    """
-    filename = re.sub(r"[\[\]\(\)\{\}]", " ", filename)
-    filename = re.sub(
-        r"\b\d{1,2}bit\b|\b\d{1,3}\.\d{1,2}kHz\b|\b\d{4}\b",
-        "",
-        filename,
-        flags=re.IGNORECASE,
-    )
-    filename = os.path.splitext(filename)[0]
-    filename = filename.replace("_", " ").replace("-", " ")
-    filename = " ".join(filename.split())
-    return filename.lower().strip()
-
-
-def _infer_bitrate_from_name(name: str):
-    """
-    Try to infer bitrate from the filename text. Returns kbps or None.
-    """
-    text = name.lower()
-    m = re.search(
-        r"(?<!\d)(320|256|224|192|160|128)\s*(k|kbps)?(?!\d)",
-        text,
-    )
-    if not m:
-        return None
-    try:
-        return int(m.group(1))
-    except Exception:
-        return None
-
-
-# Words that make a recording a *different* version. Compared as a set on both
-# sides, so "Dustup (Original Mix)" can't stand in for "Dustup (Mefjus Remix)"
-# and vice versa. Neutral variants (original/extended mix, radio edit,
-# remastered, album version) are deliberately absent — `_version_tier` ranks
-# those instead.
-_VERSION_KEYWORDS = (
-    "remix", "dub", "vip", "club mix", "live", "acoustic", "unplugged",
-    "instrumental", "karaoke", "cover", "sped up", "slowed", "nightcore", "8d",
-    "bootleg", "rework", "remake", "reedit", "flip", "mashup", "acapella",
-    "hotmix", "megamix",
-)
-_VERSION_WORDS = frozenset(w for kw in _VERSION_KEYWORDS for w in kw.split())
-# "<word> Mix" / "<word> Edit" is a named version ("Kris M Edit", "Strings
-# Mix") unless the word is one of these neutral qualifiers.
-_NEUTRAL_QUALIFIERS = frozenset({
-    "original", "extended", "radio", "album", "single", "short", "clean",
-    "explicit", "main", "full", "long",
-})
-
-
-def _version_keywords(text, artist="") -> frozenset:
-    """Version keywords in `text`, ignoring words of the credited artists
-    (so an artist called "Dub FX" doesn't make every file a dub)."""
-    t = " " + _fold(text) + " "
-    for name in _artist_names(artist):
-        t = t.replace(f" {name} ", " ")
-    found = {kw for kw in _VERSION_KEYWORDS if f" {kw} " in t}
-    for word, kind in re.findall(r"(?<= )(\w+) (mix|edit)(?= )", t):
-        if word not in _NEUTRAL_QUALIFIERS and word not in _VERSION_WORDS:
-            found.add(f"named {kind}")
-    return frozenset(found)
-
-
-def _has_version_marker(text: str):
-    found = _version_keywords(text)
-    return next((kw for kw in _VERSION_KEYWORDS if kw in found), None)
-
-
-def _version_mismatch(expected_title: str, file_title: str, artist: str = "") -> bool:
-    """True when the two sides declare different sets of version keywords."""
-    return _version_keywords(expected_title, artist) != _version_keywords(file_title, artist)
-
-
-# DJ-oriented version preference. Lower = more preferred. Extended Mix is the
-# DJ-friendly long cut; Original Mix is the producer's studio version; everything
-# else (radio edits, plain titles) is the fallback. Note: this is intentionally
-# orthogonal to `_VERSION_KEYWORDS` / `_version_mismatch` — those reject *wrong*
-# versions (e.g. Live when expecting Studio); this only ranks compatible ones.
-def _version_tier(text: str) -> int:
-    t = (text or "").lower()
-    if re.search(r"\bextended\s+(mix|version|edit)\b", t):
-        return 0
-    if re.search(r"\boriginal\s+(mix|version)\b", t):
-        return 1
-    return 2
-
-
-def _duration_off(diff_seconds, longer_ok=False) -> bool:
-    """True when a file's length is outside config.MAX_DURATION_DIFF_SECONDS of the
-    expected one. A longer-cut version may run long but never short."""
-    if longer_ok and diff_seconds > 0:
-        return False
-    return abs(diff_seconds) > config.MAX_DURATION_DIFF_SECONDS
-
-
-def fmt_duration(seconds) -> str:
-    """Seconds -> "m:ss"."""
-    seconds = int(round(seconds or 0))
-    return f"{seconds // 60}:{seconds % 60:02d}"
-
-
-def _effective_mp3_kbps(size_bytes, length_sec):
-    if not size_bytes or not length_sec or length_sec <= 0:
-        return None
-    try:
-        return int((size_bytes * 8) / length_sec / 1000)
-    except Exception:
-        return None
-
-
-# --- Candidate title/artist matching ------------------------------------------
-# The old scorer ran token_set_ratio over the whole name, which is 100 whenever
-# every expected title word appears *anywhere*, and let one shared word clear
-# the artist bar ("super flu" vs "...Super Supergirl" = 71). Title and artist
-# are now judged separately against the basename.
-
-# Neutral release words: not required when matching the expected title.
-_NEUTRAL_TITLE_WORDS = frozenset({
-    "original", "extended", "radio", "album", "single", "mix", "edit",
-    "version", "remastered", "remaster", "mono", "stereo", "and",
-})
-# Filename noise that is neither title nor artist.
-_FILENAME_NOISE = frozenset({
-    "flac", "mp3", "wav", "aiff", "m4a", "ogg", "kbps", "web", "cd",
-    "vinyl", "lossless", "hq", "bit", "khz",
-})
-# Share of the basename's title-ish words that must be the expected title.
-# Rejects "Dream" -> "A Real Bad Dream" while tolerating an album name in the
-# filename ("Daft Punk - Random Access Memories - 08 - Get Lucky" = 0.4).
-MIN_TITLE_COVERAGE = 0.4
-# An artist matched with spaces removed ("FormatB" for "Format:B") must be at
-# least this long, so short names can't hide inside other words.
-MIN_COMPACT_ARTIST_LEN = 6
-
-_FEAT_RE = re.compile(
-    r"[\(\[]\s*(?:feat|ft|featuring)\b[^\)\]]*[\)\]]"
-    r"|\b(?:feat|ft|featuring)\b.*?(?=\s[-–—]\s|[\(\[]|$)",
-    re.IGNORECASE,
-)
-_BRACKETS_RE = re.compile(r"[\(\[\{][^\)\]\}]*[\)\]\}]")
-# Credit separators. "/" is deliberately absent: it is part of names (AC/DC).
-_ARTIST_SPLIT_RE = re.compile(
-    r"\s*(?:,|;|&|\bfeat\b\.?|\bft\b\.?|\bfeaturing\b"
-    r"|\s+x\s+|\s+vs\b\.?|\s+with\s+|\s+and\s+)\s*",
-    re.IGNORECASE,
-)
-
-
-def _fold(text) -> str:
-    """Lowercase, strip accents, collapse every non-alphanumeric run to a
-    space, and spell "rmx" as "remix"."""
-    t = unicodedata.normalize("NFKD", text or "")
-    t = "".join(c for c in t if not unicodedata.combining(c)).lower()
-    return " ".join("remix" if w == "rmx" else w for w in re.findall(r"[^\W_]+", t))
-
-
-def _expected_title_tokens(title) -> set:
-    """Words a file must contain to be this title. Featured artists, neutral
-    release words and bare numbers (years) are not required."""
-    folded = _fold(_FEAT_RE.sub(" ", title or "")).split()
-    core = {t for t in folded if t not in _NEUTRAL_TITLE_WORDS and not t.isdigit()}
-    return core or {t for t in folded if not t.isdigit()} or set(folded)
-
-
-def _artist_names(artist_str) -> list:
-    """The full credit plus each credited artist, folded, "The " dropped."""
-    names = []
-    for part in [artist_str or ""] + _ARTIST_SPLIT_RE.split(artist_str or ""):
-        name = _fold(part)
-        if name.startswith("the "):
-            name = name[4:]
-        if name and name not in names:
-            names.append(name)
-    return names
-
-
-def _artist_in(name, folded_text) -> bool:
-    """Whole-name match: the artist's words as a contiguous run, never a
-    single shared word ("kris m" is not in "kris kross")."""
-    if f" {name} " in f" {folded_text} ":
-        return True
-    compact = name.replace(" ", "")
-    return len(compact) >= MIN_COMPACT_ARTIST_LEN and compact in folded_text.replace(" ", "")
-
-
-def _title_coverage(expected_tokens, stem, artist_names, folder_tokens) -> float:
-    """0.0 unless every expected title word is in the basename; otherwise the
-    share of the basename's title-ish words (outside brackets, minus artists,
-    featured credits, numbers, noise and folder words) that are the title.
-    A " - " segment naming an expected artist is the artist credit and is
-    dropped whole, co-credits included ("Daft Punk, Pharrell Williams - ...")."""
-    if not expected_tokens or not expected_tokens <= set(_fold(stem).split()):
-        return 0.0
-    segments = re.split(r"\s+[-–—]\s+", _BRACKETS_RE.sub(" ", _FEAT_RE.sub(" ", stem)))
-    outside = " "
-    for seg in segments:
-        folded = " " + _fold(seg) + " "
-        credit = any(_artist_in(n, folded.strip()) for n in artist_names)
-        if credit and not expected_tokens <= set(folded.split()):
-            continue  # pure artist credit
-        for name in artist_names:
-            folded = folded.replace(f" {name} ", " ")
-        outside += folded
-    extras = [
-        t for t in outside.split()
-        if t not in expected_tokens
-        and t not in _NEUTRAL_TITLE_WORDS
-        and t not in _FILENAME_NOISE
-        and t not in folder_tokens
-        and not t.isdigit()
-    ]
-    return len(expected_tokens) / (len(expected_tokens) + len(extras))
-
-
-def filename_match(path, expected_title, expected_artist):
-    """Judge a peer path's name against the expected track with the strict
-    wrong-song rules. Returns (title_coverage, reason); reason is None when
-    the name is this track.
-
-    Title evidence comes from the basename only; artist evidence may also
-    come from the folders (shares are laid out Artist\\Album\\NN - Title).
-    Folder text never supplies title words - that is how a "Vespers
-    (All-Night Vigil)" folder matched "All Night".
-    """
-    base = _remote_basename(path)
-    stem = os.path.splitext(base)[0]
-    folder_folded = _fold(" ".join(re.split(r"[\\/]", path or "")[:-1]))
-    artist_names = _artist_names(expected_artist)
-    title_tokens = _expected_title_tokens(expected_title)
-    # A basename that repeats its album folder ("Artist_Album Name_01_Song")
-    # must still name the title outside that phrase: the folder-word exclusion
-    # below would otherwise let "If Love Is a Skill & Georgia_01_If Love Is a
-    # Skill" pass for "Georgia".
-    padded = f" {_fold(stem)} "
-    for folder in re.split(r"[\\/]", path or "")[:-1]:
-        phrase = _fold(folder)
-        if phrase and set(phrase.split()) != title_tokens and f" {phrase} " in padded:
-            padded = padded.replace(f" {phrase} ", " ")
-            if not title_tokens <= set(padded.split()):
-                return 0.0, "title words only in the album/folder name"
-    coverage = _title_coverage(
-        title_tokens, stem, artist_names,
-        set(folder_folded.split()),
-    )
-    base_folded = _fold(stem)
-    if coverage == 0.0:
-        return coverage, "title words missing from filename"
-    if coverage < MIN_TITLE_COVERAGE:
-        return coverage, f"title coverage {coverage:.2f} < {MIN_TITLE_COVERAGE}"
-    if not any(
-        _artist_in(n, base_folded) or _artist_in(n, folder_folded)
-        for n in artist_names
-    ):
-        return coverage, "artist not in filename or folder"
-    # A different version (remix/live/... on one side only) is never usable.
-    if _version_mismatch(expected_title, stem, expected_artist):
-        got = ", ".join(sorted(_version_keywords(stem, expected_artist))) or "none"
-        want = ", ".join(sorted(_version_keywords(expected_title, expected_artist))) or "none"
-        return coverage, f"version mismatch ({got} vs expected {want})"
-    return coverage, None
-
-
-def evaluate_candidates(
-    search_results,
-    expected_title,
-    expected_artist,
-    max_version_tier=None,
-    expected_duration_ms=None,
-    is_blocked=None,
-):
-    """
-    Judge every file in slskd search results against the expected track.
-
-    Returns one dict per file (in response order) carrying the candidate
-    fields plus ``accepted`` and, when rejected, a short human ``reason``
-    ("format not allowed: .wma", "bitrate 192 < 320", ...). Unknown MP3
-    bitrates are allowed (slskd often reports None); files are hard-rejected
-    only when we *know* quality is too low.
-
-    `max_version_tier`, when set, rejects anything not *strictly better*
-    (used by the upgrade pass). `expected_duration_ms` (Spotify) rejects
-    files whose reported length is more than config.MAX_DURATION_DIFF_SECONDS off.
-    `is_blocked(username, filename)` (see db.load_blocklist) rejects
-    blocklisted peer files and banned peers. Title/artist/version use the
-    strict rules in `filename_match`.
-    """
-    evaluated = []
-
-    for result in search_results:
-        user = result.get("username", "unknown")
-        user_upload_speed = result.get("uploadSpeed", 0) or 0
-
-        for file in result.get("files", []):
-            filename = file.get("filename")
-            if not filename:
-                continue
-
-            ext = os.path.splitext(filename)[1].lower()
-            # slskd sends camelCase "bitRate" (only for lossy files); the old
-            # lowercase read was always None, so the floor below never applied.
-            reported_bitrate = file.get("bitRate")
-            length_sec = file.get("length")
-            size_bytes = file.get("size")
-            base = _remote_basename(filename)
-            inferred_bitrate = _infer_bitrate_from_name(base)
-            effective_bitrate = (
-                reported_bitrate if reported_bitrate is not None else inferred_bitrate
-            )
-            effective_mp3 = (
-                _effective_mp3_kbps(size_bytes, length_sec) if ext == ".mp3" else None
-            )
-            entry = {
-                "user": user,
-                "user_upload_speed": user_upload_speed,
-                # Full peer path: slskd needs it to enqueue the transfer, and
-                # it is the blocklist key. `basename` is what `_tried` stores.
-                "filename": filename,
-                "basename": base,
-                "size": size_bytes,
-                "bitrate": effective_bitrate,
-                "effective_mp3": effective_mp3,
-                "ext": ext,
-                "length": length_sec,
-                "sample_rate": file.get("sampleRate"),
-                "bit_depth": file.get("bitDepth"),
-                "free_slot": result.get("hasFreeUploadSlot"),
-                "queue_length": result.get("queueLength"),
-                "title_coverage": None,
-                "version_tier": _version_tier(base),
-                "accepted": False,
-                "reason": None,
-            }
-            evaluated.append(entry)
-
-            if is_blocked is not None and is_blocked(user, filename):
-                entry["reason"] = "blocklisted"
-            elif ext not in config.PREFERRED_FORMATS:
-                entry["reason"] = f"format not allowed: {ext or '(none)'}"
-            # Reject MP3s whose reported/inferred bitrate is known-low.
-            elif ext == ".mp3" and effective_bitrate is not None and effective_bitrate < 320:
-                entry["reason"] = f"bitrate {effective_bitrate} < 320"
-            # Reject MP3s whose size/duration shows they're effectively below the
-            # configured floor — catches 128 kbps files retagged as 320.
-            elif (
-                ext == ".mp3"
-                and effective_mp3 is not None
-                and effective_mp3 < config.MIN_EFFECTIVE_MP3_KBPS
-            ):
-                entry["reason"] = (
-                    f"effective bitrate {effective_mp3} < {config.MIN_EFFECTIVE_MP3_KBPS}"
-                )
-            elif (
-                config.MAX_DURATION_DIFF_SECONDS > 0
-                and expected_duration_ms
-                and length_sec
-                and _duration_off(
-                    length_sec - expected_duration_ms / 1000,
-                    # Extended/Original Mixes are the long cuts the version
-                    # tiers prefer; Spotify often lists the radio edit.
-                    longer_ok=_version_tier(base) < _version_tier(expected_title),
-                )
-            ):
-                entry["reason"] = (
-                    f"duration {fmt_duration(length_sec)} vs "
-                    f"{fmt_duration(expected_duration_ms / 1000)}"
-                )
-            if entry["reason"]:
-                logging.debug(f"Skipped {filename}: {entry['reason']}")
-                continue
-
-            title_coverage, reason = filename_match(filename, expected_title, expected_artist)
-            entry["title_coverage"] = round(title_coverage, 2)
-            if reason:
-                entry["reason"] = reason
-            elif max_version_tier is not None and entry["version_tier"] >= max_version_tier:
-                entry["reason"] = "not a better version than the current file"
-            else:
-                entry["accepted"] = True
-            if entry["reason"]:
-                logging.debug(f"Skipped {filename}: {entry['reason']}")
-
-    return evaluated
-
-
-def extract_candidates(search_results, expected_title, expected_artist):
-    """Return only the accepted candidates from `evaluate_candidates`."""
-    return [
-        c
-        for c in evaluate_candidates(search_results, expected_title, expected_artist)
-        if c["accepted"]
-    ]
-
-
-def summarize_evaluation(evaluated, limit=50):
-    """Compact form of an evaluation for the per-track search history."""
-    rejected = [c for c in evaluated if not c["accepted"]]
-    return {
-        "candidate_count": len(evaluated) - len(rejected),
-        "rejected_count": len(rejected),
-        "rejections": [
-            {"user": c["user"], "filename": c["filename"], "reason": c["reason"]}
-            for c in rejected[:limit]
-        ],
-    }
-
-
-def sort_candidates(candidates):
-    """
-    Sort by DJ-version tier (Extended Mix > Original Mix > other), then by
-    preferred extension, then bitrate desc (unknown last), then peer upload
-    speed desc.
-    """
-    def fmt_rank(ext: str) -> int:
-        return (
-            config.PREFERRED_FORMATS.index(ext)
-            if ext in config.PREFERRED_FORMATS
-            else len(config.PREFERRED_FORMATS)
-        )
-
-    def bitrate_rank(bps_k) -> int:
-        return bps_k or 0
-
-    return sorted(
-        candidates,
-        key=lambda c: (
-            c.get("version_tier", 2),
-            fmt_rank(c["ext"]),
-            -bitrate_rank(c.get("bitrate")),
-            -(c.get("user_upload_speed") or 0),
-        ),
-    )
-
-
 def interactive_search(
     artist, title, album=None, duration_ms=None, is_blocked=None, timeout=60
 ):
@@ -737,7 +291,7 @@ def download_and_verify(
     tried_filenames = set(get_tried_files(conn, playlist_name, track_id))
 
     for candidate in sorted_candidates:
-        basename = _remote_basename(candidate["filename"])
+        basename = remote_basename(candidate["filename"])
 
         if basename in tried_filenames:
             logging.info(f"Skipping previously tried file: {basename}")
@@ -781,7 +335,7 @@ def grab_candidate(candidate, conn, playlist_name, track_id, source="auto"):
     global last_download
     candidate.pop("failure", None)
     candidate.pop("peer_fault", None)
-    basename = _remote_basename(candidate["filename"])
+    basename = remote_basename(candidate["filename"])
     logging.info(
         f"Attempting download: {candidate['filename']} from {candidate['user']}"
     )
@@ -950,8 +504,8 @@ def wait_for_completion(candidate, timeout=300):
         for directory in downloads.get("directories", []):
             for file in directory.get("files", []):
                 if (
-                    _remote_basename(file["filename"])
-                    == _remote_basename(candidate["filename"])
+                    remote_basename(file["filename"])
+                    == remote_basename(candidate["filename"])
                     and file["size"] == candidate["size"]
                 ):
                     transfer_id = file["id"]
@@ -978,7 +532,7 @@ def wait_for_completion(candidate, timeout=300):
                     logging.debug(f"State for {file['filename']}: {state}")
                     outcome = _transfer_outcome(state)
                     if outcome == "succeeded":
-                        filename = _remote_basename(candidate["filename"])
+                        filename = remote_basename(candidate["filename"])
                         real_path = _await_completed_file(filename)
                         logging.info(f"File found: {real_path}")
                         if real_path and _wait_for_external_processing(real_path):
