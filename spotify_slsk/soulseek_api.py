@@ -795,12 +795,19 @@ def _candidate_history(candidate) -> dict:
 def grab_candidate(candidate, conn, playlist_name, track_id, source="auto"):
     """Enqueue one candidate, wait for it, and return the local path or None.
 
-    A failed transfer or a file that never appears is remembered in the
-    track's `_tried` table AND blocklisted for every track. On success the
-    candidate is stashed in `last_download`. `source` ("auto"/"manual") is
-    recorded in history.
+    Any failure is remembered in the track's `_tried` table and history.
+    Only a definitive peer-file fault — slskd reporting the transfer
+    failed/errored/rejected/aborted (`candidate["peer_fault"]`, set by
+    wait_for_completion) — also blocklists the file for every track. Our
+    own wait timeout, a "Queued, Remotely" stall, slskd not listing the
+    transfer yet, a file we could not find afterwards, or a shutdown say
+    nothing certain about the peer, and a global ban would outlive the
+    track's retry. On success the candidate is stashed in `last_download`.
+    `source` ("auto"/"manual") is recorded in history.
     """
     global last_download
+    candidate.pop("failure", None)
+    candidate.pop("peer_fault", None)
     basename = _remote_basename(candidate["filename"])
     logging.info(
         f"Attempting download: {candidate['filename']} from {candidate['user']}"
@@ -839,14 +846,15 @@ def grab_candidate(candidate, conn, playlist_name, track_id, source="auto"):
                 track_id=track_id, reason=failure, source=source,
                 **_candidate_history(candidate),
             )
-            add_blocklist(
-                conn,
-                candidate["user"],
-                candidate["filename"],
-                candidate.get("size"),
-                failure,
-                track_id,
-            )
+            if candidate.get("peer_fault"):
+                add_blocklist(
+                    conn,
+                    candidate["user"],
+                    candidate["filename"],
+                    candidate.get("size"),
+                    failure,
+                    track_id,
+                )
     except Exception as e:
         # Don't blacklist on this path: an exception here is usually a
         # transient slskd-API hiccup (JSON decode against an empty body,
@@ -952,6 +960,12 @@ def _transfer_outcome(state):
     return None
 
 
+# Terminal slskd states that are the peer's (or its file's) fault. Other
+# failures — "Completed, TimedOut", "Completed, Cancelled" — may be ours or
+# the network's, so they never blocklist.
+_PEER_FAULT_STATES = ("failed", "errored", "rejected", "aborted")
+
+
 def wait_for_completion(candidate, timeout=300):
     client = get_client()
     logging.debug(f"Waiting for transfer of {candidate['filename']} to complete...")
@@ -1006,6 +1020,9 @@ def wait_for_completion(candidate, timeout=300):
                             f"Transfer failed: {file['filename']} — state: {state}"
                         )
                         candidate["failure"] = f"transfer {state}"
+                        candidate["peer_fault"] = any(
+                            w in state for w in _PEER_FAULT_STATES
+                        )
                         return None
         if time.time() - start > timeout:
             logging.warning(f"Transfer timeout for {candidate['filename']}")

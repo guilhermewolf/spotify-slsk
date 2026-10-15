@@ -749,7 +749,8 @@ class TestBlocklistFiltering:
         monkeypatch.setattr(soulseek_api, "get_client", lambda: _Client())
 
         def _fail(candidate):
-            candidate["failure"] = "transfer failed"
+            candidate["failure"] = "transfer completed, errored"
+            candidate["peer_fault"] = True
             return None
 
         monkeypatch.setattr(soulseek_api, "wait_for_completion", _fail)
@@ -766,6 +767,79 @@ class TestBlocklistFiltering:
         soulseek_api.download_and_verify(results, "Lose Yourself", "Eminem", conn, "pl_x", "t1")
         assert enqueued == []
         conn.close()
+
+
+class TestBlocklistPolicy:
+    """Only a definitive peer-file fault blocklists globally; everything
+    else goes to the track's _tried list only."""
+
+    def _run(self, monkeypatch, tmp_path, outcome):
+        from spotify_slsk import db as _db
+
+        class _Client:
+            class transfers:
+                @staticmethod
+                def enqueue(username, files):
+                    pass
+
+        monkeypatch.setattr(soulseek_api, "get_client", lambda: _Client())
+        monkeypatch.setattr(soulseek_api, "wait_for_completion", outcome)
+        conn = _db.create_connection(str(tmp_path / "t.db"))
+        _db.create_table(conn, "pl_x")
+        _db.insert_track(conn, "pl_x", ("t1", "Lose Yourself", "Eminem", "Alb"))
+        cand = {"user": "peer", "filename": "@@a\\Eminem - Lose Yourself.flac", "size": 1}
+        assert soulseek_api.grab_candidate(cand, conn, "pl_x", "t1") is None
+        out = (
+            _db.list_blocklist(conn),
+            _db.get_tried_files(conn, "pl_x", "t1"),
+            [r["event"] for r in _db.list_history(conn)],
+        )
+        conn.close()
+        return out
+
+    @pytest.mark.parametrize("state", [
+        "completed, errored", "completed, rejected", "completed, failed", "completed, aborted",
+    ])
+    def test_explicit_peer_failure_blocklists(self, monkeypatch, tmp_path, state):
+        def outcome(c):
+            c["failure"] = f"transfer {state}"
+            c["peer_fault"] = any(w in state for w in soulseek_api._PEER_FAULT_STATES)
+            return None
+
+        blocked, tried, _ = self._run(monkeypatch, tmp_path, outcome)
+        assert len(blocked) == 1 and tried == ["Eminem - Lose Yourself.flac"]
+
+    @pytest.mark.parametrize("failure", [
+        "transfer timed out", "transfer not found in slskd",
+        "file not found after download", None,
+    ])
+    def test_soft_failures_only_go_to_tried(self, monkeypatch, tmp_path, failure):
+        def outcome(c):
+            if failure:
+                c["failure"] = failure
+            return None
+
+        blocked, tried, events = self._run(monkeypatch, tmp_path, outcome)
+        assert blocked == []
+        assert tried == ["Eminem - Lose Yourself.flac"]
+        assert events == ["download_failed"]
+
+    def test_wait_for_completion_flags_only_peer_fault_states(self, monkeypatch):
+        for state, fault in [("Completed, Errored", True), ("Completed, TimedOut", False)]:
+            payload = {"directories": [{"files": [
+                {"id": "x", "filename": "a\\b.flac", "size": 1, "state": state},
+            ]}]}
+
+            class _Client:
+                class transfers:
+                    @staticmethod
+                    def get_downloads(user):
+                        return payload
+
+            monkeypatch.setattr(soulseek_api, "get_client", lambda: _Client())
+            cand = {"user": "u", "filename": "a\\b.flac", "size": 1}
+            assert soulseek_api.wait_for_completion(cand) is None
+            assert cand["peer_fault"] is fault, state
 
 
 class TestInteractiveSearch:
