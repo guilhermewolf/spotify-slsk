@@ -650,6 +650,8 @@ class TestHistoryPage:
         r = client.get("/history?event=grabbed")
         assert b"transfer timed out" not in r.data and b"f.flac" in r.data
         assert client.get("/history?event=bogus&before_id=x").status_code == 200
+        for bad in ("99999999999999999999999", "-5", "0", str(2**63)):
+            assert client.get(f"/history?before_id={bad}").status_code == 200, bad
 
     def test_retry_records_history_and_track_page_shows_it(self, app_tmp, client):
         self._seed(app_tmp)

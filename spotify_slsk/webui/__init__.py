@@ -719,8 +719,12 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
             event = None
         playlist_id = request.args.get("playlist") or None
         try:
-            before_id = int(request.args.get("before_id", "")) or None
+            before_id = int(request.args.get("before_id", ""))
         except ValueError:
+            before_id = None
+        # SQLite integers are 64-bit: a larger bound raises OverflowError
+        # (500). Ids are positive, so anything above the max is "no bound".
+        if before_id is not None and not 0 < before_id < 2**63:
             before_id = None
         limit = 200
         rows = db.list_history(
