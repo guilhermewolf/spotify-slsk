@@ -92,7 +92,7 @@ def classify(
 def describe(key: str | None, bitrate: int | None = None) -> str:
     """Human label; below-floor lossy rungs carry their real bitrate
     ("MP3 256") because the rung name alone ("MP3 <320") says less."""
-    if key is None:
+    if key not in BY_KEY:
         return "unknown"
     if key in ("MP3_LOW", "AAC_LOW", "MP3_V0") and bitrate:
         return f"{BY_KEY[key].label.split()[0]} {bitrate}" + (" (V0)" if key == "MP3_V0" else "")
@@ -155,7 +155,7 @@ _VERDICT_DEMOTION = {
 def effective_quality(key: str | None, audio_check: str | None) -> str | None:
     """A file's quality after its lossless verdict: a SUSPECT/FAKE "FLAC"
     is not true lossless and ranks as the lossy source it came from."""
-    if key is None or not BY_KEY[key].lossless:
+    if key not in BY_KEY or not BY_KEY[key].lossless:
         return key
     demoted = _VERDICT_DEMOTION.get(audio_check or "")
     if demoted is None:
