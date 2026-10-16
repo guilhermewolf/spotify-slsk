@@ -7,7 +7,7 @@ import time
 
 from flask import current_app, flash, g, request
 
-from .. import db
+from .. import db, healthchecks
 
 
 def dir_size(path: str) -> int:
@@ -63,6 +63,34 @@ def human_bytes(n: float) -> str:
         if n < 1024:
             return f"{n:.1f} {unit}"
     return f"{n:.1f} PiB"
+
+
+def shell_health(snapshot: dict) -> dict:
+    """The sidebar badge: the worst of the structured checks (the same list
+    as /system/status), with a stale heartbeat or wrong schema from
+    `snapshot` counted as an error. Cheap: local checks are a stat() or a
+    settings read each, and the slskd/Spotify results are the daemon's
+    cached ones - nothing remote happens per request."""
+    try:
+        checks = healthchecks.collect(g.conn)
+    except Exception as e:  # a broken check must not take the page down
+        checks = [{"name": "checks", "status": healthchecks.ERROR, "message": type(e).__name__}]
+    bad = [c for c in checks if c["status"] != healthchecks.OK]
+    if not snapshot.get("ok") and not any(c["name"] == "heartbeat" for c in bad):
+        bad.append({"name": "daemon", "status": healthchecks.ERROR,
+                    "message": snapshot.get("reason", "")})
+    if any(c["status"] == healthchecks.ERROR for c in bad):
+        level, word = "error", "Problem"
+    elif bad:
+        level, word = "warn", "Attention"
+    else:
+        level, word = "ok", "Healthy"
+    return {
+        "level": level,
+        "label": f"{word} ({len(bad)})" if bad else word,
+        "title": "; ".join(f"{c['name']}: {c['message']}" for c in bad)
+        or snapshot.get("reason", ""),
+    }
 
 
 def group_by_reason(candidates: list[dict]) -> list[tuple[str, list[dict]]]:

@@ -353,8 +353,10 @@ nav ul.tabs:first-of-type, nav ul.tabs:last-of-type { margin-left: 0; margin-rig
   background: var(--c-ok);
   box-shadow: 0 0 0 3px var(--c-ok-bg);
 }
-.health-bad { color: var(--c-bad); }
-.health-bad .dot { background: var(--c-bad); box-shadow: 0 0 0 3px var(--c-bad-bg); }
+.health-error { color: var(--c-bad); }
+.health-error .dot { background: var(--c-bad); box-shadow: 0 0 0 3px var(--c-bad-bg); }
+.health-warn { color: var(--c-warn); }
+.health-warn .dot { background: var(--c-warn); box-shadow: 0 0 0 3px var(--c-warn-bg); }
 .shell-activity {
   display: flex;
   align-items: baseline;

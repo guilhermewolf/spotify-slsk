@@ -38,6 +38,7 @@ from .helpers import (
     group_by_reason,
     health_snapshot,
     human_bytes,
+    shell_health,
 )
 
 # Reserved settings key holding the generated Flask secret. It is not in
@@ -210,8 +211,10 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
         # depend on a single route remembering to pass it.
         # The sidebar also shows what the daemon is doing (static/shell.js
         # keeps it fresh from /activity.json); an in-process dict read.
+        snapshot = health_snapshot()
         return {
-            "health": health_snapshot(),
+            "health": snapshot,
+            "shell_health": shell_health(snapshot),
             "auth_user": auth.current_user(),
             "shell_activity": runtime_state.get_activity(),
         }

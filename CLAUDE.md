@@ -39,7 +39,7 @@ and CI all agree; the Makefile defaults to `python3.12`). Individual targets:
   findings rather than adding ignores.
 - `make typecheck` — mypy over `spotify_slsk/` (`ignore_missing_imports`,
   `check_untyped_defs`). Every public function is annotated; keep it that way.
-- `make test` — 955 tests. Fast (~10s); no network, no external services. The
+- `make test` — 959 tests. Fast (~10s); no network, no external services. The
   real-FLAC decode tests need the `flac` CLI (CI apt-installs it) and skip with
   a reason without it.
 - `make audit` — `pip-audit` against the pinned `requirements.txt`. Advisories
@@ -215,7 +215,7 @@ Component conventions:
 Library health, Rename files) · Activity (Queue, History, Blocklist) · System
 (Status, Tasks, Logs, Settings). Templates mark the current item with
 `{% set active_page = ... %}` (plus `system_tab` for Status/Tasks). The sidebar
-foot shows the health badge (links to `/system/status`), what the daemon is doing
+foot shows the health badge (`helpers.shell_health`: the worst of the `/system/status` checks, cached remote results only, plus a stale heartbeat as an error; "Healthy" / "Attention (n)" / "Problem (n)", links to `/system/status`), what the daemon is doing
 (`shell_activity` from the context processor, refreshed by `static/shell.js`
 from `/activity.json`), the theme toggle and Log out. Below 52rem it becomes a top
 bar; "Menu" targets the fixed `#menu` anchor and CSS opens the panel with

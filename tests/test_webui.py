@@ -1121,3 +1121,37 @@ class TestQualityProfileForm:
     def test_requires_csrf(self, client):
         assert client.post("/settings/quality", data={"allowed": ["FLAC_16"],
                                                        "cutoff": "FLAC_16"}).status_code == 400
+
+
+class TestSidebarHealthBadge:
+    """The badge said "Healthy" while the dashboard listed six failing
+    checks: it read only the heartbeat. It now shows the worst check."""
+
+    def _page(self, client, monkeypatch, checks):
+        from spotify_slsk import healthchecks
+        monkeypatch.setattr(healthchecks, "collect", lambda conn: checks)
+        return client.get("/system/tasks").data.decode()
+
+    def test_error_check_wins(self, client, monkeypatch):
+        page = self._page(client, monkeypatch, [
+            {"name": "slskd", "status": "error", "message": "SLSKD_API_KEY is not set"},
+            {"name": "ui_auth", "status": "warn", "message": "open"},
+            {"name": "flac_binary", "status": "ok", "message": "fine"}])
+        assert "health-error" in page and "Problem (2)" in page
+        assert "Healthy" not in page
+
+    def test_warn_only_is_attention(self, client, monkeypatch):
+        page = self._page(client, monkeypatch, [{"name": "ui_auth", "status": "warn", "message": "open"}])
+        assert "health-warn" in page and "Attention (1)" in page
+
+    def test_all_ok_is_healthy(self, client, monkeypatch):
+        page = self._page(client, monkeypatch, [{"name": "flac_binary", "status": "ok", "message": "fine"}])
+        assert "health-ok" in page and ">Healthy<" in page
+
+    def test_stale_heartbeat_is_an_error(self, client, monkeypatch, tmp_path):
+        hb = tmp_path / "hb"
+        hb.write_text("")
+        os.utime(hb, (0, 0))
+        monkeypatch.setenv("HEARTBEAT_FILE", str(hb))
+        page = self._page(client, monkeypatch, [])
+        assert "health-error" in page and "Problem (1)" in page

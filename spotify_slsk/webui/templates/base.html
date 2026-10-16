@@ -53,11 +53,11 @@
         <a class="brand" href="{{ url_for('playlists.dashboard') }}">
           <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>spotify-slsk
         </a>
-        {% if health is defined and health %}
-        <a class="health health-compact health-{{ 'ok' if health.ok else 'bad' }}"
-           href="{{ url_for('system.status_page') }}" title="{{ health.reason }}">
+        {% if shell_health is defined and shell_health %}
+        <a class="health health-compact health-{{ shell_health.level }}"
+           href="{{ url_for('system.status_page') }}" title="{{ shell_health.title }}">
           <span class="dot" aria-hidden="true"></span>
-          <span class="visually-hidden">{{ 'Healthy' if health.ok else 'Degraded' }}</span>
+          <span class="visually-hidden">{{ shell_health.label }}</span>
         </a>
         {% endif %}
         <a class="menu-toggle" href="#menu" aria-controls="site-menu">Menu</a>
@@ -79,11 +79,11 @@
         </nav>
 
         <div class="shell-status">
-          {% if health is defined and health %}
-          <a class="health health-{{ 'ok' if health.ok else 'bad' }}"
-             href="{{ url_for('system.status_page') }}" title="{{ health.reason }}">
+          {% if shell_health is defined and shell_health %}
+          <a class="health health-{{ shell_health.level }}"
+             href="{{ url_for('system.status_page') }}" title="{{ shell_health.title }}">
             <span class="dot" aria-hidden="true"></span>
-            <span>{{ 'Healthy' if health.ok else 'Degraded' }}</span>
+            <span>{{ shell_health.label }}</span>
           </a>
           {% endif %}
           {% if shell_activity is defined and shell_activity %}
