@@ -566,6 +566,7 @@ article > footer {
 .tabs li { list-style: none; margin: 0; padding: 0; }
 .tabs a {
   display: block;
+  margin: 0 0 -1px;
   padding: var(--s-2) 0;
   margin-bottom: -1px;
   border-bottom: 2px solid transparent;
@@ -573,6 +574,7 @@ article > footer {
   text-decoration: none;
   font-weight: 500;
 }
+.tabs li + li { margin-left: var(--s-4); }
 .tabs a:hover { color: var(--c-text); }
 .tabs a[aria-current="true"] { color: var(--c-text); border-bottom-color: var(--c-accent); font-weight: 600; }
 
@@ -584,7 +586,8 @@ article > footer {
   align-items: center;
   margin: 0 0 var(--s-4);
 }
-.filter-form input, .filter-form select, .toolbar input, .toolbar select {
+.filter-form input:not([type="checkbox"]), .filter-form select,
+.toolbar input:not([type="checkbox"]), .toolbar select {
   margin: 0;
   width: auto;
 }
@@ -1226,6 +1229,8 @@ a.track-title:hover { color: var(--c-accent); text-decoration: underline; }
 }
 .health-count strong { font-size: var(--t-md); font-variant-numeric: tabular-nums; }
 .health-count:hover { border-color: var(--c-muted); }
+.health-count.is-zero { color: var(--c-muted); }
+.health-count.is-zero strong { font-weight: 500; }
 .health-count.active { border-color: var(--c-accent); background: var(--c-accent-soft); color: var(--c-accent); }
 .evidence {
   display: grid;

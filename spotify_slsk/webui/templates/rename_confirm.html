@@ -5,12 +5,13 @@
 
 <a class="back-link" href="{{ url_for('library.rename_page') }}">&larr; Rename files</a>
 
+<div class="page-head"><div>
 <h1>Rename {{ chosen|length }} file{{ '' if chosen|length == 1 else 's' }}?</h1>
 <p class="subtle">
   Template <code>{{ template }}</code>. The daemon renames each file in its own folder at the
   start of the next cycle and updates the library database. A file that changed in the
   meantime is skipped; an existing file is never overwritten.
-</p>
+</p></div></div>
 
 <form method="POST" action="{{ url_for('library.rename_apply') }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -22,14 +23,15 @@
       {% for pl, item in chosen %}
         <tr>
           <td>{{ pl.name }}<input type="hidden" name="tracks" value="{{ pl.playlist_id }}:{{ item.id }}"></td>
-          <td><code>{{ item.old_name }}</code></td>
-          <td><code>{{ item.new_name }}</code></td>
+          <td class="wrap-anywhere"><code>{{ item.old_name }}</code></td>
+          <td class="wrap-anywhere"><code>{{ item.new_name }}</code></td>
         </tr>
       {% endfor %}
       </tbody>
     </table>
   </div>
-  <button type="submit" style="width:auto">Rename now</button>
+  <div class="save-bar"><small class="subtle">Applied by the daemon at the start of the next cycle.</small>
+  <button type="submit">Rename now</button></div>
 </form>
 
 {% endblock %}

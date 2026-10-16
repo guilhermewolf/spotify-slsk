@@ -11,12 +11,12 @@
     <p class="subtle">Re-searching does not clear <a href="{{ url_for('wanted.blocklist_page') }}">blocklisted</a> peer files or peers; remove them there to try them again.</p>
   </div>
   {% if total %}
-  <form method="POST" action="{{ url_for('wanted.wanted_search') }}">
+  <form class="page-actions" method="POST" action="{{ url_for('wanted.wanted_search') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <details class="confirm">
       <summary role="button" class="secondary outline">Search all missing…</summary>
       <p>Clears attempts, pauses and rejected-file lists for all {{ total }} missing tracks and starts a cycle.</p>
-      <button type="submit" name="all" value="1" style="width:auto">Yes, search all {{ total }}</button>
+      <button type="submit" name="all" value="1">Yes, search all {{ total }}</button>
     </details>
   </form>
   {% endif %}
@@ -31,7 +31,7 @@
     <option value="{{ p.playlist_id }}" {% if p.playlist_id == playlist_id %}selected{% endif %}>{{ p.name }}</option>
     {% endfor %}
   </select>
-  <input type="search" name="q" value="{{ query }}" style="flex:1"
+  <input type="search" name="q" value="{{ query }}"
          aria-label="Filter by title, artist or album" placeholder="Filter by title, artist or album…">
   <button type="submit" class="secondary outline">Filter</button>
 </form>
@@ -43,7 +43,7 @@
     <table class="track-table">
       <thead>
         <tr>
-          <th scope="col"><span class="visually-hidden">Select</span></th>
+          <th scope="col" class="col-check"><span class="visually-hidden">Select</span></th>
           <th scope="col">Track</th>
           <th scope="col">Playlist</th>
           <th scope="col">Status</th>
@@ -75,7 +75,8 @@
       </tbody>
     </table>
   </div>
-  <p><button type="submit" style="width:auto">Search selected</button></p>
+  <div class="bulk-bar"><button type="submit">Search selected</button>
+    <small class="subtle">Tick tracks above, then search them now instead of waiting for the next cycle.</small></div>
 </form>
 {% else %}
 <div class="empty">

@@ -18,21 +18,21 @@
       {% else %}No full scan yet.{% endif %}
     </p>
   </div>
-  <form method="POST" action="{{ url_for('health.library_scan') }}">
+  <form class="page-actions" method="POST" action="{{ url_for('health.library_scan') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <button type="submit" class="secondary outline" style="width:auto"
+    <button type="submit" class="secondary outline"
             {% if scan_pending %}disabled{% endif %}>Scan library</button>
   </form>
 </div>
 
 <div class="health-summary">
   {% for code, n in counts.items() %}
-  <a class="health-count{% if problem == code %} active{% endif %}"
+  <a class="health-count{% if problem == code %} active{% endif %}{% if not n %} is-zero{% endif %}"
      href="{{ url_for('health.library_health', problem=code, playlist=playlist_id) }}">
     <strong>{{ n }}</strong> <span>{{ labels[code] }}</span>
   </a>
   {% endfor %}
-  <a class="health-count{% if problem == isrc_note %} active{% endif %}"
+  <a class="health-count{% if problem == isrc_note %} active{% endif %}{% if not info_count %} is-zero{% endif %}"
      href="{{ url_for('health.library_health', problem=isrc_note, playlist=playlist_id) }}"
      title="Different releases of a song carry different ISRCs; not counted as a problem">
     <strong>{{ info_count }}</strong> <span>ISRC differs (info)</span>
@@ -67,7 +67,7 @@
     <table class="track-table">
       <thead>
         <tr>
-          <th scope="col"><span class="visually-hidden">Select</span></th>
+          <th scope="col" class="col-check"><span class="visually-hidden">Select</span></th>
           <th scope="col">Track</th>
           <th scope="col">Problem</th>
           <th scope="col">Evidence</th>
@@ -88,13 +88,13 @@
           <td>
             <a class="track-title" href="{{ url_for('tracks.track_detail', playlist_id=r.playlist_id, track_id=r.track_id) }}">{{ r.track.name }}</a>
             <div class="subtle">{{ r.track.artists }} · {{ r.playlist_name }}</div>
-            <div class="subtle file-cell" title="{{ r.path }}"><code>{{ r.path.rsplit('/', 1)[-1] if r.path else '—' }}</code></div>
+            <div class="subtle file-cell" title="{{ r.path }}"><code class="path">{{ r.path.rsplit('/', 1)[-1] if r.path else '—' }}</code></div>
           </td>
           <td>
             {% for p in r.problems %}
-            <span class="badge badge-{{ 'retrying' if p == 'suspect_lossless' else 'suspended' }}">{{ labels[p] }}</span>
+            <span class="badge badge-{{ 'suspect' if p == 'suspect_lossless' else 'suspended' }}">{{ labels[p] }}</span>
             {% endfor %}
-            {% if not r.problems %}<span class="badge badge-pending">ISRC differs (info)</span>{% endif %}
+            {% if not r.problems %}<span class="badge badge-info">ISRC differs (info)</span>{% endif %}
             {% if r.ignored %}<div class="subtle">ignored</div>{% endif %}
           </td>
           <td>
@@ -119,6 +119,7 @@
             </dl>
           </td>
           <td class="actions-col">
+            <div class="card-actions">
             <details class="confirm">
               <summary role="button" class="secondary outline">Quarantine…</summary>
               <p class="subtle">Moves the file to <code>{{ quarantine_dir }}/</code> and downloads the track again.</p>
@@ -133,18 +134,21 @@
                     formaction="{{ url_for('health.library_ignore') }}"
                     title="False positive: stop flagging this file">Ignore</button>
             {% endif %}
+            </div>
           </td>
         </tr>
       {% endfor %}
       </tbody>
     </table>
   </div>
+  <div class="bulk-bar">
   <details class="confirm">
-    <summary role="button" style="width:auto">Quarantine selected…</summary>
+    <summary role="button">Quarantine selected…</summary>
     <p>Moves every selected file to <code>{{ quarantine_dir }}/&lt;playlist&gt;/</code> (never deleted)
        and downloads those tracks again on the next cycle.</p>
-    <button type="submit" style="width:auto">Yes, quarantine selected</button>
+    <button type="submit">Yes, quarantine selected</button>
   </details>
+  </div>
 </form>
 <p class="subtle">
   Quarantined files stay under <code>{{ quarantine_dir }}/</code> in your playlists folder until you
