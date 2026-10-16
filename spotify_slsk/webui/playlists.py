@@ -18,7 +18,7 @@ from flask import (
 )
 from flask.typing import ResponseReturnValue
 
-from .. import db, runtime_state
+from .. import db, healthchecks, runtime_state
 from ..spotify.client import fetch_playlist_name
 from ..utils import get_playlist_id, sanitize_table_name
 from .helpers import dir_size, wake_daemon
@@ -51,6 +51,9 @@ def dashboard() -> ResponseReturnValue:
         totals=totals,
         activity=runtime_state.get_activity(),
         cycles=db.list_cycles(g.conn, limit=10),
+        # Same list as /system/status; local checks are a stat() or a
+        # settings read each, remote ones are cached by the daemon.
+        checks=healthchecks.collect(g.conn),
     )
 
 

@@ -2,14 +2,35 @@
 {% set active_page = 'dashboard' %}
 {% block content %}
 
+{% macro add_form(field_id) %}
+<form method="POST" action="{{ url_for('playlists.add_playlist') }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <label for="{{ field_id }}">Spotify playlist URL</label>
+  <div class="filter-form">
+    <input type="url" id="{{ field_id }}" name="playlist_url" required
+           placeholder="https://open.spotify.com/playlist/…"
+           aria-describedby="{{ field_id }}_help">
+    <button type="submit">Add playlist</button>
+  </div>
+  <small id="{{ field_id }}_help" class="subtle">
+    The playlist must be public. Syncing starts immediately — no need to wait for the next cycle.
+  </small>
+</form>
+{% endmacro %}
+
 <div class="page-head">
   <div>
     <h1>Library</h1>
     <p class="subtle">
-      {{ playlists|length }} playlist{{ '' if playlists|length == 1 else 's' }} tracked
-      · totals cover enabled playlists only
+      {{ playlists|length }} playlist{{ '' if playlists|length == 1 else 's' }} tracked.
+      Totals cover enabled playlists only.
     </p>
   </div>
+  {% if playlists %}
+  <div class="page-actions">
+    <a role="button" href="#add-playlist">Add playlist</a>
+  </div>
+  {% endif %}
 </div>
 
 {% include "_activity.html" %}
@@ -22,6 +43,7 @@
      hx-select="#live"
      hx-swap="outerHTML">
 
+{% if playlists %}
   <section class="summary" aria-label="Library totals">
     <div class="tile">
       <div class="value">{{ totals.total }}</div>
@@ -44,122 +66,152 @@
       <div class="label">Suspended</div>
     </div>
   </section>
-
-  <h2 class="subtle" style="text-transform:uppercase;letter-spacing:.05em;">Playlists</h2>
-
-  {% for pl in playlists %}
-    {% set total = pl.stats.total %}
-    {% set pct = ((pl.stats.downloaded / total * 100) | round(0, 'floor') | int) if total else 0 %}
-    {% set is_active = activity and activity.playlist_id == pl.playlist_id
-                       and activity.phase in ('syncing', 'downloading', 'upgrading') %}
-    <article class="playlist-card {{ 'is-disabled' if not pl.enabled }} {{ 'row-active' if is_active }}">
-      <div class="playlist-card-head">
-        <h2>
-          <a href="{{ url_for('playlists.playlist_detail', playlist_id=pl.playlist_id) }}">{{ pl.name }}</a>
-          {% if not pl.enabled %}<span class="badge badge-disabled">paused</span>{% endif %}
-          {% if is_active %}<span class="badge badge-retrying">working now</span>{% endif %}
-        </h2>
-        <span class="pct">{{ pct }}%</span>
-      </div>
-
-      <div class="progress"
-           role="progressbar"
-           aria-valuenow="{{ pct }}" aria-valuemin="0" aria-valuemax="100"
-           aria-label="{{ pl.name }} download progress">
-        <div class="progress-bar" style="width: {{ pct }}%"></div>
-      </div>
-
-      <p class="counts">
-        <span><strong>{{ pl.stats.downloaded }}</strong> / {{ total }} downloaded</span>
-        {% if pl.stats.pending %}<span><strong>{{ pl.stats.pending }}</strong> pending</span>{% endif %}
-        {% if pl.stats.retrying %}<span><strong>{{ pl.stats.retrying }}</strong> retrying</span>{% endif %}
-        {% if pl.stats.suspended %}<span><strong>{{ pl.stats.suspended }}</strong> suspended</span>{% endif %}
-        <span>synced {{ pl.last_synced or 'never' }}</span>
-        <span>{{ pl.disk_bytes|human_bytes }} on disk</span>
-      </p>
-      {% if is_active and activity.track_name %}
-      <p class="subtle" style="margin:0.35rem 0 0;">
-        ▶ {{ activity.track_name }} — {{ activity.track_artist or '' }}
-      </p>
-      {% endif %}
-
-      <div class="card-actions">
-        <a role="button" class="secondary outline"
-           href="{{ url_for('playlists.playlist_detail', playlist_id=pl.playlist_id) }}">View tracks</a>
-        <form method="POST" action="{{ url_for('playlists.toggle_playlist', playlist_id=pl.playlist_id) }}">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-          <button type="submit" class="secondary outline">
-            {{ 'Pause syncing' if pl.enabled else 'Resume syncing' }}
-          </button>
-        </form>
-        {# No-JS confirm: the CSP blocks inline onsubmit handlers, so the old
-           confirm() never ran. The route also requires confirm=1. #}
-        <form method="POST" action="{{ url_for('playlists.delete_playlist', playlist_id=pl.playlist_id) }}">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-          <details class="confirm">
-            <summary role="button" class="outline danger">Remove…</summary>
-            <p>Stop tracking this playlist? Its database rows are dropped. Files already downloaded stay on disk.</p>
-            <button type="submit" name="confirm" value="1" class="danger">Yes, remove</button>
-          </details>
-        </form>
-      </div>
-    </article>
-  {% else %}
-    <div class="empty">
-      <h2>No playlists yet</h2>
-      <p>Add a public Spotify playlist below and the daemon will start syncing it.</p>
-    </div>
-  {% endfor %}
-</div>
-
-{% if cycles %}
-<details>
-  <summary><strong>Recent cycles</strong> <span class="subtle">(last {{ cycles|length }})</span></summary>
-  <div class="table-wrap" style="margin-top:0.75rem;">
-    <table class="track-table">
-      <thead>
-        <tr>
-          <th scope="col">Started</th>
-          <th scope="col" class="num">Duration</th>
-          <th scope="col" class="num">Playlists</th>
-          <th scope="col" class="num">Added</th>
-          <th scope="col" class="num">Downloaded</th>
-          <th scope="col" class="num">Failed</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for c in cycles %}
-        <tr>
-          <td class="nowrap">{{ c.started_at }}</td>
-          <td class="num">{{ '%.1f'|format(c.duration_seconds) }}s</td>
-          <td class="num">{{ c.playlists_synced }}</td>
-          <td class="num">{{ c.tracks_added }}</td>
-          <td class="num">{{ c.tracks_downloaded }}</td>
-          <td class="num">{{ c.tracks_failed }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</details>
 {% endif %}
 
-<article>
-  <header><strong>Add a playlist</strong></header>
-  <form method="POST" action="{{ url_for('playlists.add_playlist') }}">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <label for="playlist_url">Spotify playlist URL</label>
-    <div class="filter-form">
-      <input type="url" id="playlist_url" name="playlist_url" required
-             style="flex:1"
-             placeholder="https://open.spotify.com/playlist/…"
-             aria-describedby="playlist_url_help">
-      <button type="submit">Add</button>
+  <div class="dash-grid">
+    {% if playlists %}
+    <section aria-labelledby="playlists-heading">
+      <div class="section-head">
+        <h2 id="playlists-heading">Playlists</h2>
+      </div>
+      <div class="playlist-list">
+      {% for pl in playlists %}
+        {% set total = pl.stats.total %}
+        {% set pct = ((pl.stats.downloaded / total * 100) | round(0, 'floor') | int) if total else 0 %}
+        {% set is_active = activity and activity.playlist_id == pl.playlist_id
+                           and activity.phase in ('syncing', 'downloading', 'upgrading') %}
+        <article class="playlist-card {{ 'is-disabled' if not pl.enabled }} {{ 'row-active' if is_active }}">
+          <div class="playlist-card-head">
+            <h3>
+              <a href="{{ url_for('playlists.playlist_detail', playlist_id=pl.playlist_id) }}">{{ pl.name }}</a>
+              {% if not pl.enabled %}<span class="badge badge-disabled">paused</span>{% endif %}
+              {% if is_active %}<span class="badge badge-active">working now</span>{% endif %}
+            </h3>
+            <span class="pct">{{ pct }}%</span>
+          </div>
+
+          <div class="progress{{ ' is-active' if is_active }}"
+               role="progressbar"
+               aria-valuenow="{{ pct }}" aria-valuemin="0" aria-valuemax="100"
+               aria-label="{{ pl.name }} download progress">
+            <div class="progress-bar" style="width: {{ pct }}%"></div>
+          </div>
+
+          <p class="counts">
+            <span><strong>{{ pl.stats.downloaded }}</strong> / {{ total }} downloaded</span>
+            {% if pl.stats.pending %}<span><strong>{{ pl.stats.pending }}</strong> pending</span>{% endif %}
+            {% if pl.stats.retrying %}<span class="warn"><strong>{{ pl.stats.retrying }}</strong> retrying</span>{% endif %}
+            {% if pl.stats.suspended %}<span class="bad"><strong>{{ pl.stats.suspended }}</strong> suspended</span>{% endif %}
+            <span>synced {{ pl.last_synced or 'never' }}</span>
+            <span>{{ pl.disk_bytes|human_bytes }} on disk</span>
+          </p>
+
+          <div class="card-actions">
+            <a role="button" class="secondary outline"
+               href="{{ url_for('playlists.playlist_detail', playlist_id=pl.playlist_id) }}">View tracks</a>
+            <form method="POST" action="{{ url_for('playlists.toggle_playlist', playlist_id=pl.playlist_id) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" class="secondary outline">
+                {{ 'Pause syncing' if pl.enabled else 'Resume syncing' }}
+              </button>
+            </form>
+            {# No-JS confirm: the CSP blocks inline onsubmit handlers, so the old
+               confirm() never ran. The route also requires confirm=1. #}
+            <form method="POST" action="{{ url_for('playlists.delete_playlist', playlist_id=pl.playlist_id) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <details class="confirm">
+                <summary role="button" class="outline danger">Remove…</summary>
+                <p>Stop tracking this playlist? Its database rows are dropped. Files already downloaded stay on disk.</p>
+                <button type="submit" name="confirm" value="1" class="danger">Yes, remove</button>
+              </details>
+            </form>
+          </div>
+
+          {% if is_active and activity.track_name %}
+          <p class="now-playing">
+            Now: {{ activity.track_name }}{% if activity.track_artist %} by {{ activity.track_artist }}{% endif %}
+          </p>
+          {% endif %}
+        </article>
+      {% endfor %}
+      </div>
+    </section>
+    {% else %}
+    <div class="empty">
+      <div class="meter-art" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      <h2>No playlists yet</h2>
+      <p>Paste a public Spotify playlist and the daemon finds each track on Soulseek, tags it and files it into your library.</p>
+      {{ add_form('playlist_url') }}
     </div>
-    <small id="playlist_url_help" class="subtle">
-      The playlist must be public. Syncing starts immediately — no need to wait for the next cycle.
-    </small>
-  </form>
+    {% endif %}
+
+    <div class="side-stack">
+      {% set bad = checks|rejectattr('status', 'equalto', 'ok')|list %}
+      {% set check_names = {'slskd': 'slskd', 'spotify': 'Spotify', 'downloads_dir': 'Downloads folder',
+           'playlists_dir': 'Playlists folder', 'disk_space': 'Disk space', 'heartbeat': 'Daemon heartbeat',
+           'last_cycle': 'Last cycle', 'flac_binary': 'flac binary', 'db_integrity': 'Database integrity',
+           'ui_auth': 'Web UI login'} %}
+      <article aria-labelledby="health-heading">
+        <header>
+          <strong id="health-heading">Health</strong>
+          <div class="subtle">
+            {% if bad %}{{ bad|length }} of {{ checks|length }} checks need attention
+            {% else %}All {{ checks|length }} checks pass{% endif %}
+          </div>
+        </header>
+        <ul class="check-list">
+          {% for c in bad + (checks|selectattr('status', 'equalto', 'ok')|list) %}
+          <li>
+            <span><span class="name">{{ check_names.get(c.name, c.name|replace('_', ' ')) }}</span>
+              {% if c.status != 'ok' %}<span class="msg" title="{{ c.message }}">{{ c.message }}</span>{% endif %}</span>
+            <span class="badge badge-check-{{ c.status }}" title="{{ c.message }}">{{ c.status }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+        <footer><a href="{{ url_for('system.status_page') }}">Open system status</a></footer>
+      </article>
+
+      {% if cycles %}
+      <article aria-labelledby="cycles-heading">
+        <header>
+          <strong id="cycles-heading">Recent cycles</strong>
+          <div class="subtle">Last {{ cycles|length }}, newest first</div>
+        </header>
+        <div class="table-wrap">
+          <table class="track-table">
+            <thead>
+              <tr>
+                <th scope="col">Started</th>
+                <th scope="col" class="num">Took</th>
+                <th scope="col" class="num" title="Tracks added">Added</th>
+                <th scope="col" class="num" title="Tracks downloaded">Got</th>
+                <th scope="col" class="num" title="Tracks failed">Failed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for c in cycles %}
+              <tr>
+                <td class="nowrap" title="{{ c.started_at }} (UTC), {{ c.playlists_synced }} playlists synced">{{ c.started_at[5:16]|replace('T', ' ') if c.started_at is string else c.started_at }}</td>
+                <td class="num">{{ '%.0f'|format(c.duration_seconds) }}s</td>
+                <td class="num">{{ c.tracks_added }}</td>
+                <td class="num">{{ c.tracks_downloaded }}</td>
+                <td class="num">{{ c.tracks_failed }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </article>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{% if playlists %}
+<article id="add-playlist" class="section">
+  <header><strong>Add a playlist</strong></header>
+  {{ add_form('playlist_url') }}
 </article>
+{% endif %}
 
 {% endblock %}
