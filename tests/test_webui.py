@@ -736,10 +736,22 @@ class TestInteractiveSearchUI:
         assert b"Artist - Song.flac" in r.data
         assert b"format not allowed: .wma" in r.data
         assert b"hx-trigger" not in r.data, "finished search must stop polling"
-        # The filename cell wraps (full path in title); Grab column is pinned.
+        # The filename cell is cut (full path in title). Accepted and rejected
+        # results are separate tables (rejected grouped by reason), so the
+        # actions column appears in two headers plus one per row.
         assert b'class="file-cell" title="Artist - Song.flac"' in r.data
-        assert r.data.count(b'class="actions-col"') == 3
+        assert r.data.count(b'class="actions-col"') == 4
+        page = r.data.decode()
+        assert page.index("Artist - Song.flac") < page.index("format not allowed: .wma")
         assert b"Artist - Song.flac" in client.get("/track/pid1/t1").data
+
+    def test_rejections_group_by_reason_biggest_first(self):
+        from spotify_slsk.webui.helpers import group_by_reason
+
+        rows = [{"reason": "format not allowed: .mp3"}] * 3 + [{"reason": "blocklisted"}, {}]
+        groups = group_by_reason(rows)
+        assert [(r, len(f)) for r, f in groups] == [
+            ("format not allowed: .mp3", 3), ("blocklisted", 1), ("rejected", 1)]
 
     def test_quality_and_profile_reason_are_shown(self, app_tmp, client, monkeypatch):
         bad = dict(self.CAND_BAD, ext=".mp3", quality="MP3_LOW", quality_label="MP3 256",

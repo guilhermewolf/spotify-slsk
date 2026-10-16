@@ -36,7 +36,7 @@
 
 {% include "_wanted_tabs.html" %}
 
-<form class="filter-form" method="GET" role="search" action="{{ url_for('wanted.cutoff_page') }}">
+<form class="filter-form" method="GET" aria-label="Filter tracks" action="{{ url_for('wanted.cutoff_page') }}">
   <select name="playlist" aria-label="Playlist">
     <option value="">All playlists</option>
     {% for p in playlists %}

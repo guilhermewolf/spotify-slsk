@@ -31,7 +31,14 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from .. import db, runtime_state
 from ..utils import fmt_duration
 from . import auth, health, library, playlists, queue, settings, system, tracks, wanted
-from .helpers import fmt_age, fmt_interval, fmt_ts, health_snapshot, human_bytes
+from .helpers import (
+    fmt_age,
+    fmt_interval,
+    fmt_ts,
+    group_by_reason,
+    health_snapshot,
+    human_bytes,
+)
 
 # Reserved settings key holding the generated Flask secret. It is not in
 # SETTINGS_SPEC, so it never appears on the settings page.
@@ -141,6 +148,7 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
     app.jinja_env.filters["ts"] = fmt_ts
     app.jinja_env.filters["interval"] = fmt_interval
     app.jinja_env.filters["age"] = fmt_age
+    app.jinja_env.filters["by_reason"] = group_by_reason
     app.jinja_env.filters["duration_ms"] = (
         lambda ms: fmt_duration(ms / 1000) if ms else "—"
     )

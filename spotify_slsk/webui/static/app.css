@@ -537,6 +537,7 @@ article > footer {
   display: inline-flex;
   align-items: baseline;
   gap: var(--s-2);
+  margin: 0;
   padding: 0.25rem 0.7rem;
   border: 1px solid var(--c-line);
   border-radius: 999px;
@@ -593,12 +594,27 @@ article > footer {
 .filter-form label { margin: 0; display: inline-flex; align-items: center; gap: var(--s-2); font-size: var(--t-sm); }
 .filter-form label input { margin: 0; }
 .filter-form button, .filter-form [role="button"] { flex: 0 0 auto; }
+/* One control height across a toolbar, so inputs and buttons line up. */
+.filter-form :is(input:not([type="checkbox"]), select),
+.toolbar :is(input:not([type="checkbox"]), select) {
+  --pico-border-radius: var(--r-md);
+  border-radius: var(--r-md);
+  height: 2.25rem;
+  padding-top: 0;
+  padding-bottom: 0;
+  font-size: var(--t-sm);
+}
+.filter-form :is(button, [role="button"]), .toolbar :is(button, [role="button"]) {
+  height: 2.25rem;
+  display: inline-flex;
+  align-items: center;
+}
 
 /* ==== 5. Buttons ======================================================= */
 /* Classless Pico ships no .secondary/.outline; these are the variants the
    templates use. Buttons are compact everywhere: this is a tool, not a form. */
 
-button, [role="button"], input[type="submit"] {
+:is(button, [role="button"], [type="submit"], [type="button"]) {
   width: auto;
   margin: 0;
   padding: 0.38rem 0.85rem;
@@ -608,6 +624,8 @@ button, [role="button"], input[type="submit"] {
   border-radius: var(--r-md);
   transition: background-color 0.12s var(--ease), border-color 0.12s var(--ease), color 0.12s var(--ease);
 }
+/* Pico makes every submit button full-width with a bottom margin. */
+button[type="submit"], button[type="button"], [type="submit"] { width: auto; margin-bottom: 0; }
 button:active, [role="button"]:active { transform: translateY(1px); }
 
 button.secondary,
@@ -1315,3 +1333,13 @@ a.track-title:hover { color: var(--c-accent); text-decoration: underline; }
 .queue-table .track-cell { min-width: 9rem; max-width: 15rem; overflow-wrap: anywhere; }
 .queue-table .progress { min-width: 5rem; margin: 2px 0; }
 .queue-table .actions-col .card-actions { gap: var(--s-1); }
+
+/* ==== 21. Track page =================================================== */
+audio.preview { width: 100%; max-width: 30rem; height: 2.25rem; }
+h2.section { margin-bottom: var(--s-3); }
+h3.section { margin: var(--s-5) 0 var(--s-2); font-size: var(--t-md); }
+details.panel { padding: 0; margin: 0 0 var(--s-3); }
+details.panel > summary { padding: var(--s-3) var(--s-4); font-size: var(--t-sm); font-weight: 600; }
+details.panel[open] > summary { border-bottom: 1px solid var(--c-line-soft); margin: 0; }
+details.panel > .table-wrap { border: 0; margin: 0; border-radius: 0 0 var(--r-lg) var(--r-lg); }
+tr.tag-changed > td { background: color-mix(in srgb, var(--c-warn-bg) 50%, transparent); }

@@ -65,6 +65,15 @@ def human_bytes(n: float) -> str:
     return f"{n:.1f} PiB"
 
 
+def group_by_reason(candidates: list[dict]) -> list[tuple[str, list[dict]]]:
+    """Rejected search results as (reason, files), biggest group first, so
+    142 "format not allowed: .mp3" rows read as one line, not 142."""
+    groups: dict[str, list[dict]] = {}
+    for c in candidates:
+        groups.setdefault(c.get("reason") or "rejected", []).append(c)
+    return sorted(groups.items(), key=lambda kv: -len(kv[1]))
+
+
 def fmt_ts(epoch: float | None) -> str:
     """Epoch seconds -> local "YYYY-MM-DD HH:MM"."""
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(epoch)) if epoch else "—"

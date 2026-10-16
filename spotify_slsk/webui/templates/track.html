@@ -10,13 +10,13 @@
 <div class="page-head">
   <div>
     <h1>{{ track.name }}</h1>
-    <p class="subtle">{{ track.artists }} · {{ track.album }}</p>
+    <p class="subtle">{{ track.artists }} — {{ track.album }}</p>
   </div>
-  <span class="badge badge-{{ track.status }}">{{ track.status }}</span>
+  <div class="page-actions"><span class="badge badge-{{ track.status }}">{{ track.status }}</span></div>
 </div>
 
 {# Lead with the answer to "what is happening with this track?" #}
-<p>
+<p class="lede">
   {% if track.status == 'downloaded' %}
     Downloaded and tagged. The file is in your library.
   {% elif track.status == 'suspended' %}
@@ -30,13 +30,14 @@
   {% endif %}
 </p>
 
+<article>
 <dl class="detail-grid">
   <dt>File</dt>
-  <dd>{% if track.path %}<code>{{ track.path }}</code>{% else %}—{% endif %}</dd>
+  <dd>{% if track.path %}<code class="wrap-anywhere">{{ track.path }}</code>{% else %}—{% endif %}</dd>
   {% if track.rel_path %}
   <dt>Preview</dt>
   <dd>
-    <audio controls preload="none" style="width:100%;max-width:480px;">
+    <audio controls preload="none" class="preview">
       <source src="{{ url_for('system.serve_file', rel=track.rel_path) }}">
       Your browser doesn't support the audio element.
     </audio>
@@ -68,12 +69,13 @@
   <dt>Paused until</dt>
   <dd>{{ track.suspended_until or '—' }}</dd>
 </dl>
+</article>
 
 {% if not track.downloaded %}
-<form method="POST"
+<form method="POST" class="action-row"
       action="{{ url_for('tracks.retry_track', playlist_id=playlist_id, track_id=track.id) }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-  <button type="submit" style="width:auto">Retry now</button>
+  <button type="submit">Retry now</button>
   <small class="subtle">
     Clears the attempt count, any pause, and the rejected-file list below, then starts a cycle.
   </small>
@@ -82,7 +84,7 @@
 
 {% if track.downloaded and track.path %}
 {% if tag_preview %}
-<details id="tags">
+<details id="tags" class="panel">
   <summary>Tags: {{ tag_preview.changed }} field(s) would change on re-tag</summary>
   <div class="table-wrap">
     <table>
@@ -100,10 +102,10 @@
   </div>
 </details>
 {% endif %}
-<form method="POST"
+<form method="POST" class="action-row"
       action="{{ url_for('tracks.retag_track', playlist_id=playlist_id, track_id=track.id) }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-  <button type="submit" class="secondary outline" style="width:auto">Re-tag from Spotify</button>
+  <button type="submit" class="secondary outline">Re-tag from Spotify</button>
   <small class="subtle">
     Rewrites the tags above (title, artists, album, album artist, track/disc number,
     release date, ISRC, Spotify id) and the cover art from the Spotify metadata. No re-download.
@@ -111,11 +113,11 @@
 </form>
 {% endif %}
 
-<h2 style="font-size:1.05rem;margin-top:2rem;">Interactive search</h2>
-<form method="POST"
+<h2 class="section">Interactive search</h2>
+<form method="POST" class="action-row"
       action="{{ url_for('tracks.interactive_search_start', playlist_id=playlist_id, track_id=track.id) }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-  <button type="submit" class="secondary outline" style="width:auto"
+  <button type="submit"
           {% if search and search.status == 'running' %}disabled{% endif %}>Search slskd now</button>
   <small class="subtle">
     Lists every file found, including rejected ones and why. Grabbing hands the file to the daemon.
@@ -124,7 +126,7 @@
 {% with track_id = track.id %}{% include "_interactive.html" %}{% endwith %}
 
 {% if search_history %}
-<h2 style="font-size:1.05rem;margin-top:2rem;">Recent slskd searches</h2>
+<h2 class="section">Recent slskd searches</h2>
 <p class="subtle">
   The last {{ search_history|length }} queries the daemon ran for this track.
   In-memory per process — this resets when the container restarts.
@@ -167,14 +169,14 @@
 {% endif %}
 
 {% if history %}
-<h2 style="font-size:1.05rem;margin-top:2rem;">History</h2>
+<h2 class="section">History</h2>
 {% set rows = history %}
 {% set show_track = false %}
 {% include "_history_rows.html" %}
 {% endif %}
 
 {% if track.tried %}
-<h2 style="font-size:1.05rem;margin-top:2rem;">Rejected files</h2>
+<h2 class="section">Rejected files</h2>
 <p class="subtle">
   Candidates already tried and rejected — wrong version, failed transfer, or metadata that
   didn't match. They are skipped on future searches until you retry.
@@ -183,7 +185,7 @@
   <table class="track-table">
     <tbody>
       {% for f in track.tried %}
-      <tr><td><code>{{ f }}</code></td></tr>
+      <tr><td><code class="wrap-anywhere">{{ f }}</code></td></tr>
       {% endfor %}
     </tbody>
   </table>

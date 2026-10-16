@@ -1,4 +1,32 @@
-{# Interactive search results. Polls itself every 2s while running. #}
+{# Interactive search results. Polls itself every 2s while running.
+   Accepted files come first, in the order the daemon would pick them;
+   rejected ones are folded into one collapsed group per reason, because a
+   real search returns a few useful rows and a few hundred .mp3/.epub. #}
+{% macro quality(c) %}
+  <strong>{{ c.quality_label or (c.ext|replace('.', '')|upper) or '—' }}</strong>
+  <div class="chips">
+    {% if c.bitrate %}<span class="chip">{{ c.bitrate }} kbps</span>{% endif %}
+    {% if c.bit_depth %}<span class="chip">{{ c.bit_depth }}-bit</span>{% endif %}
+    {% if c.sample_rate %}<span class="chip">{{ (c.sample_rate / 1000)|round(1) }} kHz</span>{% endif %}
+  </div>
+{% endmacro %}
+{% macro peer(c) %}
+  {{ c.user }}
+  <div class="chips">
+    <span class="chip {{ 'chip-ok' if c.free_slot else 'chip-warn' }}">{{ 'free slot' if c.free_slot else 'no free slot' }}</span>
+    <span class="chip">{{ c.user_upload_speed|human_bytes }}/s</span>
+    {% if c.queue_length is not none %}<span class="chip">queue {{ c.queue_length }}</span>{% endif %}
+  </div>
+{% endmacro %}
+{% macro grab(c, primary) %}
+  <form method="POST" action="{{ url_for('tracks.interactive_grab', playlist_id=playlist_id, track_id=track_id) }}" class="inline-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="username" value="{{ c.user }}">
+    <input type="hidden" name="filename" value="{{ c.filename }}">
+    <input type="hidden" name="size" value="{{ c.size }}">
+    <button type="submit" class="{{ '' if primary else 'secondary outline' }}">Grab{{ '' if primary else '…' }}</button>
+  </form>
+{% endmacro %}
 <div id="interactive"
      {% if search and search.status == 'running' %}
      hx-get="{{ url_for('tracks.interactive_search_results', playlist_id=playlist_id, track_id=track_id) }}"
@@ -13,10 +41,15 @@
     <p class="subtle">No files found.</p>
   {% else %}
     {% set accepted = search.results|selectattr('accepted')|list %}
-    <p class="subtle">
-      {{ search.results|length }} files, {{ accepted|length }} acceptable. Results expire after 10 minutes.
+    {% set rejected = search.results|rejectattr('accepted')|list %}
+    <p class="result-summary">
+      <span><strong>{{ accepted|length }}</strong> acceptable</span>
+      <span><strong>{{ rejected|length }}</strong> rejected</span>
+      <span class="subtle">of {{ search.results|length }} files. Results expire after 10 minutes.</span>
     </p>
-    <div class="table-wrap">
+
+    {% if accepted %}
+    <div class="table-wrap scroll-y">
       <table class="track-table interactive-table">
         <thead>
           <tr>
@@ -25,52 +58,63 @@
             <th scope="col" class="num">Size</th>
             <th scope="col" class="num">Length</th>
             <th scope="col">Peer</th>
-            <th scope="col">Verdict</th>
             <th scope="col" class="actions-col">Actions</th>
           </tr>
         </thead>
         <tbody>
-        {% for c in search.results %}
-          <tr>
-            <td class="file-cell" title="{{ c.filename }}"><code>{{ c.basename or c.filename }}</code></td>
-            <td class="nowrap">
-              <strong>{{ c.quality_label or '—' }}</strong>
-              <div class="subtle">
-              {{ c.ext|replace('.', '') }}
-              {% if c.bitrate %}· {{ c.bitrate }} kbps{% endif %}
-              {% if c.bit_depth %}· {{ c.bit_depth }}-bit{% endif %}
-              {% if c.sample_rate %}· {{ (c.sample_rate / 1000)|round(1) }} kHz{% endif %}
-              </div>
-            </td>
-            <td class="num nowrap">{{ c.size|human_bytes if c.size else '—' }}</td>
-            <td class="num">{{ (c.length * 1000)|duration_ms if c.length else '—' }}</td>
-            <td class="nowrap">
-              {{ c.user }}
-              <div class="subtle">
-                {{ 'free slot' if c.free_slot else 'no free slot' }}
-                · {{ c.user_upload_speed|human_bytes }}/s
-                {% if c.queue_length is not none %}· queue {{ c.queue_length }}{% endif %}
-              </div>
-            </td>
-            <td>
-              {% if c.accepted %}<span class="badge badge-downloaded">accepted</span>
+        {% for c in accepted %}
+          <tr class="{{ 'is-best' if loop.first }}">
+            <td class="file-cell" title="{{ c.filename }}"><code>{{ c.basename or c.filename }}</code>
+              {% if loop.first %}<span class="badge badge-accepted">daemon's pick</span>{% endif %}
               {% if c.note %}<div class="subtle">{{ c.note }}</div>{% endif %}
-              {% else %}<span class="badge badge-suspended">rejected</span>
-              <div class="subtle">{{ c.reason }}</div>{% endif %}
             </td>
-            <td class="actions-col">
-              <form method="POST" action="{{ url_for('tracks.interactive_grab', playlist_id=playlist_id, track_id=track_id) }}">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <input type="hidden" name="username" value="{{ c.user }}">
-                <input type="hidden" name="filename" value="{{ c.filename }}">
-                <input type="hidden" name="size" value="{{ c.size }}">
-                <button type="submit" class="{{ '' if c.accepted else 'secondary outline' }}">Grab</button>
-              </form>
-            </td>
+            <td class="nowrap">{{ quality(c) }}</td>
+            <td class="num">{{ c.size|human_bytes if c.size else '—' }}</td>
+            <td class="num">{{ (c.length * 1000)|duration_ms if c.length else '—' }}</td>
+            <td class="nowrap">{{ peer(c) }}</td>
+            <td class="actions-col">{{ grab(c, true) }}</td>
           </tr>
         {% endfor %}
         </tbody>
       </table>
     </div>
+    {% else %}
+    <p class="flash flash-warning">No file passed the filters. The rejected ones are below, grouped by why; grabbing one asks you to confirm first.</p>
+    {% endif %}
+
+    {% if rejected %}
+    <h3 class="section">Rejected, by reason</h3>
+    <div class="rejected-groups">
+      {% for reason, files in rejected|by_reason %}
+      <details>
+        <summary><span class="badge badge-rejected">{{ reason }}</span> <span class="count">×{{ files|length }}</span></summary>
+        <div class="table-wrap{{ ' scroll-y' if files|length > 12 }}">
+          <table class="track-table interactive-table">
+            <thead>
+              <tr>
+                <th scope="col">File</th>
+                <th scope="col">Quality</th>
+                <th scope="col" class="num">Size</th>
+                <th scope="col">Peer</th>
+                <th scope="col" class="actions-col">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+            {% for c in files %}
+              <tr>
+                <td class="file-cell" title="{{ c.filename }}"><code>{{ c.basename or c.filename }}</code></td>
+                <td class="nowrap">{{ quality(c) }}</td>
+                <td class="num">{{ c.size|human_bytes if c.size else '—' }}</td>
+                <td class="nowrap">{{ peer(c) }}</td>
+                <td class="actions-col">{{ grab(c, false) }}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </details>
+      {% endfor %}
+    </div>
+    {% endif %}
   {% endif %}
 </div>
