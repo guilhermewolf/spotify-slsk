@@ -33,7 +33,7 @@ from .db import (
     set_setting,
 )
 from .importer.process import process_downloaded_file
-from .library import health, rename
+from .library import health, playlist_files, rename
 from .library.acquire import handle_track_download, try_upgrade_track
 from .library.reconcile import startup_check
 from .log_config import setup_logging
@@ -180,6 +180,7 @@ def process_playlist(
         table_name=playlist_name,
     )
     _run_upgrade_pass(conn, playlist_name)
+    playlist_files.write_playlist_files(conn, playlist_id)
 
     send_ntfy_notification(ntfy_url, ntfy_topic, f"Finished processing playlist: {playlist_name}")
     return counters

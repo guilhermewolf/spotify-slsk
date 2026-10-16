@@ -39,6 +39,7 @@ from .playlists import (
     list_playlists,
     remove_playlist,
     rename_playlist_meta,
+    set_playlist_cover_url,
     set_playlist_enabled,
     upsert_playlist_meta,
 )
@@ -85,6 +86,7 @@ __all__ = [
     "upsert_playlist_meta",
     "rename_playlist_meta",
     "list_playlists",
+    "set_playlist_cover_url",
     "set_playlist_enabled",
     "remove_playlist",
     "get_setting",

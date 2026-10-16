@@ -504,6 +504,8 @@ class TestSchemaMigrations:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 8 == db.SCHEMA_VERSION
         cols = {r[1] for r in conn.execute('PRAGMA table_info("pl_v7")')}
         assert set(db.SPOTIFY_COLUMNS) <= cols
+        assert "cover_url" in {r[1] for r in conn.execute("PRAGMA table_info(playlists_meta)")}
+        assert db.list_playlists(conn)[0]["cover_url"] is None
         assert db.get_playlist_meta(conn, "pid")[0] is None  # resync
         track = db.get_track(conn, "pl_v7", "t1")
         assert (track["path"], track["quality"], track["album_artist"]) == ("/p/s.flac", "FLAC_16", None)

@@ -110,15 +110,19 @@ def file_name(
             return f"{value:0{int(m.group(2))}d}"
         return clean(str(value))
 
-    stem = clean(_TOKEN_RE.sub(sub, template))
+    stem = _TOKEN_RE.sub(sub, template)
     # Empty tokens leave dangling separators: "A -  - T", "A - ", "(  )".
     stem = re.sub(r"\(\s*\)|\[\s*\]", "", stem)
     stem = re.sub(r"(\s+-)(\s+-)+\s", r"\1 ", stem)
-    stem = " ".join(stem.split()).strip(" .-_")
+    return safe_name(stem.strip(" -_"), ext) or original_filename
+
+
+def safe_name(stem: str, ext: str) -> str:
+    """`stem + ext` made safe for any share (see the module docstring), or
+    "" when nothing usable is left."""
+    stem = " ".join(clean(stem).split()).strip(" .")
     stem = _RESERVED_RE.sub(r"\1_", stem)
-    if not stem:
-        return original_filename
-    return _truncate(stem, ext) + ext
+    return _truncate(stem, ext) + ext if stem else ""
 
 
 def example(template: str) -> str:

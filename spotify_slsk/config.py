@@ -149,6 +149,9 @@ IGNORED_TERMS: Terms = _env_terms("IGNORED_TERMS")
 LIBRARY_SCAN_INTERVAL_HOURS = int(os.getenv("LIBRARY_SCAN_INTERVAL_HOURS", "0"))
 # Embed the Spotify album cover when tagging (importer.tags).
 EMBED_COVER_ART = os.getenv("EMBED_COVER_ART", "1") == "1"
+# Playlist folder files (library.playlist_files).
+WRITE_M3U = os.getenv("WRITE_M3U", "1") == "1"
+WRITE_PLAYLIST_COVER = os.getenv("WRITE_PLAYLIST_COVER", "1") == "1"
 # Purge files in .quarantine/*/replaced/ older than this many days; 0 = never.
 RECYCLE_BIN_RETENTION_DAYS = int(os.getenv("RECYCLE_BIN_RETENTION_DAYS", "0"))
 # A track already downloaded in another playlist: hardlink | copy | off.
@@ -172,6 +175,7 @@ def reload(conn: sqlite3.Connection) -> None:
     global LOSSLESS_CHECK_ENABLED, LOSSLESS_FAKE_CUTOFF_HZ, LOSSLESS_MIN_DROP_DB
     global LIBRARY_SCAN_INTERVAL_HOURS, REQUIRED_TERMS, IGNORED_TERMS
     global EMBED_COVER_ART, FILE_NAME_TEMPLATE, LINK_MODE, RECYCLE_BIN_RETENTION_DAYS
+    global WRITE_M3U, WRITE_PLAYLIST_COVER
     try:
         MIN_MATCH_SCORE = float(get_setting(conn, "MIN_MATCH_SCORE", "0.62"))
     except (TypeError, ValueError) as e:
@@ -210,6 +214,8 @@ def reload(conn: sqlite3.Connection) -> None:
         logging.warning(f"Bad numeric setting during refresh; using previous values: {e}")
     LOSSLESS_CHECK_ENABLED = get_setting(conn, "LOSSLESS_CHECK_ENABLED", "1") == "1"
     EMBED_COVER_ART = get_setting(conn, "EMBED_COVER_ART", "1") == "1"
+    WRITE_M3U = get_setting(conn, "WRITE_M3U", "1") == "1"
+    WRITE_PLAYLIST_COVER = get_setting(conn, "WRITE_PLAYLIST_COVER", "1") == "1"
     link_mode = get_setting(conn, "LINK_MODE", "hardlink")
     if link_mode in LINK_MODES:
         LINK_MODE = link_mode
@@ -300,6 +306,8 @@ SETTINGS_SPEC = [
     ("EMBED_COVER_ART", "1", "Embed the Spotify album cover (largest size, cached under data/artwork) when tagging imported or re-tagged files (1 = on, 0 = off). A failed fetch never fails the import", "bool"),
     ("FILE_NAME_TEMPLATE", naming.DEFAULT_TEMPLATE, "Name for newly imported files (existing files keep their names until you apply a rename on Library -> Rename). Tokens: " + " ".join(f"{{{t}}}" for t in naming.TOKENS) + "; numbers take a zero-pad width, e.g. {track:02} {playlist_index:03}. The extension is the file's own. {original_filename} (the default) keeps the peer's file name. Unsafe characters are replaced, Windows-reserved names avoided and names capped at 200 bytes; an existing file is never overwritten (' (2)' is added)", "template"),
     ("LINK_MODE", "hardlink", "A track already downloaded in another playlist (same Spotify id or ISRC) is linked into this playlist's folder instead of being searched and downloaded again. hardlink: no extra disk space, falls back to a copy across filesystems; copy: an independent file; off: always download. Removing one playlist's copy never affects the other", "choice:hardlink|copy|off"),
+    ("WRITE_M3U", "1", "Keep a '<playlist name>.m3u8' in each playlist folder: the downloaded tracks in Spotify playlist order, relative paths, UTF-8 (1 = on, 0 = off). Rewritten after each sync when it changed", "bool"),
+    ("WRITE_PLAYLIST_COVER", "1", "Keep a cover.jpg in each playlist folder from the Spotify playlist image (cached under data/artwork; replaces an existing cover.jpg there) (1 = on, 0 = off)", "bool"),
     ("RECYCLE_BIN_RETENTION_DAYS", "0", "Files replaced by an upgrade or a manual grab go to the recycle bin, .quarantine/<playlist>/replaced/. When this is above 0, a daily step deletes those older than this many days (counted from when they were replaced). 0 = keep them forever. Files you quarantined yourself (.quarantine/<playlist>/) are never deleted automatically", "int0"),
     ("LIBRARY_SCAN_INTERVAL_HOURS", "0", "Re-verify every library file (tags, duration, ISRC, lossless check) this often; report-only, a few hundred files per cycle. 0 = only when you press Scan library", "int0"),
 ]

@@ -72,7 +72,7 @@ def list_playlists(conn: sqlite3.Connection, only_enabled: bool = False) -> list
     try:
         sql = (
             "SELECT playlist_id, name, table_name, snapshot_id, last_synced, "
-            "enabled, added_at FROM playlists_meta"
+            "enabled, added_at, cover_url FROM playlists_meta"
         )
         if only_enabled:
             sql += " WHERE enabled = 1"
@@ -87,12 +87,24 @@ def list_playlists(conn: sqlite3.Connection, only_enabled: bool = False) -> list
                 "last_synced": r[4],
                 "enabled": bool(r[5]) if r[5] is not None else True,
                 "added_at": r[6],
+                "cover_url": r[7],
             }
             for r in rows
         ]
     except sqlite3.Error as e:
         logging.error(f"Could not list playlists: {e}")
         return []
+
+
+def set_playlist_cover_url(conn: sqlite3.Connection, playlist_id: str, url: str | None) -> None:
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE playlists_meta SET cover_url = ? WHERE playlist_id = ?",
+                (url, playlist_id),
+            )
+    except sqlite3.Error as e:
+        logging.error(f"Could not store the cover of playlist {playlist_id}: {e}")
 
 
 def set_playlist_enabled(conn: sqlite3.Connection, playlist_id: str, enabled: bool) -> None:

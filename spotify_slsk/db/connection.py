@@ -95,7 +95,7 @@ def _add_track_columns(conn: sqlite3.Connection, table_name: str) -> None:
 def _ensure_playlists_meta_table(conn: sqlite3.Connection) -> None:
     """Catalogue table keyed by Spotify playlist id — source of truth for
     which playlists the daemon syncs. `enabled` and `added_at` arrived in
-    schema v3; the ALTER TABLE guards handle v2 DBs on upgrade.
+    schema v3, `cover_url` in v8; the ALTER TABLE guards handle older DBs.
     """
     try:
         with conn:
@@ -117,6 +117,8 @@ def _ensure_playlists_meta_table(conn: sqlite3.Connection) -> None:
                 )
             if "added_at" not in cols:
                 conn.execute("ALTER TABLE playlists_meta ADD COLUMN added_at TIMESTAMP")
+            if "cover_url" not in cols:  # v8: the playlist's Spotify image
+                conn.execute("ALTER TABLE playlists_meta ADD COLUMN cover_url TEXT")
     except sqlite3.Error as e:
         logging.error(f"Error ensuring playlists_meta: {e}")
 

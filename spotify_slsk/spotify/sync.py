@@ -17,6 +17,7 @@ from ..db import (
     insert_track,
     list_playlists,
     rename_playlist_meta,
+    set_playlist_cover_url,
     upsert_playlist_meta,
 )
 from ..models import Track
@@ -43,7 +44,7 @@ def fetch_and_compare_tracks(
 ) -> tuple[list[Track], str]:
     # Pull the playlist root (cheap one-page call). snapshot_id lets us skip
     # the expensive paginated track fetch when nothing has changed.
-    playlist_info = sp.playlist(playlist_id, fields="name,snapshot_id")
+    playlist_info = sp.playlist(playlist_id, fields="name,snapshot_id,images")
     playlist_title = playlist_info["name"]
     snapshot_id = playlist_info.get("snapshot_id")
     table_name = sanitize_table_name(playlist_title)
@@ -58,6 +59,8 @@ def fetch_and_compare_tracks(
     # empty placeholder table ("0 / 0 downloaded" mid-sync).
     if stored_table is not None and (stored_table, stored_name) != (table_name, playlist_title):
         rename_playlist_meta(conn, playlist_id, table_name, playlist_title)
+    # Every call: a new playlist image doesn't always change the snapshot.
+    set_playlist_cover_url(conn, playlist_id, _largest_image_url(playlist_info.get("images")))
     if stored_snapshot and snapshot_id and stored_snapshot == snapshot_id:
         logging.info(
             f"Playlist {playlist_title} unchanged (snapshot {snapshot_id[:8]}); "
