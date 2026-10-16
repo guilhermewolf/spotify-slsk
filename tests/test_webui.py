@@ -394,6 +394,24 @@ class TestSettingsValidation:
                  follow_redirects=True)
         assert b"must be" in r.data
 
+    def test_every_setting_is_rendered(self, client):
+        # The form clears every key it does not send, so an unrendered key
+        # had its override silently deleted on the next save.
+        from spotify_slsk.config import SETTINGS_SPEC
+
+        r = client.get("/settings")
+        for key, *_ in SETTINGS_SPEC:
+            assert f'name="{key}"'.encode() in r.data, key
+
+    def test_bool_setting_is_normalised(self, app_tmp, client):
+        post(client, "/settings", data={"LOSSLESS_CHECK_ENABLED": "off"})
+        r = post(client, "/settings", data={"LOSSLESS_CHECK_ENABLED": "maybe"},
+                 follow_redirects=True)
+        assert b"must be 1 (on) or 0 (off)" in r.data
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        assert db.list_settings(conn).get("LOSSLESS_CHECK_ENABLED") == "0"
+        conn.close()
+
     def test_unknown_audio_format_is_rejected(self, client):
         r = post(client, "/settings", data={"SLSKD_PREFERRED_FORMATS": "flac,exe"},
                  follow_redirects=True)

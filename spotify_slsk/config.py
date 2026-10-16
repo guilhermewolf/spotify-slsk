@@ -72,6 +72,11 @@ EARLY_STOP_RESPONSES = int(os.getenv("SLSKD_EARLY_STOP_RESPONSES", "20"))
 # Reject a candidate whose slskd-reported length differs from Spotify's
 # duration by more than this many seconds. 0 disables the check.
 MAX_DURATION_DIFF_SECONDS = int(os.getenv("SLSKD_MAX_DURATION_DIFF_SECONDS", "15"))
+# Fake-lossless detection (importer/audio_check.py). Measured margins between
+# real masters and lossy transcodes are only ~3-5 dB, hence tunable.
+LOSSLESS_CHECK_ENABLED = os.getenv("LOSSLESS_CHECK_ENABLED", "1") == "1"
+LOSSLESS_FAKE_CUTOFF_HZ = int(os.getenv("LOSSLESS_FAKE_CUTOFF_HZ", "19500"))
+LOSSLESS_MIN_DROP_DB = int(os.getenv("LOSSLESS_MIN_DROP_DB", "15"))
 
 
 def reload(conn: sqlite3.Connection) -> None:
@@ -85,6 +90,7 @@ def reload(conn: sqlite3.Connection) -> None:
     global PREFERRED_FORMATS, MIN_PEER_UPLOAD_SPEED, MIN_EFFECTIVE_MP3_KBPS
     global EARLY_STOP_RESPONSES, EXTERNAL_PROCESS_WAIT_TIMEOUT
     global MAX_DURATION_DIFF_SECONDS
+    global LOSSLESS_CHECK_ENABLED, LOSSLESS_FAKE_CUTOFF_HZ, LOSSLESS_MIN_DROP_DB
     try:
         MIN_MATCH_SCORE = float(get_setting(conn, "MIN_MATCH_SCORE", "0.62"))
     except (TypeError, ValueError) as e:
@@ -115,6 +121,12 @@ def reload(conn: sqlite3.Connection) -> None:
         )
     except (TypeError, ValueError) as e:
         logging.warning(f"Bad numeric setting during refresh; using previous values: {e}")
+    LOSSLESS_CHECK_ENABLED = get_setting(conn, "LOSSLESS_CHECK_ENABLED", "1") == "1"
+    try:
+        LOSSLESS_FAKE_CUTOFF_HZ = int(get_setting(conn, "LOSSLESS_FAKE_CUTOFF_HZ", "19500"))
+        LOSSLESS_MIN_DROP_DB = int(get_setting(conn, "LOSSLESS_MIN_DROP_DB", "15"))
+    except (TypeError, ValueError) as e:
+        logging.warning(f"Bad lossless-check setting during refresh; using previous values: {e}")
 
 
 # ---- settings page spec + validation ----------------------------------------
@@ -133,6 +145,9 @@ SETTINGS_SPEC = [
     ("SLSKD_WAIT_TIMEOUT", "60", "Seconds to wait for a downloaded file to appear on disk", "int1"),
     ("HISTORY_RETENTION_DAYS", "90", "Delete history events older than this many days", "int1"),
     ("UPGRADE_CHECK_INTERVAL_HOURS", "168", "Re-search downloaded tracks for a better version_tier (Extended Mix > Original Mix); 0 disables", "int0"),
+    ("LOSSLESS_CHECK_ENABLED", "1", "Spectrum-check downloaded FLAC/WAV files and reject lossy transcodes (1 = on, 0 = off)", "bool"),
+    ("LOSSLESS_FAKE_CUTOFF_HZ", "19500", "A steep spectral drop below this frequency (Hz) marks a FLAC as a lossy transcode. 128-192 kbps MP3s cut at 16-19 kHz; MP3-320 at ~20 kHz is only flagged 'suspect'", "int1"),
+    ("LOSSLESS_MIN_DROP_DB", "15", "How steep (dB over ~1 kHz) that drop must be. Lower catches more fakes but risks flagging dark-sounding real masters; measured margins are ~3-5 dB", "int1"),
 ]
 
 # Formats the tagging / metadata-extraction code can actually handle.
@@ -159,6 +174,14 @@ def validate_setting(kind: str, value: str) -> tuple[str | None, str | None]:
         if parsed_int < minimum:
             return None, f"must be >= {minimum}"
         return str(parsed_int), None
+
+    if kind == "bool":
+        lowered = value.strip().lower()
+        if lowered in ("1", "true", "yes", "on"):
+            return "1", None
+        if lowered in ("0", "false", "no", "off"):
+            return "0", None
+        return None, "must be 1 (on) or 0 (off)"
 
     if kind == "formats":
         items = [f.strip().lstrip(".").lower() for f in value.split(",")]

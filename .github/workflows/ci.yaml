@@ -17,6 +17,8 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+      - name: Install the flac CLI (fake-lossless decode tests)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends flac
       - name: Install runtime + dev dependencies
         run: make install PYTHON=python
       - name: Syntax-check all Python sources
@@ -43,7 +45,8 @@ jobs:
           docker run --rm --entrypoint sh spotify-slsk:local -c '
             set -e
             [ "$(id -u)" = "1000" ] || { echo "image runs as $(id -u), expected 1000"; exit 1; }
-            python -c "import spotify_slsk.daemon, spotify_slsk.webui"
+            python -c "import numpy, spotify_slsk.daemon, spotify_slsk.webui"
+            flac --version
             echo "image OK"
           '
       - name: Verify no secrets or media were baked into the image
