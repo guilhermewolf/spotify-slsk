@@ -14,6 +14,10 @@
   </div>
 </div>
 
+{% if auth_partial_warning %}
+<p class="flash flash-error" role="alert">{{ auth_partial_warning }}</p>
+{% endif %}
+
 {# Keys are matched explicitly so a new setting must be placed deliberately. #}
 {% set groups = [
   ('Match quality', 'What counts as an acceptable file',

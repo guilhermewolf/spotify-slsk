@@ -124,7 +124,14 @@ def _ui_exposure_check(conn: sqlite3.Connection) -> Check | None:
     if os.getenv("UI_ENABLED", "1") != "1":
         return None
     bind = os.getenv("UI_BIND_ADDR", "0.0.0.0")
-    if config.ui_auth_configured(conn):
+    state = config.ui_auth_state(conn)
+    if state == "partial":
+        return _check(
+            "ui_auth", ERROR,
+            "only one of UI_AUTH_USERNAME / UI_AUTH_PASSWORD is set, so the login is OFF "
+            "and the web UI is open to anyone who can reach it. Set both, or neither",
+        )
+    if state == "on":
         return _check("ui_auth", OK, "web UI login is enabled")
     if bind in LOOPBACK_ADDRS:
         return _check("ui_auth", OK, f"web UI bound to {bind} only")

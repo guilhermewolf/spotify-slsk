@@ -23,6 +23,10 @@ from .helpers import wake_daemon
 bp = Blueprint("settings", __name__)
 
 MASK = "••••"
+AUTH_PARTIAL_WARNING = (
+    "Only one of UI_AUTH_USERNAME / UI_AUTH_PASSWORD is set: the login is OFF and "
+    "the web UI is open. Set both to require a login, or clear both."
+)
 
 
 # ---- settings -----------------------------------------------------
@@ -105,6 +109,9 @@ def settings() -> ResponseReturnValue:
     quality_rows = sorted(LADDER, key=lambda q: profile.rank(q.key))
     return render_template(
         "settings.html",
+        auth_partial_warning=(
+            AUTH_PARTIAL_WARNING if config.ui_auth_state(g.conn) == "partial" else None
+        ),
         spec=SETTINGS_SPEC,
         overrides=overrides,
         effective=effective,

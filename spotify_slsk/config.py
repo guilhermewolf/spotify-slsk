@@ -116,12 +116,19 @@ NOTIFICATION_EVENTS = (
 UI_AUTH_HASH_KEY = "_ui_auth_password_hash"
 
 
+def ui_auth_state(conn: sqlite3.Connection) -> str:
+    """"on" (username and password set), "off" (neither) or "partial" (one
+    of them: the login is OFF, which the operator probably did not mean)."""
+    has_user = bool(get_setting(conn, "UI_AUTH_USERNAME", ""))
+    has_password = bool(list_settings(conn).get(UI_AUTH_HASH_KEY) or os.getenv("UI_AUTH_PASSWORD"))
+    if has_user and has_password:
+        return "on"
+    return "partial" if has_user or has_password else "off"
+
+
 def ui_auth_configured(conn: sqlite3.Connection) -> bool:
     """Both a username and a password (stored hash or env) are set."""
-    return bool(
-        get_setting(conn, "UI_AUTH_USERNAME", "")
-        and (list_settings(conn).get(UI_AUTH_HASH_KEY) or os.getenv("UI_AUTH_PASSWORD"))
-    )
+    return ui_auth_state(conn) == "on"
 
 
 # ---- deploy-time (env only) -------------------------------------------------

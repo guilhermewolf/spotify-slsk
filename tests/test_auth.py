@@ -172,3 +172,16 @@ def test_trusted_proxy_is_opt_in(monkeypatch, tmp_path):
         c.post("/login", data={"csrf_token": "t", "username": "admin", "password": "no"},
                headers={"X-Forwarded-For": "203.0.113.9"})
         assert list(auth._failures) == [expected_key]
+
+
+def test_half_configured_login_is_an_error_and_shown_on_settings(app_tmp, client, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("UI_BIND_ADDR", "127.0.0.1")  # even on loopback
+    post(client, "/settings", {"UI_AUTH_USERNAME": "me"})
+    assert b"the login is OFF" in client.get("/settings").data
+    assert client.get("/").status_code == 200  # really open
+    conn = db.create_connection(app_tmp.config["DB_PATH"])
+    check = {c["name"]: c for c in healthchecks.local_checks(conn)}["ui_auth"]
+    conn.close()
+    assert check["status"] == "error" and "open" in check["message"]
+    post(client, "/settings", {"UI_AUTH_USERNAME": ""})
+    assert b"the login is OFF" not in client.get("/settings").data
