@@ -13,6 +13,7 @@ from ..matching.candidates import (
     sort_candidates,
     summarize_evaluation,
 )
+from ..matching.normalize import NEUTRAL_TITLE_WORDS, fold
 from ..models import Candidate, IsBlocked
 from . import client as slskd_client
 from . import transfers
@@ -39,6 +40,32 @@ def _normalize_query_text(text: str) -> str:
     return " ".join(text.lower().split())
 
 
+def _is_release_words(segment: str) -> bool:
+    """True for a title segment made only of neutral release words and years
+    ("Radio Edit", "Remastered 2011", "Extended Mix")."""
+    words = fold(segment).split()
+    return bool(words) and all(w in NEUTRAL_TITLE_WORDS or w.isdigit() for w in words)
+
+
+def _strip_release_suffixes(title: str) -> str:
+    """Drop "(Radio Edit)" / " - Remastered 2011"-style segments from a title.
+
+    Peers name the same recording with or without these words, so keeping
+    them only narrows the slskd search; worse, the album-stripping variant
+    could then leave *only* them ("radio edit reber"). Named versions
+    ("Mefjus Remix") are kept - they identify a different recording.
+    """
+    t = re.sub(
+        r"[\(\[]([^\)\]]*)[\)\]]",
+        lambda m: " " if _is_release_words(m.group(1)) else m.group(0),
+        title,
+    )
+    parts = re.split(r"\s+[-\u2013\u2014]\s+", t)
+    kept = " ".join(p for i, p in enumerate(parts) if i == 0 or not _is_release_words(p))
+    kept = " ".join(kept.split())
+    return kept if fold(kept) else title
+
+
 def _build_search_queries(artist: str, title: str, album: str | None = None) -> list:
     """
     Return a waterfall of slskd queries, most- to least-specific. Non-ASCII
@@ -46,15 +73,23 @@ def _build_search_queries(artist: str, title: str, album: str | None = None) -> 
     """
     queries = []
     seen = set()
+    raw_title = _strip_release_suffixes((title or "").strip())
+
+    # Every query must keep at least one core title word: a variant made of
+    # artist + version words alone finds every track the artist ever made.
+    folded = fold(_normalize_query_text(raw_title)).split()
+    core = {w for w in folded if w not in NEUTRAL_TITLE_WORDS and not w.isdigit()} or set(folded)
 
     def add(q: str):
         q = (q or "").strip()
         key = q.lower()
-        if q and key not in seen:
-            seen.add(key)
-            queries.append(q)
+        if not q or key in seen:
+            return
+        if core and not core & set(fold(_normalize_query_text(q)).split()):
+            return
+        seen.add(key)
+        queries.append(q)
 
-    raw_title = (title or "").strip()
     raw_artist = (artist or "").strip()
     raw_album = (album or "").strip()
 
