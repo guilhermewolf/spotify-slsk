@@ -26,6 +26,7 @@ import secrets
 import threading
 
 from flask import Flask, abort, g, request, session
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from .. import db
 from ..utils import fmt_duration
@@ -81,6 +82,11 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
         static_folder="static",
         static_url_path="/static",
     )
+    if os.getenv("UI_TRUST_PROXY", "0") == "1":
+        # One reverse proxy in front: take the client IP (login rate limit,
+        # logs) from its X-Forwarded-For. Without a proxy this would let
+        # clients pick their own address, hence opt-in.
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)  # type: ignore[method-assign]
     app.config["DB_PATH"] = db_path
     app.config["SPOTIFY"] = spotify_client
     # Optional callable invoked after state-changing requests so the daemon's

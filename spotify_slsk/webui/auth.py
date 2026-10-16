@@ -22,7 +22,7 @@ import logging
 import os
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 
 from flask import (
     Blueprint,
@@ -48,8 +48,12 @@ FAILURE_WINDOW_SECONDS = 15 * 60
 # Reachable without a login.
 PUBLIC_ENDPOINTS = frozenset({"static", "system.healthz", "auth.login"})
 
+# Tracked client IPs, least recently failed first. Bounded, so a flood of
+# addresses cannot grow it without limit; expired entries are pruned.
+MAX_TRACKED_IPS = 1000
+
 _failures_lock = threading.Lock()
-_failures: dict[str, deque[float]] = {}
+_failures: OrderedDict[str, deque[float]] = OrderedDict()
 
 
 def env_password_hash() -> str | None:
@@ -103,15 +107,22 @@ def _safe_next(target: str | None) -> str:
     return url_for("playlists.dashboard")
 
 
+def _prune(now: float) -> None:
+    """Drop expired attempts and IPs left with none. Caller holds the lock."""
+    for ip in list(_failures):
+        attempts = _failures[ip]
+        while attempts and now - attempts[0] > FAILURE_WINDOW_SECONDS:
+            attempts.popleft()
+        if not attempts:
+            del _failures[ip]
+
+
 def _too_many(ip: str, now: float) -> int:
     """Seconds until `ip` may try again, or 0."""
     with _failures_lock:
+        _prune(now)
         attempts = _failures.get(ip)
-        if not attempts:
-            return 0
-        while attempts and now - attempts[0] > FAILURE_WINDOW_SECONDS:
-            attempts.popleft()
-        if len(attempts) < MAX_FAILURES:
+        if not attempts or len(attempts) < MAX_FAILURES:
             return 0
         return int(FAILURE_WINDOW_SECONDS - (now - attempts[0])) + 1
 
@@ -119,6 +130,9 @@ def _too_many(ip: str, now: float) -> int:
 def _record_failure(ip: str, now: float) -> None:
     with _failures_lock:
         _failures.setdefault(ip, deque(maxlen=MAX_FAILURES)).append(now)
+        _failures.move_to_end(ip)
+        while len(_failures) > MAX_TRACKED_IPS:
+            _failures.popitem(last=False)
 
 
 @bp.route("/login", methods=["GET", "POST"])

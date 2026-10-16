@@ -142,3 +142,33 @@ def test_healthz_error_shows_only_the_exception_type(client, monkeypatch):  # no
     body = client.get("/healthz").get_json()
     assert body["checks"][0]["message"] == "RuntimeError"
     assert "/secret/path" not in str(body)
+
+
+def test_rate_limit_state_is_pruned_and_bounded(monkeypatch):
+    now = 1_000_000.0
+    for _ in range(3):
+        auth._record_failure("10.0.0.1", now)
+    assert auth._too_many("10.0.0.1", now + auth.FAILURE_WINDOW_SECONDS + 1) == 0
+    assert "10.0.0.1" not in auth._failures  # expired and empty: dropped
+    monkeypatch.setattr(auth, "MAX_TRACKED_IPS", 3)
+    for i in range(5):
+        auth._record_failure(f"10.0.1.{i}", now)
+    assert list(auth._failures) == ["10.0.1.2", "10.0.1.3", "10.0.1.4"]
+
+
+def test_trusted_proxy_is_opt_in(monkeypatch, tmp_path):
+    monkeypatch.setenv("UI_AUTH_USERNAME", "admin")
+    monkeypatch.setenv("UI_AUTH_PASSWORD", "pw")
+    db_path = str(tmp_path / "p.db")
+    db.create_connection(db_path).close()
+    for trust, expected_key in (("0", "127.0.0.1"), ("1", "203.0.113.9")):
+        auth._failures.clear()
+        monkeypatch.setenv("UI_TRUST_PROXY", trust)
+        app = create_app(db_path)
+        app.config.update(TESTING=True)
+        c = app.test_client()
+        with c.session_transaction() as sess:
+            sess["_csrf_token"] = "t"
+        c.post("/login", data={"csrf_token": "t", "username": "admin", "password": "no"},
+               headers={"X-Forwarded-For": "203.0.113.9"})
+        assert list(auth._failures) == [expected_key]

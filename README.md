@@ -97,6 +97,7 @@ Set these in `.env`. Everything has a working default except the credentials.
 | `UI_ENABLED` / `UI_BIND_ADDR` / `UI_PORT` | Dashboard toggle and bind (default `1`, `0.0.0.0`, `8000`) |
 | `UI_SECRET_KEY` | Flask secret. Generated and stored in the DB if unset |
 | `UI_COOKIE_SECURE` | Set `1` when a reverse proxy terminates TLS |
+| `UI_TRUST_PROXY` | Set `1` behind one reverse proxy so the login rate limit sees the real client IP |
 | `PUID` / `PGID` | UID/GID for the container (default `1000:1000`) |
 | `LOGLEVEL` / `LIB_LOGLEVEL` / `TIMEZONE` | Logging verbosity and timestamps |
 
@@ -403,7 +404,9 @@ set `UI_COOKIE_SECURE=1` if a proxy terminates TLS.
 on **Settings → System**. Every page then requires a login except `/healthz`
 (so Docker and monitors keep working). The password is stored only as a salted
 hash (a password saved on Settings replaces the one from `.env`), five failed
-logins from one address lock it out for 15 minutes, and changing the password
+logins from one address lock it out for 15 minutes (behind a reverse proxy,
+set `UI_TRUST_PROXY=1` so the client address comes from `X-Forwarded-For`;
+only with a proxy really in front), and changing the password
 logs every other session out. Locked out? Stop the container and run
 `sqlite3 data/playlist_tracks.db "DELETE FROM settings WHERE key IN ('UI_AUTH_USERNAME','_ui_auth_password_hash')"`,
 then remove the variables from `.env`.

@@ -271,8 +271,9 @@ confused deputy, so:
   `_ui_auth_password_hash` (wins over env). A before_request guard (after the
   DB opens) covers every route but `/healthz`, `/login` and `static`; htmx
   requests get 401 + `HX-Redirect`. Login clears the session (no fixation),
-  rate-limits 5 failures per IP per 15 min in memory (behind a proxy that is
-  one IP), only follows local `?next=` paths, and stores a fingerprint of the
+  rate-limits 5 failures per IP per 15 min in memory (expired entries pruned,
+  at most 1000 IPs, LRU; behind a proxy that is one IP unless
+  `UI_TRUST_PROXY=1`, which applies werkzeug `ProxyFix(x_for=1)`), only follows local `?next=` paths, and stores a fingerprint of the
   hash so a password change logs other sessions out. Lockout recovery:
   `DELETE FROM settings WHERE key IN ('UI_AUTH_USERNAME','_ui_auth_password_hash')`.
 - **Secrets in settings** (`kind` `secret`/`password`: `WEBHOOK_HEADER_VALUE`,
@@ -465,7 +466,7 @@ Deploy-time / infra (env only):
 - `HEARTBEAT_FILE`, `HEARTBEAT_STALE_SECONDS`
 - `LOGLEVEL`, `LIB_LOGLEVEL`, `TIMEZONE`
 - `PUID`/`PGID` (compose user override; the image itself is `USER 1000:1000`)
-- `UI_ENABLED` (1), `UI_BIND_ADDR` (0.0.0.0), `UI_PORT` (8000), `UI_SECRET_KEY`, `UI_COOKIE_SECURE` (0)
+- `UI_ENABLED` (1), `UI_BIND_ADDR` (0.0.0.0), `UI_PORT` (8000), `UI_SECRET_KEY`, `UI_COOKIE_SECURE` (0), `UI_TRUST_PROXY` (0)
 - `UI_AUTH_PASSWORD` — env form of the login password (hashed in memory; a
   password saved on /settings wins)
 - `SPOTIFY_PLAYLIST_URLS` — read **only on first boot** to seed the DB

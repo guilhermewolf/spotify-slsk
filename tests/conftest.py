@@ -39,6 +39,7 @@ _ISOLATED_ENV = {
     # would redirect) or point notifications at a real server.
     "UI_AUTH_USERNAME": "",
     "UI_AUTH_PASSWORD": "",
+    "UI_TRUST_PROXY": "0",
     "WEBHOOK_URL": "",
     "WEBHOOK_HEADER_VALUE": "",
     "SUBSONIC_URL": "",
