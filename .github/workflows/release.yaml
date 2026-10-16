@@ -1,73 +1,183 @@
-name: Build, Tag, and Push Docker Image
+name: Release
 
+# One run per push, in this order:
+#
+#   ci (the full CI workflow: make check, make smoke, Trivy)
+#    └─ release-please (main only: open/update the release PR, or — when that
+#       PR was just merged — create the vX.Y.Z tag + GitHub release)
+#        └─ publish (multi-arch image + SBOM + provenance + attestation)
+#
+# Nothing is published unless CI passed for that exact commit. The tag that
+# release-please creates is made with GITHUB_TOKEN, which never triggers
+# another workflow run — so its images are published here, in the same run,
+# from release-please's outputs. A tag pushed by a human (e.g. an RC) does
+# trigger this workflow and takes the `tags:` path.
 on:
   push:
     branches:
       - main
     tags:
-      - 'v*.*.*'
-  workflow_dispatch:
+      - "v*.*.*"
+  workflow_dispatch: # rebuild from main, e.g. to pick up base-image fixes
+
+# Queue, never cancel: a cancelled run could be the one that publishes a release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  IMAGE: ghcr.io/guilhermewolf/spotify-slsk/spotify-slsk
 
 jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
+  ci:
+    uses: ./.github/workflows/ci.yaml
     permissions:
       contents: read
-      packages: write
+      security-events: write
 
+  release-please:
+    needs: ci
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - id: rp
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
-          platforms: linux/amd64,linux/arm64
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+  publish:
+    needs: [ci, release-please]
+    # release-please is skipped on tag pushes; publish still runs then.
+    if: >-
+      !cancelled() &&
+      needs.ci.result == 'success' &&
+      needs.release-please.result != 'failure' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub release for a human-pushed tag
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: false
 
-      # Produces this tag set:
-      #   push to main:            :main, :sha-<short>, :latest
-      #   push tag v1.2.3:         :v1.2.3, :1.2.3, :1.2, :1, :sha-<short>
-      #   workflow_dispatch on main: same as push-to-main
-      - name: Extract Docker image metadata
+      # Which channel(s) this run feeds:
+      #   main commit                  -> edge
+      #   release-please release / tag -> + version tags, stable or prerelease
+      - name: Resolve release channel
+        id: channel
+        env:
+          RP_CREATED: ${{ needs.release-please.outputs.release_created }}
+          RP_TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          tag=""
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tag="$GITHUB_REF_NAME"
+          elif [[ "$RP_CREATED" == "true" ]]; then
+            tag="$RP_TAG"
+          fi
+          if [[ -n "$tag" && ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::'$tag' is not vX.Y.Z or vX.Y.Z-<pre>"; exit 1
+          fi
+          stable=false; prerelease=false
+          if [[ "$tag" == *-* ]]; then prerelease=true; elif [[ -n "$tag" ]]; then stable=true; fi
+          edge=false
+          [[ "$GITHUB_REF" == refs/heads/main ]] && edge=true
+          {
+            echo "tag=$tag"
+            echo "stable=$stable"
+            echo "prerelease=$prerelease"
+            echo "edge=$edge"
+          } >> "$GITHUB_OUTPUT"
+          echo "tag='$tag' stable=$stable prerelease=$prerelease edge=$edge"
+
+      # Tag matrix:
+      #   main commit:  :main :edge :sha-<short>
+      #   vX.Y.Z:       :X.Y.Z :X.Y :X :latest :beta :sha-<short>
+      #   vX.Y.Z-rc.N:  :X.Y.Z-rc.N :beta :sha-<short>   (never :latest/:X/:X.Y)
+      # :beta also follows stable releases so the beta channel is never older
+      # than :latest. latest=false stops metadata-action adding :latest itself.
+      - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/guilhermewolf/spotify-slsk/spotify-slsk
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=false
           tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
+            type=raw,value=main,enable=${{ steps.channel.outputs.edge }}
+            type=raw,value=edge,enable=${{ steps.channel.outputs.edge }}
             type=sha,prefix=sha-,format=short
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}},value=${{ steps.channel.outputs.tag }},enable=${{ steps.channel.outputs.tag != '' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.channel.outputs.tag }},enable=${{ steps.channel.outputs.stable }}
+            type=semver,pattern={{major}},value=${{ steps.channel.outputs.tag }},enable=${{ steps.channel.outputs.stable }}
+            type=raw,value=latest,enable=${{ steps.channel.outputs.stable }}
+            type=raw,value=beta,enable=${{ steps.channel.outputs.tag != '' }}
           labels: |
             org.opencontainers.image.title=spotify-slsk
             org.opencontainers.image.description=Spotify playlist → Soulseek downloader with a Flask dashboard
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.licenses=MIT
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: linux/amd64,linux/arm64
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Cache layers across runs so tag-only pushes rebuild in seconds.
+          # SBOM + max-mode SLSA provenance, stored as attestation manifests
+          # next to the image in GHCR.
+          sbom: true
+          provenance: mode=max
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Log out from GitHub Container Registry
-        if: always()
-        run: docker logout ghcr.io
+      # Signed (Sigstore) build provenance tied to this repo and workflow,
+      # verifiable with `gh attestation verify oci://<image> -R <repo>`.
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      # release-please already created the release for its own tags; a tag a
+      # human pushed (e.g. an RC) gets one here, marked prerelease if it is one.
+      - name: Create GitHub release for a pushed tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.channel.outputs.tag }}
+          PRERELEASE: ${{ steps.channel.outputs.prerelease }}
+        run: |
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $TAG already exists"; exit 0
+          fi
+          args=(--verify-tag --generate-notes)
+          [[ "$PRERELEASE" == "true" ]] && args+=(--prerelease) || args+=(--latest)
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" "${args[@]}"

@@ -6,4 +6,6 @@ must not pull in spotipy, mutagen or slskd_api, so tests and tooling can
 import a single submodule cheaply.
 """
 
-__version__ = "0.1.0"
+# Single source of the version: pyproject.toml reads it, /system/status shows
+# it, and release-please bumps it (the annotation below) in each release PR.
+__version__ = "2.0.0"  # x-release-please-version
