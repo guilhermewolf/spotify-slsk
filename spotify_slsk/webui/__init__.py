@@ -32,12 +32,14 @@ from .. import db, runtime_state
 from ..utils import fmt_duration
 from . import auth, health, library, playlists, queue, settings, system, tracks, wanted
 from .helpers import (
+    PHASE_LABELS,
     fmt_age,
     fmt_interval,
     fmt_ts,
     group_by_reason,
     health_snapshot,
     human_bytes,
+    phase_label,
     shell_health,
 )
 
@@ -150,6 +152,8 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
     app.jinja_env.filters["interval"] = fmt_interval
     app.jinja_env.filters["age"] = fmt_age
     app.jinja_env.filters["by_reason"] = group_by_reason
+    app.jinja_env.filters["phase_label"] = phase_label
+    app.jinja_env.globals["PHASE_LABELS"] = PHASE_LABELS
     app.jinja_env.filters["duration_ms"] = (
         lambda ms: fmt_duration(ms / 1000) if ms else "—"
     )

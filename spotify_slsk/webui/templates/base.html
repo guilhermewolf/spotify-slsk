@@ -88,10 +88,10 @@
           {% endif %}
           {% if shell_activity is defined and shell_activity %}
           <p class="shell-activity" id="shell-activity" data-phase="{{ shell_activity.phase }}"
-             data-src="{{ url_for('system.activity_json') }}">
+             data-src="{{ url_for('system.activity_json') }}" data-labels="{{ PHASE_LABELS|tojson|forceescape }}">
             <span class="dot" aria-hidden="true"></span>
             <span class="text" title="{{ shell_activity.detail or '' }}">
-              {{- shell_activity.phase|replace('_', ' ')|capitalize -}}
+              {{- shell_activity.phase|phase_label -}}
               {%- if shell_activity.playlist_name %}: {{ shell_activity.playlist_name }}{% endif -%}
             </span>
           </p>

@@ -1155,3 +1155,15 @@ class TestSidebarHealthBadge:
         monkeypatch.setenv("HEARTBEAT_FILE", str(hb))
         page = self._page(client, monkeypatch, [])
         assert "health-error" in page and "Problem (1)" in page
+
+
+def test_activity_phase_uses_readable_labels(client):
+    """The banner rendered 'Waiting Slskd'; phases come from a label map."""
+    from spotify_slsk import runtime_state
+    from spotify_slsk.webui.helpers import phase_label
+
+    assert phase_label("waiting_slskd") == "Waiting for slskd"
+    assert phase_label("some_new_phase") == "Some new phase"
+    runtime_state.set_activity("waiting_slskd", detail="x")
+    page = client.get("/").data.decode()
+    assert "Waiting for slskd" in page and "Waiting Slskd" not in page

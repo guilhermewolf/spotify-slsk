@@ -5,9 +5,14 @@
 (function () {
   const POLL_MS = 10000;
 
-  function label(a) {
-    const phase = String(a.phase || 'idle').replace(/_/g, ' ');
-    const text = phase.charAt(0).toUpperCase() + phase.slice(1);
+  // Same wording as the server (webui.helpers.PHASE_LABELS, in data-labels).
+  function label(a, labels) {
+    const phase = String(a.phase || 'idle');
+    let text = labels[phase];
+    if (!text) {
+      const words = phase.replace(/_/g, ' ');
+      text = words.charAt(0).toUpperCase() + words.slice(1);
+    }
     return a.playlist_name ? `${text}: ${a.playlist_name}` : text;
   }
 
@@ -15,6 +20,8 @@
     const el = document.getElementById('shell-activity');
     if (!el || !el.dataset.src) return;
     const text = el.querySelector('.text');
+    let labels = {};
+    try { labels = JSON.parse(el.dataset.labels || '{}'); } catch (_) { }
 
     async function refresh() {
       if (document.hidden) return;
@@ -23,7 +30,7 @@
         if (!r.ok) return;
         const a = await r.json();
         el.dataset.phase = a.phase || 'idle';
-        text.textContent = label(a);  // text, never HTML
+        text.textContent = label(a, labels);  // text, never HTML
         text.title = a.detail || '';
       } catch (_) { /* offline or restarting: keep the last value */ }
     }

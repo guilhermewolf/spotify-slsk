@@ -65,6 +65,29 @@ def human_bytes(n: float) -> str:
     return f"{n:.1f} PiB"
 
 
+# Daemon phases (runtime_state.set_activity) as people read them. The
+# sidebar's shell.js gets this same map via a data attribute.
+PHASE_LABELS = {
+    "starting": "Starting",
+    "waiting_slskd": "Waiting for slskd",
+    "reconciling": "Matching files on disk",
+    "idle": "Idle",
+    "syncing": "Syncing from Spotify",
+    "downloading": "Downloading",
+    "upgrading": "Looking for upgrades",
+    "scanning": "Scanning library",
+    "task": "Running a task",
+    "shutting_down": "Shutting down",
+}
+
+
+def phase_label(phase: str | None) -> str:
+    """'waiting_slskd' -> 'Waiting for slskd'; an unknown phase keeps its
+    wording ('some_phase' -> 'Some phase'), never title case."""
+    phase = phase or "idle"
+    return PHASE_LABELS.get(phase) or phase.replace("_", " ").capitalize()
+
+
 def shell_health(snapshot: dict) -> dict:
     """The sidebar badge: the worst of the structured checks (the same list
     as /system/status), with a stale heartbeat or wrong schema from
