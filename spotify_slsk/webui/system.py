@@ -21,6 +21,7 @@ from flask.typing import ResponseReturnValue
 
 from .. import __version__, backup, config, db, healthchecks, runtime_state, tasks
 from ..library.health import SCAN_PENDING_KEY
+from . import auth
 from .helpers import health_snapshot, is_htmx, notify_user, wake_daemon
 
 bp = Blueprint("system", __name__)
@@ -90,10 +91,16 @@ def healthz() -> ResponseReturnValue:
     """`ok` (schema version + heartbeat) decides the status code, as
     before; `checks` is informational and never fails the probe."""
     snapshot = health_snapshot()
-    try:
-        snapshot["checks"] = healthchecks.collect(g.conn)
-    except Exception as e:  # a check must never break the probe
-        snapshot["checks"] = [{"name": "checks", "status": "error", "message": str(e)}]
+    # /healthz is public (Docker, monitors). The checks name paths, disk
+    # space and what is misconfigured, so with a login configured only a
+    # logged-in caller gets them.
+    if auth.credentials() is None or auth.current_user() is not None:
+        try:
+            snapshot["checks"] = healthchecks.collect(g.conn)
+        except Exception as e:  # a check must never break the probe
+            snapshot["checks"] = [
+                {"name": "checks", "status": "error", "message": type(e).__name__}
+            ]
     return jsonify(snapshot), 200 if snapshot["ok"] else 503
 
 

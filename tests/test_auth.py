@@ -119,3 +119,26 @@ def test_health_check_warns_when_exposed_without_login(tmp_path, monkeypatch):
     monkeypatch.setenv("UI_AUTH_PASSWORD", "pw")
     assert status() == "ok"
     conn.close()
+
+
+def test_healthz_hides_checks_from_anonymous_callers_when_auth_is_on(env_auth):
+    c = env_auth.test_client()
+    r = c.get("/healthz")
+    body = r.get_json()
+    assert r.status_code == 200 and body["ok"] is True  # Docker/monitors unaffected
+    assert {"ok", "reason", "schema_version", "heartbeat_age_seconds"} <= set(body)
+    assert "checks" not in body
+    login(c)
+    assert "checks" in c.get("/healthz").get_json()
+
+
+def test_healthz_error_shows_only_the_exception_type(client, monkeypatch):  # noqa: F811
+    from spotify_slsk import healthchecks
+
+    def boom(conn):
+        raise RuntimeError("/secret/path/details")
+
+    monkeypatch.setattr(healthchecks, "collect", boom)
+    body = client.get("/healthz").get_json()
+    assert body["checks"][0]["message"] == "RuntimeError"
+    assert "/secret/path" not in str(body)

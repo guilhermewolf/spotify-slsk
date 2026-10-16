@@ -137,7 +137,8 @@ def health_snapshot() -> dict:
             "reason": reason,
         }
     except Exception as e:
-        return {"ok": False, "error": str(e), "reason": str(e)}
+        # Public endpoint: the exception type, never its text.
+        return {"ok": False, "error": type(e).__name__, "reason": type(e).__name__}
 
 
 # ---- feedback: toasts for htmx actions, flashes otherwise -----------
