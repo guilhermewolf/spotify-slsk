@@ -19,6 +19,19 @@ import threading
 import time
 from collections import deque
 
+from . import config
+
+
+def touch_heartbeat() -> None:
+    """Update config.HEARTBEAT_FILE so the Docker HEALTHCHECK can tell a
+    busy daemon from a wedged one. Never raises."""
+    try:
+        with open(config.HEARTBEAT_FILE, "w") as f:
+            f.write(str(time.time()))
+    except Exception:
+        logging.debug("Could not write heartbeat file", exc_info=True)
+
+
 _lock = threading.Lock()
 _activity: dict = {
     "phase": "starting",

@@ -26,6 +26,8 @@ import sqlite3
 from .db import get_setting
 
 DEFAULT_FORMATS = "flac,mp3,aiff,wav"
+# Formats that claim to be lossless.
+LOSSLESS_EXTS = (".flac", ".wav", ".aiff")
 
 
 def normalize_ext_list(env_val: str) -> list[str]:

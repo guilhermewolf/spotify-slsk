@@ -51,11 +51,7 @@ _wake_event = threading.Event()
 
 def _touch_heartbeat():
     """Update the heartbeat file so Docker HEALTHCHECK can detect a wedged loop."""
-    try:
-        with open(config.HEARTBEAT_FILE, "w") as f:
-            f.write(str(time.time()))
-    except Exception:
-        logging.debug("Could not write heartbeat file", exc_info=True)
+    runtime_state.touch_heartbeat()
 
 
 def _install_signal_handlers():

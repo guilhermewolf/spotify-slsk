@@ -191,6 +191,7 @@ def evaluate_candidates(
     max_version_tier: int | None = None,
     expected_duration_ms: int | None = None,
     is_blocked: IsBlocked | None = None,
+    lossless_only: bool = False,
 ) -> list[Candidate]:
     """
     Judge every file in slskd search results against the expected track.
@@ -205,8 +206,9 @@ def evaluate_candidates(
     (used by the upgrade pass). `expected_duration_ms` (Spotify) rejects
     files whose reported length is more than config.MAX_DURATION_DIFF_SECONDS off.
     `is_blocked(username, filename)` (see db.load_blocklist) rejects
-    blocklisted peer files and banned peers. Title/artist/version use the
-    strict rules in `filename_match`.
+    blocklisted peer files and banned peers. `lossless_only` rejects every
+    lossy format (replacing a "suspect" lossless file). Title/artist/version
+    use the strict rules in `filename_match`.
     """
     evaluated = []
 
@@ -261,6 +263,8 @@ def evaluate_candidates(
                 entry["reason"] = "blocklisted"
             elif ext not in config.PREFERRED_FORMATS:
                 entry["reason"] = f"format not allowed: {ext or '(none)'}"
+            elif lossless_only and ext not in config.LOSSLESS_EXTS:
+                entry["reason"] = "not lossless (replacing a suspect lossless file)"
             # Reject MP3s whose reported/inferred bitrate is known-low.
             elif ext == ".mp3" and effective_bitrate is not None and effective_bitrate < 320:
                 entry["reason"] = f"bitrate {effective_bitrate} < 320"

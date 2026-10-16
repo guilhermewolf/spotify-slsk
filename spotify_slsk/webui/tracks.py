@@ -45,6 +45,7 @@ def track_detail(playlist_id: str, track_id: str) -> ResponseReturnValue:
         track=track,
         search_history=runtime_state.get_search_history(track_id),
         history=db.list_history(g.conn, track_id=track_id, limit=50),
+        check=db.get_file_check(g.conn, table_name, track_id),
         search=runtime_state.get_interactive_search((playlist_id, track_id)),
     )
 
