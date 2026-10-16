@@ -24,7 +24,7 @@
   <div class="empty"><h2>Nothing downloading</h2><p>slskd has no download transfers.</p></div>
 {% else %}
 <div class="table-wrap">
-  <table class="track-table">
+  <table class="track-table queue-table">
     <thead>
       <tr>
         <th scope="col">File</th>
@@ -34,15 +34,15 @@
         <th scope="col" class="num">Speed</th>
         <th scope="col" class="num">ETA</th>
         <th scope="col" class="num">Size</th>
-        <th scope="col">Actions</th>
+        <th scope="col" class="actions-col">Actions</th>
       </tr>
     </thead>
     <tbody>
     {% for r in rows %}
       {% set t = r.transfer %}
       <tr>
-        <td><code>{{ r.basename }}</code><div class="subtle">{{ t.username }}</div></td>
-        <td>
+        <td class="file-cell"><code title="{{ t.filename }}">{{ r.basename }}</code><div class="subtle">{{ t.username }}</div></td>
+        <td class="track-cell">
           {% if r.track_id %}
           <a href="{{ url_for('tracks.track_detail', playlist_id=r.playlist_id, track_id=r.track_id) }}">{{ r.track_name }}</a>
           <div class="subtle">{{ r.playlist_name }}</div>
@@ -59,7 +59,7 @@
         <td class="num nowrap">{{ (t.average_speed | human_bytes) ~ '/s' if t.average_speed else '—' }}</td>
         <td class="num nowrap">{{ r.eta | age if r.eta is not none else '—' }}</td>
         <td class="num nowrap">{{ t.size | human_bytes if t.size else '—' }}</td>
-        <td>
+        <td class="actions-col">
           {% if not r.done and t.id %}
           <div class="card-actions">
             <form method="POST" action="{{ url_for('queue.queue_cancel') }}" class="inline-form"

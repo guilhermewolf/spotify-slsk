@@ -197,3 +197,16 @@ def test_unrelated_transfer_stays_unlinked(seeded, client, fake):  # noqa: F811
                       filename="Other\\01 - Song.flac", size=123)  # same name, other size
     conn.close()
     assert "Song — Artist" not in client.get("/queue").data.decode()
+
+
+def test_queue_table_keeps_actions_reachable(seeded, client, fake):  # noqa: F811
+    """Live: the table overflowed and clipped the Actions column. The table
+    sits in the scroll container, file names are cut with the full path in
+    a title, and the actions column is sticky (app.css .queue-table)."""
+    html = client.get("/queue").data.decode()
+    wrap = html.index('<div class="table-wrap">')
+    assert wrap < html.index('class="track-table queue-table"')
+    assert f'<code title="{FILE}">01 - Song.flac</code>' in html.replace("&#34;", '"')
+    assert html.count('class="actions-col"') == 2  # header + the one active row
+    css = client.get("/static/app.css").data.decode()
+    assert ".queue-table .actions-col" in css and "position: sticky" in css

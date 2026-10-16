@@ -605,3 +605,24 @@ details.confirm[open] { max-width: 22rem; }
   max-width: min(28rem, calc(100vw - 2rem));
 }
 .toast { margin: 0; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15); }
+
+/* Queue: long peer file names are cut (full path in the title) and the
+   actions column sticks to the right edge of the scroll container, so
+   Cancel stays reachable at ~1280px and on a phone. */
+.queue-table .file-cell { max-width: 16rem; }
+.queue-table .file-cell code {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.queue-table .track-cell { min-width: 10rem; max-width: 16rem; overflow-wrap: anywhere; }
+.queue-table .progress { min-width: 4rem; }
+.queue-table .actions-col {
+  position: sticky;
+  right: 0;
+  background: var(--pico-background-color);
+  box-shadow: -1px 0 0 var(--pico-muted-border-color);
+}
+.queue-table .actions-col .card-actions { flex-direction: column; margin: 0; gap: 0.3rem; }
+.queue-table .actions-col button { white-space: nowrap; }
