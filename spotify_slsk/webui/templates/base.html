@@ -32,6 +32,10 @@
              {% if active_page == 'wanted' %}aria-current="page"{% endif %}>Wanted</a>
         </li>
         <li>
+          <a href="{{ url_for('queue.queue_page') }}"
+             {% if active_page == 'queue' %}aria-current="page"{% endif %}>Queue</a>
+        </li>
+        <li>
           <a href="{{ url_for('wanted.history_page') }}"
              {% if active_page == 'history' %}aria-current="page"{% endif %}>History</a>
         </li>

@@ -33,8 +33,9 @@ def interruptible_sleep(seconds: float) -> bool:
     return _shutdown_event.wait(seconds)
 
 
-def new_client() -> slskd_api.SlskdClient:
-    """Build a fresh SlskdClient from env."""
+def new_client(timeout: float | None = None) -> slskd_api.SlskdClient:
+    """Build a fresh SlskdClient from env. `timeout` overrides
+    SLSKD_HTTP_TIMEOUT (the queue page polls with a short one)."""
     return slskd_api.SlskdClient(
         host=os.getenv("SLSKD_HOST_URL", "http://slskd:5030"),
         api_key=os.getenv("SLSKD_API_KEY"),
@@ -42,7 +43,7 @@ def new_client() -> slskd_api.SlskdClient:
         # Per-request timeout. Without it a slskd that accepts the connection
         # but never answers blocks the daemon thread forever: no shutdown, no
         # heartbeat, until the healthcheck kills the container.
-        timeout=float(os.getenv("SLSKD_HTTP_TIMEOUT", "30")),
+        timeout=timeout or float(os.getenv("SLSKD_HTTP_TIMEOUT", "30")),
     )
 
 

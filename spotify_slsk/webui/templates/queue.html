@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}Queue · spotify-slsk{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Queue</h1>
+    <p class="subtle">
+      slskd's downloads, refreshed every 3 seconds, with the track each one is for
+      when we know it. Cancelling a transfer the daemon is waiting on counts as a failed
+      attempt for that file (it is not blocklisted unless you ask).
+    </p>
+  </div>
+</div>
+
+<div id="queue-live"
+     hx-get="{{ url_for('queue.queue_page') }}"
+     hx-trigger="every 3s"
+     hx-select="#queue-live"
+     hx-swap="outerHTML">
+{% if error %}
+  <div class="empty"><h2>No transfers to show</h2><p>{{ error }}</p></div>
+{% elif not rows %}
+  <div class="empty"><h2>Nothing downloading</h2><p>slskd has no download transfers.</p></div>
+{% else %}
+<div class="table-wrap">
+  <table class="track-table">
+    <thead>
+      <tr>
+        <th scope="col">File</th>
+        <th scope="col">Track</th>
+        <th scope="col">State</th>
+        <th scope="col" class="num">Progress</th>
+        <th scope="col" class="num">Speed</th>
+        <th scope="col" class="num">ETA</th>
+        <th scope="col" class="num">Size</th>
+        <th scope="col">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for r in rows %}
+      {% set t = r.transfer %}
+      <tr>
+        <td><code>{{ r.basename }}</code><div class="subtle">{{ t.username }}</div></td>
+        <td>
+          {% if r.track_id %}
+          <a href="{{ url_for('tracks.track_detail', playlist_id=r.playlist_id, track_id=r.track_id) }}">{{ r.track_name }}</a>
+          <div class="subtle">{{ r.playlist_name }}</div>
+          {% else %}<span class="subtle">—</span>{% endif %}
+        </td>
+        <td class="nowrap">{{ t.state }}</td>
+        <td class="num">
+          <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+               aria-valuenow="{{ r.percent | round | int }}" aria-label="{{ r.basename }} progress">
+            <div class="progress-bar" style="width: {{ r.percent | round | int }}%"></div>
+          </div>
+          {{ r.percent | round | int }}%
+        </td>
+        <td class="num nowrap">{{ (t.average_speed | human_bytes) ~ '/s' if t.average_speed else '—' }}</td>
+        <td class="num nowrap">{{ r.eta | age if r.eta is not none else '—' }}</td>
+        <td class="num nowrap">{{ t.size | human_bytes if t.size else '—' }}</td>
+        <td>
+          {% if not r.done and t.id %}
+          <div class="card-actions">
+            <form method="POST" action="{{ url_for('queue.queue_cancel') }}" class="inline-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <input type="hidden" name="username" value="{{ t.username }}">
+              <input type="hidden" name="id" value="{{ t.id }}">
+              <button type="submit" class="secondary outline">Cancel</button>
+            </form>
+            <form method="POST" action="{{ url_for('queue.queue_cancel') }}" class="inline-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <input type="hidden" name="username" value="{{ t.username }}">
+              <input type="hidden" name="id" value="{{ t.id }}">
+              <input type="hidden" name="blocklist" value="1">
+              <button type="submit" class="secondary outline">Cancel + blocklist</button>
+            </form>
+          </div>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% for label, items in pending.items() if items %}
+<article>
+  <header><strong>{{ label }}</strong> <span class="subtle">· {{ items | length }} waiting for the daemon</span></header>
+  <ul>
+    {% for item in items[:50] %}
+    <li>{{ item.track }}{% if item.detail %} <span class="subtle">— {{ item.detail }}</span>{% endif %}</li>
+    {% endfor %}
+    {% if items | length > 50 %}<li class="subtle">… and {{ items | length - 50 }} more</li>{% endif %}
+  </ul>
+</article>
+{% endfor %}
+</div>
+{% endblock %}

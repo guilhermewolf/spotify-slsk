@@ -14,6 +14,7 @@ is what can change them. ``Transfer.outcome`` classifies them.
 """
 from __future__ import annotations
 
+import dataclasses
 import enum
 import os
 import re
@@ -155,6 +156,9 @@ class Transfer:
     size: int | None = None
     state: str = ""
     username: str | None = None
+    bytes_transferred: int | None = None
+    average_speed: float | None = None  # bytes/s
+    percent_complete: float | None = None
 
     @classmethod
     def from_json(cls, data: Any) -> Transfer:
@@ -165,7 +169,30 @@ class Transfer:
             size=_num(d.get("size")),
             state=d.get("state") or "",
             username=d.get("username"),
+            bytes_transferred=_num(d.get("bytesTransferred")),
+            average_speed=_num(d.get("averageSpeed")),
+            percent_complete=_num(d.get("percentComplete")),
         )
+
+    @classmethod
+    def list_from_all_json(cls, data: Any) -> list[Transfer]:
+        """Flatten ``/transfers/downloads`` (a list of per-user payloads).
+        A file without its own ``username`` takes the user's."""
+        out = []
+        for user in data if isinstance(data, list) else []:
+            username = _dict(user).get("username")
+            for t in cls.list_from_user_json(user):
+                out.append(t if t.username else dataclasses.replace(t, username=username))
+        return out
+
+    @property
+    def eta_seconds(self) -> float | None:
+        """Remaining bytes over the average speed, while in progress."""
+        if not (self.size and self.average_speed and self.bytes_transferred is not None):
+            return None
+        if self.outcome is not None:
+            return None
+        return max(0.0, (self.size - self.bytes_transferred) / self.average_speed)
 
     @classmethod
     def list_from_user_json(cls, data: Any) -> list[Transfer]:

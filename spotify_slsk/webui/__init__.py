@@ -11,8 +11,9 @@ header health badge - and registers one blueprint per area:
 * ``tracks``    - track page, retry/re-tag, interactive search and grab
 * ``wanted``    - wanted, history, blocklist
 * ``health``    - library health report, scan / quarantine / ignore
-* ``settings``  - validated tunables, ntfy probe
-* ``system``    - audio preview file, logs, activity, /healthz
+* ``queue``     - live slskd transfers, cancel / cancel + blocklist
+* ``settings``  - validated tunables, notification tests
+* ``system``    - audio preview file, logs, activity, /healthz, status, tasks
 """
 from __future__ import annotations
 
@@ -26,7 +27,7 @@ from flask import Flask, abort, g, request, session
 
 from .. import db
 from ..utils import fmt_duration
-from . import health, library, playlists, settings, system, tracks, wanted
+from . import health, library, playlists, queue, settings, system, tracks, wanted
 from .helpers import fmt_age, fmt_interval, fmt_ts, health_snapshot, human_bytes
 
 # Reserved settings key holding the generated Flask secret. It is not in
@@ -167,7 +168,9 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
             except Exception:
                 logging.debug("Error closing webui conn", exc_info=True)
 
-    for blueprint in (playlists.bp, tracks.bp, wanted.bp, health.bp, library.bp, settings.bp, system.bp):
+    for blueprint in (
+        playlists.bp, tracks.bp, wanted.bp, health.bp, library.bp, queue.bp, settings.bp, system.bp,
+    ):
         app.register_blueprint(blueprint)
 
     @app.context_processor
