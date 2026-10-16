@@ -34,10 +34,13 @@
           <tr>
             <td class="file-cell" title="{{ c.filename }}"><code>{{ c.basename or c.filename }}</code></td>
             <td class="nowrap">
+              <strong>{{ c.quality_label or '—' }}</strong>
+              <div class="subtle">
               {{ c.ext|replace('.', '') }}
               {% if c.bitrate %}· {{ c.bitrate }} kbps{% endif %}
               {% if c.bit_depth %}· {{ c.bit_depth }}-bit{% endif %}
               {% if c.sample_rate %}· {{ (c.sample_rate / 1000)|round(1) }} kHz{% endif %}
+              </div>
             </td>
             <td class="num nowrap">{{ c.size|human_bytes if c.size else '—' }}</td>
             <td class="num">{{ (c.length * 1000)|duration_ms if c.length else '—' }}</td>

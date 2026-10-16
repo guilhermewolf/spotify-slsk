@@ -270,3 +270,31 @@ class TestEnsureQualityProfile:
         config.reload(conn)
         assert config.QUALITY_PROFILE == before
         conn.close()
+
+
+class TestCandidatesCarryQuality:
+    def test_evaluated_candidates_are_stamped(self, monkeypatch):
+        from spotify_slsk import config
+        from spotify_slsk.matching.candidates import evaluate_candidates
+
+        monkeypatch.setattr(config, "QUALITY_PROFILE", q.profile_from_formats([".flac"]))
+        files = [
+            {"filename": "Eminem - Lose Yourself.flac", "size": 75_000_000, "length": 300,
+             "bitDepth": 24, "sampleRate": 96000},
+            {"filename": "Eminem - Lose Yourself.mp3", "size": 9_600_000, "length": 300,
+             "bitRate": 256},
+        ]
+        hi, mp3 = evaluate_candidates([{"username": "u", "files": files}], "Lose Yourself", "Eminem")
+        assert (hi["quality"], hi["quality_label"], hi["accepted"]) == ("FLAC_24", "FLAC 24-bit", True)
+        assert mp3["quality"] == "MP3_LOW"
+        assert mp3["reason"] == "quality not allowed by profile: MP3 256"
+
+    def test_a_flac_only_profile_names_mp3_320(self, monkeypatch):
+        from spotify_slsk import config
+        from spotify_slsk.matching.candidates import evaluate_candidates
+
+        monkeypatch.setattr(config, "QUALITY_PROFILE", q.profile_from_formats([".flac"]))
+        files = [{"filename": "Eminem - Lose Yourself.mp3", "size": 12_000_000, "length": 300,
+                  "bitRate": 320}]
+        (c,) = evaluate_candidates([{"username": "u", "files": files}], "Lose Yourself", "Eminem")
+        assert c["reason"] == "quality not allowed by profile: MP3 320"
