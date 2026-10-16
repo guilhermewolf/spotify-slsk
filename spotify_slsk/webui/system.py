@@ -20,7 +20,7 @@ from flask import (
 )
 from flask.typing import ResponseReturnValue
 
-from .. import __version__, config, db, healthchecks, runtime_state, tasks
+from .. import __version__, backup, config, db, healthchecks, runtime_state, tasks
 from ..library.health import SCAN_PENDING_KEY
 from .helpers import health_snapshot, wake_daemon
 
@@ -134,6 +134,9 @@ def status_page() -> ResponseReturnValue:
         db_path=db_path,
         db_size=_db_size(db_path),
         volumes=volumes,
+        backups=backup.list_backups(g.conn),
+        backup_dir=backup.backup_dir(g.conn),
+        backup_queued=(db.list_task_rows(g.conn).get("db_backup") or {}).get("queued_at") is not None,
     )
 
 
@@ -162,4 +165,5 @@ def task_run(name: str) -> ResponseReturnValue:
         flash(f"{task.label}: queued.", "success")
     else:
         flash(f"{task.label} is already queued.", "success")
-    return redirect(url_for("system.tasks_page"))
+    back = "system.status_page" if request.form.get("next") == "status" else "system.tasks_page"
+    return redirect(url_for(back))

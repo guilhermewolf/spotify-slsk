@@ -18,7 +18,7 @@ from collections.abc import Callable
 
 import spotipy
 
-from . import config, healthchecks, notifications, runtime_state, tasks
+from . import backup, config, healthchecks, notifications, runtime_state, tasks
 from .db import (
     clear_tried_entries,
     create_connection,
@@ -31,7 +31,6 @@ from .db import (
     list_playlists,
     mark_upgrade_checked,
     pop_queued_tasks,
-    prune_history,
     queue_task,
     record_cycle,
     record_task_run,
@@ -493,6 +492,8 @@ def _health_checks(conn: sqlite3.Connection) -> str:
 # (spotify_sync, library_scan, quality_backfill) are recorded where they run.
 SCHEDULED: dict[str, Callable[[sqlite3.Connection], str]] = {
     "recycle_purge": _purge_recycle_bin,
+    "db_backup": backup.run_backup,
+    "housekeeping": backup.housekeeping,
     "db_integrity": _db_integrity,
     "health_checks": _health_checks,
 }
@@ -613,7 +614,6 @@ def main() -> None:
         while not _shutdown.is_set():
             _touch_heartbeat()
             config.reload(conn)
-            prune_history(conn, config.HISTORY_RETENTION_DAYS)
             playlists = list_playlists(conn, only_enabled=True)
             if sp is None:
                 # No Spotify credentials. Idle rather than spin: syncing is

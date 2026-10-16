@@ -1,6 +1,33 @@
 {% extends "base.html" %}
 {% set active_page = 'system' %}
-{% block title %}Status · spotify-slsk{% endblock %}
+{% block title %}Status · spotify-slsk<article id="backups">
+  <header>
+    <strong>Backups</strong>
+    <div class="subtle"><code>{{ backup_dir }}</code> · daily, newest first; retention is BACKUP_RETENTION on Settings</div>
+  </header>
+  <form method="POST" action="{{ url_for('system.task_run', name='db_backup') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="next" value="status">
+    <button type="submit" class="secondary outline" style="width:auto" {% if backup_queued %}disabled{% endif %}>
+      {{ 'Backup queued' if backup_queued else 'Backup now' }}
+    </button>
+  </form>
+  {% if backups %}
+  <div class="table-wrap">
+    <table class="track-table">
+      <thead><tr><th scope="col">File</th><th scope="col">Taken</th><th scope="col" class="num">Size</th></tr></thead>
+      <tbody>
+      {% for b in backups %}
+        <tr><td><code>{{ b.name }}</code></td><td>{{ b.mtime | ts }}</td><td class="num">{{ b.size | human_bytes }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="subtle">No backups yet.</p>
+  {% endif %}
+</article>
+{% endblock %}
 {% block content %}
 
 <div class="page-head">
@@ -65,5 +92,32 @@
       </tbody>
     </table>
   </div>
+</article>
+<article id="backups">
+  <header>
+    <strong>Backups</strong>
+    <div class="subtle"><code>{{ backup_dir }}</code> · daily, newest first; retention is BACKUP_RETENTION on Settings</div>
+  </header>
+  <form method="POST" action="{{ url_for('system.task_run', name='db_backup') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="next" value="status">
+    <button type="submit" class="secondary outline" style="width:auto" {% if backup_queued %}disabled{% endif %}>
+      {{ 'Backup queued' if backup_queued else 'Backup now' }}
+    </button>
+  </form>
+  {% if backups %}
+  <div class="table-wrap">
+    <table class="track-table">
+      <thead><tr><th scope="col">File</th><th scope="col">Taken</th><th scope="col" class="num">Size</th></tr></thead>
+      <tbody>
+      {% for b in backups %}
+        <tr><td><code>{{ b.name }}</code></td><td>{{ b.mtime | ts }}</td><td class="num">{{ b.size | human_bytes }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="subtle">No backups yet.</p>
+  {% endif %}
 </article>
 {% endblock %}

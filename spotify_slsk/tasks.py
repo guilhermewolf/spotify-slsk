@@ -41,6 +41,8 @@ TASKS: tuple[Task, ...] = (
     Task("quality_backfill", "Quality backfill", lambda: 0, cadence="every cycle"),
     Task("recycle_purge", "Recycle bin purge",
          lambda: DAY if config.RECYCLE_BIN_RETENTION_DAYS > 0 else 0),
+    Task("db_backup", "Database backup", lambda: DAY if config.BACKUP_RETENTION > 0 else 0),
+    Task("housekeeping", "Housekeeping", lambda: DAY),
     Task("db_integrity", "Database integrity check", lambda: DAY),
     Task("health_checks", "Health checks", lambda: HEALTH_CHECK_INTERVAL),
 )

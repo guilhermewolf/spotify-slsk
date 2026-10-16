@@ -163,6 +163,8 @@ WRITE_PLAYLIST_COVER = os.getenv("WRITE_PLAYLIST_COVER", "1") == "1"
 RECYCLE_BIN_RETENTION_DAYS = int(os.getenv("RECYCLE_BIN_RETENTION_DAYS", "0"))
 # Health check: warn below this much free space on the playlists volume; 0 = off.
 MIN_FREE_SPACE_GB = int(os.getenv("MIN_FREE_SPACE_GB", "5"))
+# Daily database backups kept in data/backups; 0 = no automatic backups.
+BACKUP_RETENTION = int(os.getenv("BACKUP_RETENTION", "7"))
 # A track already downloaded in another playlist: hardlink | copy | off.
 LINK_MODES = ("hardlink", "copy", "off")
 LINK_MODE = os.getenv("LINK_MODE", "hardlink")
@@ -184,7 +186,7 @@ def reload(conn: sqlite3.Connection) -> None:
     global LOSSLESS_CHECK_ENABLED, LOSSLESS_FAKE_CUTOFF_HZ, LOSSLESS_MIN_DROP_DB
     global LIBRARY_SCAN_INTERVAL_HOURS, REQUIRED_TERMS, IGNORED_TERMS
     global EMBED_COVER_ART, FILE_NAME_TEMPLATE, LINK_MODE, RECYCLE_BIN_RETENTION_DAYS
-    global WRITE_M3U, WRITE_PLAYLIST_COVER, MIN_FREE_SPACE_GB
+    global WRITE_M3U, WRITE_PLAYLIST_COVER, MIN_FREE_SPACE_GB, BACKUP_RETENTION
     try:
         MIN_MATCH_SCORE = float(get_setting(conn, "MIN_MATCH_SCORE", "0.62"))
     except (TypeError, ValueError) as e:
@@ -242,6 +244,7 @@ def reload(conn: sqlite3.Connection) -> None:
         LIBRARY_SCAN_INTERVAL_HOURS = int(get_setting(conn, "LIBRARY_SCAN_INTERVAL_HOURS", "0"))
         RECYCLE_BIN_RETENTION_DAYS = int(get_setting(conn, "RECYCLE_BIN_RETENTION_DAYS", "0"))
         MIN_FREE_SPACE_GB = int(get_setting(conn, "MIN_FREE_SPACE_GB", "5"))
+        BACKUP_RETENTION = int(get_setting(conn, "BACKUP_RETENTION", "7"))
     except (TypeError, ValueError) as e:
         logging.warning(f"Bad lossless-check setting during refresh; using previous values: {e}")
 
@@ -319,6 +322,7 @@ SETTINGS_SPEC = [
     ("WRITE_M3U", "1", "Keep a '<playlist name>.m3u8' in each playlist folder: the downloaded tracks in Spotify playlist order, relative paths, UTF-8 (1 = on, 0 = off). Rewritten after each sync when it changed", "bool"),
     ("WRITE_PLAYLIST_COVER", "1", "Keep a cover.jpg (cover.png for PNG images) in each playlist folder from the Spotify playlist image, cached under data/artwork. A cover you put there yourself is never replaced (1 = on, 0 = off)", "bool"),
     ("RECYCLE_BIN_RETENTION_DAYS", "0", "Files replaced by an upgrade or a manual grab go to the recycle bin, .quarantine/<playlist>/replaced/. When this is above 0, a daily step deletes those older than this many days (counted from when they were replaced). 0 = keep them forever. Files you quarantined yourself (.quarantine/<playlist>/) are never deleted automatically", "int0"),
+    ("BACKUP_RETENTION", "7", "Back the database up daily to data/backups/playlist_tracks-YYYYMMDD-HHMMSS.db (online backup, integrity-checked) and keep this many. 0 = no automatic backups (Backup now on System -> Status still works, and nothing is deleted)", "int0"),
     ("MIN_FREE_SPACE_GB", "5", "Health check: warn when the playlists volume has less free space than this many GB. 0 disables the check", "int0"),
     ("NTFY_URL", "", "ntfy server, e.g. https://ntfy.sh. Notifications are sent when this and NTFY_TOPIC are set", "url"),
     ("NTFY_TOPIC", "", "ntfy topic to publish to", "text"),
