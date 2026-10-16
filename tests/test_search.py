@@ -21,6 +21,7 @@ from spotify_slsk.matching.normalize import (
     version_mismatch,
     version_tier,
 )
+from spotify_slsk.matching.quality import make_profile
 from spotify_slsk.slskd import client as slskd_client
 from spotify_slsk.slskd import models as slskd_models
 from spotify_slsk.slskd import search as slskd_search
@@ -611,10 +612,21 @@ class TestRejectionReasons:
     def test_format_reason(self):
         assert self._reason(self._file("Eminem - Lose Yourself.wma")) == "format not allowed: .wma"
 
-    def test_reported_bitrate_reason(self):
+    def test_profile_reason(self):
+        assert self._reason(
+            self._file("Eminem - Lose Yourself.mp3", bitrate=192, size=5_000_000, length=200)
+        ) == "quality not allowed by profile: MP3 192"
+
+    def test_320_floor_holds_even_if_the_profile_allows_lower_mp3(self, monkeypatch):
+        # User decision: a profile may only be stricter than the fixed floor.
+        monkeypatch.setattr(config, "QUALITY_PROFILE", make_profile(
+            ["FLAC_16", "MP3_320", "MP3_V0", "MP3_LOW"], "MP3_LOW", False)[0])
         assert self._reason(
             self._file("Eminem - Lose Yourself.mp3", bitrate=192, size=5_000_000, length=200)
         ) == "bitrate 192 < 320"
+        v0 = {**self._file("Eminem - Lose Yourself.mp3", bitrate=245, size=11_000_000,
+                           length=360), "isVariableBitRate": True}
+        assert self._reason(v0) == "bitrate 245 < 320"
 
     def test_effective_bitrate_reason(self):
         reason = self._reason(

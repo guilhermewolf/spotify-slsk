@@ -128,14 +128,14 @@ class TestSettings:
     def test_save_and_read_back(self, client):
         r = post(client,
             "/settings",
-            data={"MIN_MATCH_SCORE": "0.75", "SLSKD_PREFERRED_FORMATS": "flac"},
+            data={"MIN_MATCH_SCORE": "0.75", "SLSKD_WAIT_TIMEOUT": "45"},
             follow_redirects=True,
         )
         assert r.status_code == 200
 
         r = client.get("/settings")
         assert b'value="0.75"' in r.data
-        assert b'value="flac"' in r.data
+        assert b'value="45"' in r.data
 
     def test_blank_field_deletes_override(self, app_tmp, client):
         # set, then clear
@@ -410,19 +410,6 @@ class TestSettingsValidation:
         assert b"must be 1 (on) or 0 (off)" in r.data
         conn = db.create_connection(app_tmp.config["DB_PATH"])
         assert db.list_settings(conn).get("LOSSLESS_CHECK_ENABLED") == "0"
-        conn.close()
-
-    def test_unknown_audio_format_is_rejected(self, client):
-        r = post(client, "/settings", data={"SLSKD_PREFERRED_FORMATS": "flac,exe"},
-                 follow_redirects=True)
-        assert b"unsupported format" in r.data
-
-    def test_formats_are_normalised(self, app_tmp, client):
-        post(client, "/settings",
-             data={"SLSKD_PREFERRED_FORMATS": " .FLAC , MP3 "},
-             follow_redirects=True)
-        conn = db.create_connection(app_tmp.config["DB_PATH"])
-        assert db.list_settings(conn)["SLSKD_PREFERRED_FORMATS"] == "flac,mp3"
         conn.close()
 
     def test_one_bad_field_does_not_half_apply_the_form(self, app_tmp, client):

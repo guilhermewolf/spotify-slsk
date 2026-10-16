@@ -557,7 +557,7 @@ class TestHistory:
         conn = db.create_connection(str(tmp_path / "h.db"))
         monkeypatch.setenv("HISTORY_RETENTION_DAYS", "0")
         # reload() rebinds every tunable; snapshot them so they are restored.
-        for name in ("HISTORY_RETENTION_DAYS", "MIN_MATCH_SCORE", "PREFERRED_FORMATS",
+        for name in ("HISTORY_RETENTION_DAYS", "MIN_MATCH_SCORE", "QUALITY_PROFILE",
                      "MIN_PEER_UPLOAD_SPEED", "MIN_EFFECTIVE_MP3_KBPS",
                      "EARLY_STOP_RESPONSES", "EXTERNAL_PROCESS_WAIT_TIMEOUT",
                      "MAX_DURATION_DIFF_SECONDS"):

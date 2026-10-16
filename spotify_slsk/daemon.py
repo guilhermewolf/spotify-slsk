@@ -356,6 +356,7 @@ def main() -> None:
         sp = setup_spotify_client()
         if sp is not None:
             migrate_env_playlists(conn, sp)
+        config.ensure_quality_profile(conn)
         config.reload(conn)
 
         # Bring the dashboard up before waiting on slskd. Previously the

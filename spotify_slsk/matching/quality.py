@@ -20,6 +20,7 @@ This module imports nothing from the package so ``config`` can use it.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -161,3 +162,88 @@ def effective_quality(key: str | None, audio_check: str | None) -> str | None:
         return key
     # Never *promote* (a 16-bit file flagged padded_16 stays 16-bit).
     return demoted if LADDER_INDEX[demoted] > LADDER_INDEX[key] else key
+
+
+# ---- the quality profile -----------------------------------------------------
+
+
+@dataclass(frozen=True)
+class QualityProfile:
+    """The single global profile (Lidarr's quality profile, minus groups).
+
+    ``allowed`` is ordered best-first and *is* the ranking: a candidate whose
+    quality is not in it is rejected. ``cutoff`` is the quality at which a
+    file stops being upgraded for quality; ``upgrades_allowed`` gates those
+    quality upgrades (version-tier upgrades are separate and always on).
+    """
+
+    allowed: tuple[str, ...]
+    cutoff: str
+    upgrades_allowed: bool = False
+
+    def allows(self, key: str | None) -> bool:
+        return key in self.allowed
+
+    def rank(self, key: str | None) -> int:
+        """0 = best. Disallowed qualities rank after every allowed one, in
+        ladder order, so a disallowed file is always below the cutoff."""
+        if key in self.allowed:
+            return self.allowed.index(key)
+        return len(self.allowed) + LADDER_INDEX.get(key or "", len(LADDER))
+
+    def below_cutoff(self, key: str | None) -> bool:
+        return self.rank(key) > self.rank(self.cutoff)
+
+    def to_json(self) -> str:
+        return json.dumps({
+            "allowed": list(self.allowed),
+            "cutoff": self.cutoff,
+            "upgrades_allowed": self.upgrades_allowed,
+        })
+
+
+def make_profile(
+    allowed: list[str], cutoff: str, upgrades_allowed: bool
+) -> tuple[QualityProfile | None, str | None]:
+    """Validated constructor. Returns (profile, error); exactly one is None."""
+    unknown = [k for k in allowed if k not in BY_KEY]
+    if unknown:
+        return None, f"unknown quality: {', '.join(map(str, unknown))}"
+    if not allowed:
+        return None, "allow at least one quality"
+    if len(set(allowed)) != len(allowed):
+        return None, "a quality is listed twice"
+    if cutoff not in allowed:
+        return None, "the cutoff must be one of the allowed qualities"
+    return QualityProfile(tuple(allowed), cutoff, bool(upgrades_allowed)), None
+
+
+def parse_profile(value: str | None) -> tuple[QualityProfile | None, str | None]:
+    """Profile from its stored JSON form."""
+    try:
+        data = json.loads(value or "")
+        allowed = data["allowed"]
+        cutoff = data["cutoff"]
+        upgrades = data.get("upgrades_allowed", False)
+    except (ValueError, TypeError, KeyError, AttributeError) as e:
+        return None, f"not a quality profile: {e}"
+    if not isinstance(allowed, list) or not isinstance(upgrades, bool):
+        return None, "not a quality profile"
+    return make_profile(allowed, cutoff, upgrades)
+
+
+def profile_from_formats(exts: list[str]) -> QualityProfile:
+    """The profile equivalent to a SLSKD_PREFERRED_FORMATS list (".flac",
+    ...): each format's rungs in format order, best first within a format.
+
+    It accepts exactly the files the format allowlist accepted - the rungs
+    left out (MP3 V0, MP3 <320) were already rejected by the 320 floor -
+    and ranks them in the same format order. The cutoff is the lowest
+    allowed quality and quality upgrades are off, so nothing the old
+    configuration had downloaded becomes "cutoff unmet": no upgrade storm.
+    """
+    allowed = [
+        q.key for ext in exts for q in LADDER
+        if q.ext == ext and q.key not in FLOOR_BLOCKED
+    ] or ["FLAC_24", "FLAC_16"]
+    return QualityProfile(tuple(allowed), allowed[-1], False)

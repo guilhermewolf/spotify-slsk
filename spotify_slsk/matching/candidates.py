@@ -29,6 +29,7 @@ from .normalize import (
     version_mismatch,
     version_tier,
 )
+from .quality import candidate_quality, classify, describe, effective_quality
 
 
 def clean_filename(filename: str) -> str:
@@ -269,6 +270,13 @@ def evaluate_candidates(
                 )
                 if ext == ".flac" else (None, None)
             )
+            quality = classify(
+                ext, effective_bitrate, file.bit_depth, file.is_variable_bit_rate,
+                _effective_mp3_kbps(size_bytes, length_sec),
+            )
+            if flac_note:
+                # Likely CD audio in a hi-res container: rank it as 16-bit.
+                quality = effective_quality(quality, "upsampled")
             entry: Candidate = {
                 "user": user,
                 "user_upload_speed": user_upload_speed,
@@ -283,6 +291,9 @@ def evaluate_candidates(
                 "length": length_sec,
                 "sample_rate": file.sample_rate,
                 "bit_depth": file.bit_depth,
+                "vbr": file.is_variable_bit_rate,
+                "quality": quality,
+                "quality_label": describe(quality, effective_bitrate),
                 "free_slot": result.has_free_upload_slot,
                 "queue_length": result.queue_length,
                 "title_coverage": None,
@@ -296,8 +307,10 @@ def evaluate_candidates(
 
             if is_blocked is not None and is_blocked(user, filename):
                 entry["reason"] = "blocklisted"
-            elif ext not in config.PREFERRED_FORMATS:
+            elif quality is None:
                 entry["reason"] = f"format not allowed: {ext or '(none)'}"
+            elif not config.QUALITY_PROFILE.allows(quality):
+                entry["reason"] = f"quality not allowed by profile: {entry['quality_label']}"
             elif lossless_only and ext not in config.LOSSLESS_EXTS:
                 entry["reason"] = "not lossless (replacing a suspect lossless file)"
             # Reject MP3s whose reported/inferred bitrate is known-low.
@@ -381,12 +394,7 @@ def sort_candidates(candidates: Iterable[Candidate]) -> list[Candidate]:
     bitrate desc (unknown last), then peer upload
     speed desc.
     """
-    def fmt_rank(ext: str) -> int:
-        return (
-            config.PREFERRED_FORMATS.index(ext)
-            if ext in config.PREFERRED_FORMATS
-            else len(config.PREFERRED_FORMATS)
-        )
+    profile = config.QUALITY_PROFILE
 
     def bitrate_rank(bps_k) -> int:
         return bps_k or 0
@@ -395,7 +403,7 @@ def sort_candidates(candidates: Iterable[Candidate]) -> list[Candidate]:
         candidates,
         key=lambda c: (
             c.get("version_tier", 2),
-            fmt_rank(c["ext"]),
+            profile.rank(candidate_quality(c)),
             bool(c.get("note")),
             -bitrate_rank(c.get("bitrate")),
             -(c.get("user_upload_speed") or 0),
