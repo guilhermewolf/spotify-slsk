@@ -10,6 +10,13 @@ from .blocklist import (
     load_blocklist,
     remove_blocklist,
 )
+from .checks import (
+    delete_file_check,
+    get_file_check,
+    list_file_checks,
+    save_file_check,
+    set_check_ignored,
+)
 from .connection import (
     SCHEMA_VERSION,
     create_connection,
@@ -55,7 +62,9 @@ from .tracks import (
     insert_track,
     list_tracks,
     mark_upgrade_checked,
+    mark_upgrade_due,
     playlist_stats,
+    reset_track_for_redownload,
     retry_track,
     update_download_status,
 )
@@ -92,6 +101,13 @@ __all__ = [
     "get_pending_tracks",
     "get_upgrade_candidates",
     "mark_upgrade_checked",
+    "mark_upgrade_due",
+    "reset_track_for_redownload",
+    "save_file_check",
+    "get_file_check",
+    "list_file_checks",
+    "set_check_ignored",
+    "delete_file_check",
     "add_blocklist",
     "list_blocklist",
     "remove_blocklist",

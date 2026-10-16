@@ -14,13 +14,14 @@ IsBlocked = Callable[[str | None, str | None], bool]
 
 
 class Track:
-    def __init__(self, id, name, artist, album, playlist_id, duration_ms=None):
+    def __init__(self, id, name, artist, album, playlist_id, duration_ms=None, isrc=None):
         self.id = id
         self.name = name
         self.artist = artist
         self.album = album
         self.playlist_id = playlist_id
         self.duration_ms = duration_ms
+        self.isrc = isrc
 
     def __repr__(self):
         return f"Track(id={self.id}, name={self.name}, artist={self.artist}, album={self.album})"

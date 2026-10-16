@@ -359,6 +359,24 @@ class TestDurationSync:
         assert db.get_track(conn, "pl_x", "old")["duration_ms"] == 200_000
         assert db.get_pending_tracks(conn, "pl_x")[0].duration_ms is not None
 
+    def test_isrc_is_stored_and_backfilled_without_overwriting(self, conn):
+        _seed(conn, "old")  # pre-v6 row: no ISRC
+        db.upsert_playlist_meta(conn, "pid", "pl_x", "X", None)
+        old, new = _item("old"), _item("new")
+        old["track"]["external_ids"] = {"isrc": "GBAYE0601498"}
+        new["track"]["external_ids"] = {"isrc": "USUM71703861"}
+        new_tracks, _ = spotify_sync.fetch_and_compare_tracks(
+            conn, "pid", _FakeSpotify("X", "snap", [old, new])
+        )
+
+        assert new_tracks[0].isrc == "USUM71703861"
+        assert db.get_track(conn, "pl_x", "old")["isrc"] == "GBAYE0601498"
+        assert {t.isrc for t in db.get_pending_tracks(conn, "pl_x")} == {
+            "GBAYE0601498", "USUM71703861",
+        }
+        db.backfill_durations(conn, "pl_x", [("old", 1, "XXXX00000000")])
+        assert db.get_track(conn, "pl_x", "old")["isrc"] == "GBAYE0601498"
+
 
 class TestUntaggedFallback:
     """An untagged download is accepted only if the slskd filename AND the

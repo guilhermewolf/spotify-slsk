@@ -385,6 +385,45 @@ class TestSchemaMigrations:
         assert {"blocklist", "history"} <= tables
         conn.close()
 
+    def test_v5_db_upgrades_to_v6(self, tmp_path):
+        """A real v5 DB: per-playlist table with duration_ms, no isrc, no
+        file_checks table."""
+        path = str(tmp_path / "v5.db")
+        raw = sqlite3.connect(path)
+        raw.execute(
+            "CREATE TABLE playlists_meta (playlist_id TEXT PRIMARY KEY, "
+            "table_name TEXT NOT NULL, name TEXT NOT NULL, snapshot_id TEXT, "
+            "last_synced TIMESTAMP, enabled INTEGER NOT NULL DEFAULT 1, "
+            "added_at TIMESTAMP)"
+        )
+        raw.execute("INSERT INTO playlists_meta VALUES ('pid','pl_v5','V5','snap',NULL,0,NULL)")
+        raw.execute(
+            'CREATE TABLE "pl_v5" (id TEXT PRIMARY KEY, name TEXT NOT NULL, '
+            "artists TEXT NOT NULL, album TEXT NOT NULL, downloaded INTEGER DEFAULT 0, "
+            "path TEXT, attempts INTEGER DEFAULT 0, last_attempt TIMESTAMP, "
+            "suspended_until TIMESTAMP, last_upgrade_check TIMESTAMP, "
+            "tried_files TEXT DEFAULT '', duration_ms INTEGER)"
+        )
+        raw.execute(
+            "INSERT INTO pl_v5 (id, name, artists, album, downloaded, path, duration_ms) "
+            "VALUES ('t1','S','A','Alb',1,'/p/s.flac',200000)"
+        )
+        raw.execute("PRAGMA user_version = 5")
+        raw.commit()
+        raw.close()
+
+        conn = db.create_connection(path)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6 == db.SCHEMA_VERSION
+        track = db.get_track(conn, "pl_v5", "t1")
+        assert track["isrc"] is None
+        assert (track["downloaded"], track["path"], track["duration_ms"]) == (True, "/p/s.flac", 200000)
+        # Snapshot cleared so the next sync backfills ISRCs.
+        assert db.get_playlist_meta(conn, "pid")[0] is None
+        db.save_file_check(conn, "pl_v5", "t1", path="/p/s.flac", size=1, mtime=2.0,
+                           rules_version=1, audio_check="ok")
+        assert db.get_file_check(conn, "pl_v5", "t1")["audio_check"] == "ok"
+        conn.close()
+
     def test_existing_rows_survive_reopening(self, tmp_path):
         path = str(tmp_path / "reopen.db")
         conn = db.create_connection(path)
@@ -561,4 +600,44 @@ class TestStatusCountsAgree:
             db.update_download_status(conn, f"t{i}", "pl_s", success=False)
             db.update_download_status(conn, f"t{i}", "pl_s", success=True, file_path="/p")
         assert db.playlist_stats(conn, "pl_s")["pending"] == 0
+        conn.close()
+
+
+class TestFileChecks:
+    def test_round_trip_and_ignore_survives_only_for_the_same_file(self, tmp_path):
+        conn = db.create_connection(str(tmp_path / "c.db"))
+        kw = dict(path="/p/a.flac", size=10, mtime=1.0, rules_version=1)
+        db.save_file_check(conn, "pl_a", "t1", **kw, audio_check="fake",
+                           audio_cutoff_hz=16000, audio_drop_db=30.0,
+                           problems=["fake_lossless"], evidence={"x": 1})
+        check = db.get_file_check(conn, "pl_a", "t1")
+        assert check["problems"] == ["fake_lossless"] and check["evidence"] == {"x": 1}
+        assert db.set_check_ignored(conn, "pl_a", "t1")
+        db.save_file_check(conn, "pl_a", "t1", **kw, problems=["fake_lossless"])
+        assert db.get_file_check(conn, "pl_a", "t1")["ignored"] is True
+        db.save_file_check(conn, "pl_a", "t1", **{**kw, "size": 11}, problems=["fake_lossless"])
+        assert db.get_file_check(conn, "pl_a", "t1")["ignored"] is False
+        assert [c["track_id"] for c in db.list_file_checks(conn)] == ["t1"]
+        db.delete_file_check(conn, "pl_a", "t1")
+        assert db.get_file_check(conn, "pl_a", "t1") is None
+        conn.close()
+
+    def test_removing_a_playlist_drops_its_checks(self, tmp_path):
+        conn = db.create_connection(str(tmp_path / "c.db"))
+        db.upsert_playlist_meta(conn, "pid", "pl_a", "A", None)
+        db.create_table(conn, "pl_a")
+        db.save_file_check(conn, "pl_a", "t1", path=None, size=None, mtime=None,
+                           rules_version=1)
+        db.remove_playlist(conn, "pid")
+        assert db.list_file_checks(conn) == []
+        conn.close()
+
+    def test_reset_track_for_redownload(self, tmp_path):
+        conn = db.create_connection(str(tmp_path / "c.db"))
+        db.create_table(conn, "pl_a")
+        db.insert_track(conn, "pl_a", ("t1", "S", "A", "Alb"))
+        db.update_download_status(conn, "t1", "pl_a", success=True, file_path="/p/x.flac")
+        db.reset_track_for_redownload(conn, "pl_a", "t1")
+        track = db.get_track(conn, "pl_a", "t1")
+        assert (track["downloaded"], track["path"], track["status"]) == (False, None, "pending")
         conn.close()

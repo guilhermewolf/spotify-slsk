@@ -124,6 +124,7 @@ def remove_playlist(conn: sqlite3.Connection, playlist_id: str) -> bool:
         with conn:
             conn.execute(f'DROP TABLE IF EXISTS "{table_name}"')
             conn.execute(f'DROP TABLE IF EXISTS "{table_name}_tried"')
+            conn.execute("DELETE FROM file_checks WHERE table_name = ?", (table_name,))
             conn.execute(
                 "DELETE FROM playlists_meta WHERE playlist_id = ?",
                 (playlist_id,),

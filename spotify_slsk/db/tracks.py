@@ -6,7 +6,7 @@ import sqlite3
 from typing import Any
 
 from ..models import Track
-from .connection import _add_duration_column
+from .connection import _add_track_columns
 
 
 def playlist_stats(conn: sqlite3.Connection, table_name: str) -> dict[str, int]:
@@ -68,7 +68,7 @@ def list_tracks(conn: sqlite3.Connection, table_name: str) -> list[dict[str, Any
     try:
         rows = conn.execute(
             f'SELECT id, name, artists, album, downloaded, path, attempts, '
-            f'last_attempt, suspended_until, CURRENT_TIMESTAMP, duration_ms '
+            f'last_attempt, suspended_until, CURRENT_TIMESTAMP, duration_ms, isrc '
             f'FROM "{table_name}" ORDER BY name COLLATE NOCASE'
         ).fetchall()
         result = []
@@ -84,6 +84,7 @@ def list_tracks(conn: sqlite3.Connection, table_name: str) -> list[dict[str, Any
                 "last_attempt": r[7],
                 "suspended_until": r[8],
                 "duration_ms": r[10],
+                "isrc": r[11],
             }
             d["status"] = _track_status(d["downloaded"], d["attempts"], r[8], r[9])
             result.append(d)
@@ -98,7 +99,7 @@ def get_track(conn: sqlite3.Connection, table_name: str, track_id: str) -> dict[
     try:
         r = conn.execute(
             f'SELECT id, name, artists, album, downloaded, path, attempts, '
-            f'last_attempt, suspended_until, CURRENT_TIMESTAMP, duration_ms '
+            f'last_attempt, suspended_until, CURRENT_TIMESTAMP, duration_ms, isrc '
             f'FROM "{table_name}" WHERE id = ?',
             (track_id,),
         ).fetchone()
@@ -115,6 +116,7 @@ def get_track(conn: sqlite3.Connection, table_name: str, track_id: str) -> dict[
             "last_attempt": r[7],
             "suspended_until": r[8],
             "duration_ms": r[10],
+            "isrc": r[11],
         }
         d["status"] = _track_status(d["downloaded"], d["attempts"], r[8], r[9])
         return d
@@ -156,7 +158,8 @@ def create_table(conn: sqlite3.Connection, playlist_name: str) -> None:
                                         suspended_until TIMESTAMP,
                                         last_upgrade_check TIMESTAMP,
                                         tried_files TEXT DEFAULT '',
-                                        duration_ms INTEGER
+                                        duration_ms INTEGER,
+                                        isrc TEXT
                                     );"""
         cursor = conn.cursor()
         cursor.execute(sql_create_tracks_table)
@@ -170,7 +173,7 @@ def create_table(conn: sqlite3.Connection, playlist_name: str) -> None:
                 )
             logging.info(f"Migrated {table_name}: added last_upgrade_check column")
         with conn:
-            _add_duration_column(conn, table_name)
+            _add_track_columns(conn, table_name)
         create_tried_table(conn, playlist_name)
         cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_id ON {table_name} (id);")
         logging.info(f"Index on {table_name}(id) created or already exists.")
@@ -178,10 +181,10 @@ def create_table(conn: sqlite3.Connection, playlist_name: str) -> None:
         logging.error(f"Error creating table {table_name}: {e}")
 
 def insert_track(conn: sqlite3.Connection, playlist_name: str, track: tuple[Any, ...]) -> None:
-    """Insert (id, name, artists, album[, duration_ms]); existing ids are kept."""
+    """Insert (id, name, artists, album[, duration_ms[, isrc]]); existing ids are kept."""
     table_name = playlist_name
-    track = tuple(track) + (None,) * (5 - len(track))
-    sql = f'''INSERT OR IGNORE INTO {table_name}(id, name, artists, album, duration_ms) VALUES (?, ?, ?, ?, ?)'''
+    track = tuple(track) + (None,) * (6 - len(track))
+    sql = f'''INSERT OR IGNORE INTO {table_name}(id, name, artists, album, duration_ms, isrc) VALUES (?, ?, ?, ?, ?, ?)'''
     try:
         with conn:
             conn.execute(sql, track)
@@ -190,16 +193,21 @@ def insert_track(conn: sqlite3.Connection, playlist_name: str, track: tuple[Any,
         logging.error(f"Error inserting track into {table_name}: {e}")
 
 def backfill_durations(
-    conn: sqlite3.Connection, table_name: str, durations: list[tuple[str, int | None]]
+    conn: sqlite3.Connection,
+    table_name: str,
+    durations: list[tuple[Any, ...]],
 ) -> None:
-    """Fill duration_ms for rows that don't have it yet. `durations` is
-    an iterable of (track_id, duration_ms)."""
+    """Fill duration_ms (v5) and isrc (v6) for rows that don't have them
+    yet. `durations` holds (track_id, duration_ms[, isrc]); a value already
+    stored is never overwritten."""
+    rows = [(tuple(d) + (None,))[:3] for d in durations]
     try:
         with conn:
             conn.executemany(
-                f'UPDATE "{table_name}" SET duration_ms = ? '
-                f'WHERE id = ? AND duration_ms IS NULL',
-                [(ms, tid) for tid, ms in durations if ms],
+                f'UPDATE "{table_name}" SET duration_ms = COALESCE(duration_ms, ?), '
+                f'isrc = COALESCE(isrc, ?) '
+                f'WHERE id = ? AND (duration_ms IS NULL OR isrc IS NULL)',
+                [(ms, isrc, tid) for tid, ms, isrc in rows if ms or isrc],
             )
     except sqlite3.Error as e:
         logging.error(f"Error backfilling durations in {table_name}: {e}")
@@ -326,14 +334,14 @@ def get_pending_tracks(conn: sqlite3.Connection, playlist_name: str) -> list[Tra
     cursor = conn.cursor()
     try:
         cursor.execute(f"""
-            SELECT id, name, artists, album, duration_ms
+            SELECT id, name, artists, album, duration_ms, isrc
             FROM "{playlist_name}"
             WHERE downloaded = 0
               AND (suspended_until IS NULL OR suspended_until < CURRENT_TIMESTAMP)
         """)
         rows = cursor.fetchall()
         return [
-            Track(row[0], row[1], row[2], row[3], playlist_name, duration_ms=row[4])
+            Track(row[0], row[1], row[2], row[3], playlist_name, duration_ms=row[4], isrc=row[5])
             for row in rows
         ]
     except sqlite3.Error as e:
@@ -355,7 +363,7 @@ def get_upgrade_candidates(
     try:
         cursor = conn.cursor()
         cursor.execute(
-            f'SELECT id, name, artists, album, path, duration_ms FROM "{playlist_name}" '
+            f'SELECT id, name, artists, album, path, duration_ms, isrc FROM "{playlist_name}" '
             f'WHERE downloaded = 1 '
             f"AND (last_upgrade_check IS NULL "
             f"     OR last_upgrade_check < datetime('now', ?))",
@@ -363,7 +371,7 @@ def get_upgrade_candidates(
         )
         rows = cursor.fetchall()
         return [
-            (Track(r[0], r[1], r[2], r[3], playlist_name, duration_ms=r[5]), r[4])
+            (Track(r[0], r[1], r[2], r[3], playlist_name, duration_ms=r[5], isrc=r[6]), r[4])
             for r in rows
         ]
     except sqlite3.Error as e:
@@ -388,3 +396,29 @@ def mark_upgrade_checked(conn: sqlite3.Connection, playlist_name: str, track_id:
         logging.error(
             f"Failed to update last_upgrade_check for {track_id} in {playlist_name}: {e}"
         )
+
+
+def reset_track_for_redownload(conn: sqlite3.Connection, table_name: str, track_id: str) -> None:
+    """Back to pending: downloaded=0, no path, no attempts, no pause. Used
+    after a library file is quarantined so the normal cycle fetches it again."""
+    try:
+        with conn:
+            conn.execute(
+                f'UPDATE "{table_name}" SET downloaded = 0, path = NULL, attempts = 0, '
+                f'suspended_until = NULL WHERE id = ?',
+                (track_id,),
+            )
+    except sqlite3.Error as e:
+        logging.error(f"Could not reset track {track_id} in {table_name}: {e}")
+
+
+def mark_upgrade_due(conn: sqlite3.Connection, table_name: str, track_id: str) -> None:
+    """Make the track eligible for the next upgrade pass (clears its throttle)."""
+    try:
+        with conn:
+            conn.execute(
+                f'UPDATE "{table_name}" SET last_upgrade_check = NULL WHERE id = ?',
+                (track_id,),
+            )
+    except sqlite3.Error as e:
+        logging.error(f"Could not mark {track_id} in {table_name} for upgrade: {e}")
