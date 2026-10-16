@@ -353,14 +353,20 @@ def backfill_qualities(
 ) -> int:
     """Read the quality of up to `max_files` downloaded files that have
     none recorded (pre-v7 rows, reconciled files). Header reads only, so
-    cheap; runs a bounded batch per cycle instead of a blocking migration."""
+    cheap; runs a bounded batch per cycle instead of a blocking migration.
+    Returns how many rows were looked at (missing files included)."""
     done = 0
     for pl in list_playlists(conn, only_enabled=True):
         table = pl["table_name"]
-        heartbeat()
         for track_id, path in tracks_missing_quality(conn, table, max_files - done):
-            set_track_quality(conn, table, track_id, quality_of_file(path))
+            if done % 50 == 0:
+                heartbeat()
             done += 1
+            # A missing file (unmounted volume, moved by hand) is retried
+            # next cycle; '' is only for a file mutagen cannot classify.
+            if not os.path.isfile(path):
+                continue
+            set_track_quality(conn, table, track_id, quality_of_file(path))
         if done >= max_files:
             break
     return done

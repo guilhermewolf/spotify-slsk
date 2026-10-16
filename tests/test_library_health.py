@@ -308,10 +308,32 @@ def test_backfill_qualities_reads_each_file_once(tmp_path, monkeypatch):
         return None if path.endswith("c.flac") else "FLAC_16"
 
     monkeypatch.setattr(h, "quality_of_file", fake)
+    monkeypatch.setattr(h.os.path, "isfile", lambda p: True)
     assert h.backfill_qualities(conn, max_files=2) == 2
     assert h.backfill_qualities(conn, max_files=2) == 1
     assert h.backfill_qualities(conn, max_files=2) == 0  # unreadable is not retried
     assert sorted(reads) == ["/x/a.flac", "/x/b.flac", "/x/c.flac"]
     assert db.get_track(conn, "pl_q", "a")["quality"] == "FLAC_16"
     assert db.get_track(conn, "pl_q", "c")["quality"] is None
+    conn.close()
+
+
+def test_backfill_skips_missing_files_and_retries_them(tmp_path, monkeypatch):
+    from spotify_slsk import db
+    from spotify_slsk.library import health as h
+
+    conn = db.create_connection(str(tmp_path / "q.db"))
+    db.upsert_playlist_meta(conn, "pid", "pl_q", "Q", "s")
+    db.create_table(conn, "pl_q")
+    db.insert_track(conn, "pl_q", ("a", "S", "A", "Alb"))
+    missing = tmp_path / "gone.flac"
+    db.update_download_status(conn, "a", "pl_q", success=True, file_path=str(missing))
+    monkeypatch.setattr(h, "quality_of_file", lambda p: "FLAC_16")
+    beats = []
+    h.backfill_qualities(conn, heartbeat=lambda: beats.append(1))
+    assert db.tracks_missing_quality(conn, "pl_q", 10) == [("a", str(missing))]  # not stamped ''
+    assert beats == [1]
+    missing.write_bytes(b"x")  # volume back
+    h.backfill_qualities(conn)
+    assert db.get_track(conn, "pl_q", "a")["quality"] == "FLAC_16"
     conn.close()
