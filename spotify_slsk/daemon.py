@@ -356,6 +356,22 @@ def _run_library_scan(conn: sqlite3.Connection) -> None:
         set_setting(conn, health.SCAN_COMPLETED_KEY, str(time.time()))
 
 
+def _run_housekeeping(conn: sqlite3.Connection) -> None:
+    """Daily: purge the recycle bin (RECYCLE_BIN_RETENTION_DAYS > 0)."""
+    days = config.RECYCLE_BIN_RETENTION_DAYS
+    if days <= 0:
+        return
+    try:
+        last = float(get_setting(conn, health.RECYCLE_PURGED_KEY, "0") or 0)
+    except ValueError:
+        last = 0.0
+    if time.time() - last < 86400:
+        return
+    purged = health.purge_recycle_bin(conn, days)
+    set_setting(conn, health.RECYCLE_PURGED_KEY, str(time.time()))
+    logging.info(f"[recycle] Housekeeping: purged {purged} file(s) older than {days} day(s)")
+
+
 def _run_startup_reconciliation(sp, conn):
     """Run the one-shot on-disk reconciliation once per daemon start."""
     for pl in list_playlists(conn, only_enabled=True):
@@ -486,6 +502,8 @@ def main() -> None:
                     _run_library_scan(conn)
                 if not _shutdown.is_set():
                     health.backfill_qualities(conn, heartbeat=_touch_heartbeat)
+                if not _shutdown.is_set():
+                    _run_housekeeping(conn)
             except Exception:
                 logging.exception("Cycle failed; backing off and retrying")
                 if _shutdown.wait(config.CYCLE_ERROR_BACKOFF_SECONDS):

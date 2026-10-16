@@ -17,6 +17,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import stat
 import time
 from collections.abc import Callable
 from typing import Any
@@ -312,10 +313,11 @@ def retire_replaced_file(
     conn: sqlite3.Connection, table_name: str, track_id: str, old_path: str, reason: str
 ) -> str | None:
     """Move a library file that an upgrade or manual grab replaced to
-    <playlists_root>/.quarantine/<table>/replaced/ (" (2)" on a collision).
-    Never deletes: until a recycle bin exists, the operator purges by hand.
-    A file outside the playlists root is left where it is. Daemon only.
-    Returns where the file went, or None when it was not moved."""
+    <playlists_root>/.quarantine/<table>/replaced/ (" (2)" on a collision),
+    the recycle bin. Its mtime is set to now (like Lidarr's recycle bin) so
+    RECYCLE_BIN_RETENTION_DAYS counts from when it was replaced, not from
+    when it was downloaded. A file outside the playlists root is left where
+    it is. Daemon only. Returns where the file went, or None."""
     root = os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists")
     if not _inside(old_path, root):
         logging.warning(f"[replace] {old_path} is outside {root}; left in place")
@@ -328,12 +330,57 @@ def retire_replaced_file(
     except OSError as e:
         logging.warning(f"[replace] Could not move replaced file {old_path}: {e}")
         return None
+    try:
+        os.utime(dest)
+    except OSError as e:
+        logging.warning(f"[replace] Could not stamp {dest}: {e}")
     logging.info(f"[replace] {old_path} -> {dest} ({reason})")
     record_history(
         conn, "replaced_file", table_name=table_name, track_id=track_id,
         path=old_path, replaced_path=dest, reason=reason,
     )
     return dest
+
+
+RECYCLE_PURGED_KEY = "_recycle_bin_purged_at"
+
+
+def purge_recycle_bin(conn: sqlite3.Connection, days: int, now: float | None = None) -> int:
+    """Delete recycle-bin files (<root>/.quarantine/<table>/replaced/**)
+    whose mtime is more than `days` days old; 0 days = keep forever.
+
+    Only the replaced/ subtrees are touched: files the operator quarantined
+    (<root>/.quarantine/<table>/ itself) are never purged automatically.
+    Symlinks are not followed. Each deletion is logged and recorded in
+    history ('recycle_purged'). Daemon only. Returns how many were deleted."""
+    if days <= 0:
+        return 0
+    qroot = os.path.join(os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists"), QUARANTINE_DIR)
+    cutoff = (now if now is not None else time.time()) - days * 86400
+    purged = 0
+    try:
+        tables = sorted(os.listdir(qroot))
+    except OSError:
+        return 0
+    for table in tables:
+        bin_dir = os.path.join(qroot, table, REPLACED_SUBDIR)
+        if os.path.islink(bin_dir) or not os.path.isdir(bin_dir):
+            continue
+        for dirpath, _dirs, files in os.walk(bin_dir):
+            for name in files:
+                path = os.path.join(dirpath, name)
+                try:
+                    st = os.lstat(path)
+                    if not stat.S_ISREG(st.st_mode) or st.st_mtime >= cutoff:
+                        continue
+                    os.remove(path)
+                except OSError as e:
+                    logging.warning(f"[recycle] Could not purge {path}: {e}")
+                    continue
+                purged += 1
+                logging.info(f"[recycle] Purged {path} (in the recycle bin over {days} days)")
+                record_history(conn, "recycle_purged", table_name=table, path=path, days=days)
+    return purged
 
 
 def backfill_qualities(
