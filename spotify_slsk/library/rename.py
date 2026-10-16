@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sqlite3
 from typing import Any
 
@@ -39,9 +40,30 @@ def rename_plan(
             continue
         old_name = os.path.basename(path)
         new_name = file_name(template, row, old_name, row["quality"])
-        if new_name != old_name:
-            plan.append({**row, "old_name": old_name, "new_name": new_name})
+        if not already_named(old_name, new_name):
+            plan.append({**row, "old_name": old_name, "new_name": new_name, "collision": False})
+    # Two planned targets with one name, or a target taken by another file:
+    # the later one(s) will get " (2)" - say so in the preview.
+    seen: dict[str, int] = {}
+    for item in plan:
+        folder = os.path.dirname(item["path"])
+        key = os.path.join(folder, item["new_name"]).casefold()
+        seen[key] = seen.get(key, 0) + 1
+        target = os.path.join(folder, item["new_name"])
+        taken = os.path.lexists(target) and not _same_file(item["path"], target)
+        item["collision"] = seen[key] > 1 or taken
     return plan, skipped
+
+
+def already_named(old_name: str, new_name: str) -> bool:
+    """True when the file already carries the target name, or the target
+    name with a collision suffix (" (2)"): renaming it again would only
+    churn between suffixes."""
+    old_stem, old_ext = os.path.splitext(old_name)
+    new_stem, new_ext = os.path.splitext(new_name)
+    if old_ext != new_ext:
+        return False
+    return old_stem == new_stem or re.fullmatch(re.escape(new_stem) + r" \(\d+\)", old_stem) is not None
 
 
 def _same_file(a: str, b: str) -> bool:
@@ -66,6 +88,9 @@ def apply_rename(
         or not os.path.isfile(old_path) or not _inside(old_path, _root())
     ):
         logging.warning(f"[rename] Skipped {old_path} -> {new_name!r}: not safe to rename")
+        return None
+    if already_named(os.path.basename(old_path), new_name):
+        logging.debug(f"[rename] {old_path} already named {new_name!r}; nothing to do")
         return None
     directory = os.path.dirname(old_path)
     target = os.path.join(directory, new_name)

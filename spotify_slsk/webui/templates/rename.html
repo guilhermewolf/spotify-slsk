@@ -58,7 +58,8 @@
             <td><input type="checkbox" name="tracks" value="{{ pl.playlist_id }}:{{ item.id }}" checked
                        aria-label="Rename {{ item.name }}"></td>
             <td><code>{{ item.old_name }}</code></td>
-            <td><code>{{ item.new_name }}</code></td>
+            <td><code>{{ item.new_name }}</code>
+              {% if item.collision %}<div class="subtle">name taken or planned twice: will get a " (2)" suffix</div>{% endif %}</td>
           </tr>
         {% endfor %}
         </tbody>

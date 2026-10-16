@@ -73,6 +73,36 @@ class TestPlan:
         assert rename.rename_plan(conn, "pl_x", "{original_filename}")[0] == []
 
 
+class TestNoChurn:
+    def test_suffixed_file_is_not_renamed_again(self, library):
+        conn, _, folder = library
+        # t1 sits at "Artist - Song One (2).mp3" after an earlier collision.
+        (folder / "peer junk 01.mp3").rename(folder / "Artist - Song One (2).mp3")
+        db.set_track_path(conn, "pl_x", "t1", str(folder / "Artist - Song One (2).mp3"))
+        plan, _ = rename.rename_plan(conn, "pl_x", "{artist} - {title}")
+        assert plan == []
+        assert rename.apply_rename(
+            conn, "pl_x", "t1", str(folder / "Artist - Song One (2).mp3"), "Artist - Song One.mp3"
+        ) is None
+        assert (folder / "Artist - Song One (2).mp3").exists()
+        assert db.list_history(conn, event="renamed") == []
+
+    def test_already_named(self):
+        assert rename.already_named("A - B (12).mp3", "A - B.mp3")
+        assert not rename.already_named("A - B (x).mp3", "A - B.mp3")
+        assert not rename.already_named("A - B.flac", "A - B.mp3")
+
+    def test_preview_flags_collisions(self, library):
+        conn, _, folder = library
+        db.insert_track(conn, "pl_x", ("t5", "Song Five", "Artist", "Album"))
+        (folder / "five.mp3").write_bytes(b"t5")
+        db.update_download_status(conn, "t5", "pl_x", success=True, file_path=str(folder / "five.mp3"))
+        plan, _ = rename.rename_plan(conn, "pl_x", "{artist}")  # everyone -> "Artist.mp3"
+        assert [p["collision"] for p in plan] == [False, True, True]
+        plan, _ = rename.rename_plan(conn, "pl_x", "{artist} - {title}")
+        assert not any(p["collision"] for p in plan)
+
+
 class TestApply:
     def test_renames_updates_db_and_history(self, library):
         conn, _, folder = library
