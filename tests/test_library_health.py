@@ -180,3 +180,75 @@ class TestDaemonTrigger:
         db.set_setting(conn, health.SCAN_PENDING_KEY, "1")
         daemon._run_library_scan(conn)
         assert db.get_setting(conn, health.SCAN_PENDING_KEY, "0") == "1"
+
+
+class TestQuarantine:
+    def test_moves_never_deletes_and_resets_the_row(self, conn, sandbox_dirs, tags):
+        _, pl = sandbox_dirs
+        (pl / "pl_x").mkdir()
+        f = pl / "pl_x" / "Wrong Song.mp3"
+        f.write_bytes(b"audio")
+        db.insert_track(conn, "pl_x", ("t1", "Heart To Find", "Mat Joe", "Alb"))
+        db.update_download_status(conn, "t1", "pl_x", success=True, file_path=str(f))
+        db.save_file_check(conn, "pl_x", "t1", path=str(f), size=5, mtime=1.0,
+                           rules_version=1, problems=["title_artist_mismatch"])
+        # A previous quarantine of the same name: no overwrite.
+        qdir = pl / ".quarantine" / "pl_x"
+        qdir.mkdir(parents=True)
+        (qdir / "Wrong Song.mp3").write_bytes(b"older")
+
+        assert health.quarantine_track(conn, "pl_x", "t1") is True
+
+        assert not f.exists()
+        assert (qdir / "Wrong Song (2).mp3").read_bytes() == b"audio"
+        assert (qdir / "Wrong Song.mp3").read_bytes() == b"older"
+        row = db.get_track(conn, "pl_x", "t1")
+        assert (row["status"], row["path"]) == ("pending", None)
+        assert "Wrong Song.mp3" in db.get_tried_files(conn, "pl_x", "t1")
+        assert db.get_file_check(conn, "pl_x", "t1") is None
+        event = db.list_history(conn, event="quarantined")[0]
+        assert event["data"]["quarantine_path"] == str(qdir / "Wrong Song (2).mp3")
+        assert event["data"]["problems"] == "title_artist_mismatch"
+
+    def test_missing_file_only_resets(self, conn, sandbox_dirs):
+        db.insert_track(conn, "pl_x", ("t1", "S", "A", "Alb"))
+        db.update_download_status(conn, "t1", "pl_x", success=True, file_path="/nope/x.mp3")
+        assert health.quarantine_track(conn, "pl_x", "t1") is True
+        assert db.get_track(conn, "pl_x", "t1")["status"] == "pending"
+
+    def test_pending_row_and_failed_move_change_nothing(self, conn, sandbox_dirs, monkeypatch):
+        _, pl = sandbox_dirs
+        db.insert_track(conn, "pl_x", ("p1", "S", "A", "Alb"))
+        assert health.quarantine_track(conn, "pl_x", "p1") is False
+        f = _add(conn, pl, "t1", "S", "A", "x.mp3")
+
+        def _fail(*a):
+            raise OSError("read-only")
+
+        monkeypatch.setattr(health.shutil, "move", _fail)
+        assert health.quarantine_track(conn, "pl_x", "t1") is False
+        assert f.exists() and db.get_track(conn, "pl_x", "t1")["downloaded"] is True
+
+    def test_daemon_drains_the_ui_queue(self, conn, sandbox_dirs):
+        from spotify_slsk import runtime_state
+
+        _, pl = sandbox_dirs
+        f = _add(conn, pl, "t1", "S", "A", "x.mp3")
+        runtime_state.enqueue_quarantine("pl_x", "t1")
+        runtime_state.enqueue_quarantine("pl_x", "t1")  # double click
+        daemon._process_quarantines(conn)
+        assert not f.exists()
+        assert runtime_state.pop_quarantines() == []
+        assert len(db.list_history(conn, event="quarantined")) == 1
+
+    def test_startup_reconcile_never_reads_the_quarantine(self, conn, sandbox_dirs):
+        from spotify_slsk.library import reconcile
+
+        _, pl = sandbox_dirs
+        (pl / "pl_x").mkdir()
+        qdir = pl / ".quarantine" / "pl_x"
+        qdir.mkdir(parents=True)
+        (qdir / "Mat Joe - Heart To Find.mp3").write_bytes(b"audio")
+        db.insert_track(conn, "pl_x", ("t1", "Heart To Find", "Mat Joe", "Alb"))
+        reconcile.startup_check(conn, "pl_x")
+        assert db.get_track(conn, "pl_x", "t1")["status"] == "pending"

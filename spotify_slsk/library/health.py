@@ -15,13 +15,24 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import sqlite3
 import time
 from collections.abc import Callable
 from typing import Any
 
 from .. import config
-from ..db import get_file_check, list_playlists, list_tracks, save_file_check
+from ..db import (
+    add_tried_file,
+    delete_file_check,
+    get_file_check,
+    get_track,
+    list_playlists,
+    list_tracks,
+    record_history,
+    reset_track_for_redownload,
+    save_file_check,
+)
 from ..importer.audio_check import CHECKABLE_EXTS, REJECT_VERDICTS, SUSPECT, check_file
 from ..importer.tags import (
     audio_length_seconds,
@@ -60,6 +71,10 @@ PROBLEM_LABELS = {
 # Internal settings keys (underscore: never rendered on /settings).
 SCAN_PENDING_KEY = "_library_scan_pending"
 SCAN_COMPLETED_KEY = "_library_scan_completed_at"
+
+# Under the playlists root, beside the pl_<name> folders. Nothing walks it:
+# the scan iterates DB rows, startup_check only <root>/<table>.
+QUARANTINE_DIR = ".quarantine"
 
 MAX_FILES_PER_STEP = 200
 MAX_SECONDS_PER_STEP = 120.0
@@ -202,3 +217,51 @@ def scan_step(
                 continue
             checked += 1
     return checked, True
+
+
+def _free_path(directory: str, basename: str) -> str:
+    """`directory/basename`, or "name (2).ext" ... if that is taken."""
+    stem, ext = os.path.splitext(basename)
+    candidate, n = os.path.join(directory, basename), 1
+    while os.path.lexists(candidate):
+        n += 1
+        candidate = os.path.join(directory, f"{stem} ({n}){ext}")
+    return candidate
+
+
+def quarantine_track(conn: sqlite3.Connection, table_name: str, track_id: str) -> bool:
+    """Move a library file to <playlists_root>/.quarantine/<table>/ (never
+    delete it) and put the row back to pending so the normal cycle
+    downloads it again. The file's name goes to the track's _tried list so
+    the same peer file is not simply fetched again. A missing file only
+    resets the row. Daemon thread only. Returns False when nothing was done.
+
+    To purge: inspect and delete <playlists_root>/.quarantine by hand.
+    """
+    row = get_track(conn, table_name, track_id)
+    if not row or not row["downloaded"]:
+        return False
+    check = get_file_check(conn, table_name, track_id) or {}
+    path = row["path"]
+    dest = None
+    if path and os.path.isfile(path):
+        qdir = os.path.join(
+            os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists"), QUARANTINE_DIR, table_name
+        )
+        try:
+            os.makedirs(qdir, exist_ok=True)
+            dest = _free_path(qdir, os.path.basename(path))
+            shutil.move(path, dest)
+        except OSError as e:
+            logging.error(f"[quarantine] Could not move {path}: {e}; row left as is")
+            return False
+        add_tried_file(conn, table_name, track_id, os.path.basename(path))
+    reset_track_for_redownload(conn, table_name, track_id)
+    delete_file_check(conn, table_name, track_id)
+    record_history(
+        conn, "quarantined", table_name=table_name, track_id=track_id,
+        path=path, quarantine_path=dest,
+        problems=", ".join(check.get("problems") or []) or None,
+    )
+    logging.info(f"[quarantine] {path} -> {dest or '(file missing)'}; track back to pending")
+    return True

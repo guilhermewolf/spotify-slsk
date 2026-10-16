@@ -290,3 +290,25 @@ def pop_manual_grabs() -> list:
         items = list(_grab_queue)
         _grab_queue.clear()
     return items
+
+
+# --- quarantine requests: web UI -> daemon thread --------------------------
+#
+# Like grabs: the UI only queues (table_name, track_id); the daemon moves the
+# file and resets the row (library.health.quarantine_track).
+
+_quarantine_lock = threading.Lock()
+_quarantine_queue: deque = deque(maxlen=5000)
+
+
+def enqueue_quarantine(table_name: str, track_id: str) -> None:
+    with _quarantine_lock:
+        if (table_name, track_id) not in _quarantine_queue:
+            _quarantine_queue.append((table_name, track_id))
+
+
+def pop_quarantines() -> list:
+    with _quarantine_lock:
+        items = list(_quarantine_queue)
+        _quarantine_queue.clear()
+    return items

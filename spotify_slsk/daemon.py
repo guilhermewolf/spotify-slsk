@@ -278,6 +278,19 @@ def _process_manual_grabs(conn):
             logging.exception(f"Manual grab failed for {track.id} in {table_name}")
 
 
+def _process_quarantines(conn: sqlite3.Connection) -> None:
+    """Quarantine library files the operator flagged on /library-health.
+    Runs before the playlists so the reset rows re-download this cycle."""
+    for table_name, track_id in runtime_state.pop_quarantines():
+        if _shutdown.is_set():
+            return
+        _touch_heartbeat()
+        try:
+            health.quarantine_track(conn, table_name, track_id)
+        except Exception:
+            logging.exception(f"Quarantine failed for {track_id} in {table_name}")
+
+
 def _run_library_scan(conn: sqlite3.Connection) -> None:
     """One bounded step of the library health scan, when one is requested
     (UI button) or due (LIBRARY_SCAN_INTERVAL_HOURS). Report-only."""
@@ -413,6 +426,7 @@ def main() -> None:
                 "tracks_failed": 0,
             }
             try:
+                _process_quarantines(conn)
                 _process_manual_grabs(conn)
                 for pl in playlists:
                     if _shutdown.is_set():
