@@ -72,7 +72,7 @@ html:root {
   --c-on-accent: #ffffff;
   --c-focus: rgba(10, 111, 122, 0.45);
 
-  --c-ok: #1b7a43;      --c-ok-bg: #dcf1e4;
+  --c-ok: #156b3a;      --c-ok-bg: #dcf1e4;
   --c-idle: #566174;    --c-idle-bg: #e3e7ed;
   --c-warn: #8f5300;    --c-warn-bg: #fbeacb;
   --c-bad: #b3261e;     --c-bad-bg: #f9dedb;
@@ -715,7 +715,7 @@ details.confirm > summary {
 }
 details.confirm > summary::-webkit-details-marker { display: none; }
 details.confirm > summary::after { display: none !important; }
-details.confirm > summary[role="button"] { margin: 0; }
+details.confirm > summary[role="button"] { margin: 0; width: auto; }
 details.confirm[open] > summary {
   background: var(--c-raised);
   border-color: var(--c-muted);
@@ -786,6 +786,7 @@ details.confirm[open] > button { margin-top: 0; }
 .chip-ok { border-color: color-mix(in srgb, var(--c-ok) 45%, transparent); color: var(--c-ok); }
 .chip-warn { border-color: color-mix(in srgb, var(--c-warn) 45%, transparent); color: var(--c-warn); }
 .chips { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 2px; }
+.nowrap .chips { flex-wrap: nowrap; }
 
 /* ==== 8. Level meter (the signature element) =========================== */
 /* Segmented like a channel meter. The fill uses the same gradient origin as
@@ -1095,7 +1096,8 @@ tbody tr:hover > td.actions-col { background: var(--c-raised); }
   font-size: var(--t-sm);
 }
 .result-summary strong { font-variant-numeric: tabular-nums; }
-.interactive-table .file-cell { min-width: 14rem; max-width: 30rem; }
+.interactive-table .file-cell { min-width: 12rem; max-width: 30rem; }
+@media (max-width: 40rem) { .interactive-table .file-cell { max-width: 14rem; } }
 .interactive-table tr.is-best > td { background: color-mix(in srgb, var(--c-ok-bg) 45%, transparent); }
 .rejected-groups { display: flex; flex-direction: column; gap: var(--s-1); }
 .rejected-groups > details {
