@@ -27,6 +27,7 @@ up to 1 h); events for it during the pause are dropped, not queued.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import secrets
 import sqlite3
@@ -170,16 +171,17 @@ def _events(conn: sqlite3.Connection, key: str, default: str) -> set[str]:
 def _send_ntfy(conn: sqlite3.Connection, msg: dict[str, Any]) -> None:
     url = (get_setting(conn, "NTFY_URL", "") or "").rstrip("/")
     topic = get_setting(conn, "NTFY_TOPIC", "") or ""
-    resp = requests.post(
+    with requests.post(
         f"{url}/{topic}",
         data=msg["text"].encode("utf-8"),
         # Header values must be latin-1; the title is ours, so ASCII-fold it.
         headers={"Title": msg["title"].encode("ascii", "replace").decode()},
         timeout=TIMEOUT_SECONDS,
         allow_redirects=False,
-    )
-    if not resp.ok:
-        raise DeliveryError(f"HTTP {resp.status_code}")
+        stream=True,  # the body is never read: only the status matters
+    ) as resp:
+        if not resp.ok:
+            raise DeliveryError(f"HTTP {resp.status_code}")
 
 
 def _send_webhook(conn: sqlite3.Connection, msg: dict[str, Any]) -> None:
@@ -188,7 +190,7 @@ def _send_webhook(conn: sqlite3.Connection, msg: dict[str, Any]) -> None:
     value = get_setting(conn, "WEBHOOK_HEADER_VALUE", "") or ""
     if name and value:
         headers[name] = value
-    resp = requests.post(
+    with requests.post(
         get_setting(conn, "WEBHOOK_URL", ""),
         json={
             "event": msg["event"],
@@ -199,13 +201,28 @@ def _send_webhook(conn: sqlite3.Connection, msg: dict[str, Any]) -> None:
         timeout=TIMEOUT_SECONDS,
         # A redirect would carry the auth header to wherever it points.
         allow_redirects=False,
-    )
-    if not resp.ok:
-        raise DeliveryError(f"HTTP {resp.status_code}")
+        stream=True,  # the body is never read: only the status matters
+    ) as resp:
+        if not resp.ok:
+            raise DeliveryError(f"HTTP {resp.status_code}")
 
 
 class DeliveryError(Exception):
     """A provider answered, but not with success. The message is safe to log."""
+
+
+# A notification endpoint's answer is never trusted to be small.
+MAX_RESPONSE_BYTES = 64 * 1024
+
+
+def read_capped(resp: requests.Response, limit: int = MAX_RESPONSE_BYTES) -> bytes:
+    """The body of a stream=True response, refusing more than `limit` bytes."""
+    data = b""
+    for chunk in resp.iter_content(8192):
+        data += chunk
+        if len(data) > limit:
+            raise DeliveryError(f"response larger than {limit // 1024} KiB")
+    return data
 
 
 Sender = Callable[[sqlite3.Connection, dict[str, Any]], None]
@@ -285,7 +302,7 @@ def subsonic_start_scan(conn: sqlite3.Connection) -> None:
     the password itself never travels. Raises DeliveryError on a refusal."""
     salt = secrets.token_hex(8)
     password = get_setting(conn, "SUBSONIC_PASSWORD", "") or ""
-    resp = requests.get(
+    with requests.get(
         (get_setting(conn, "SUBSONIC_URL", "") or "").rstrip("/") + "/rest/startScan",
         params={
             "u": get_setting(conn, "SUBSONIC_USERNAME", ""),
@@ -297,11 +314,14 @@ def subsonic_start_scan(conn: sqlite3.Connection) -> None:
         },
         timeout=TIMEOUT_SECONDS,
         allow_redirects=False,
-    )
-    if not resp.ok:
-        raise DeliveryError(f"HTTP {resp.status_code}")
+        stream=True,
+    ) as resp:
+        if not resp.ok:
+            raise DeliveryError(f"HTTP {resp.status_code}")
+        raw = read_capped(resp)
     try:
-        body = resp.json().get("subsonic-response") or {}
+        parsed = json.loads(raw)
+        body = (parsed.get("subsonic-response") if isinstance(parsed, dict) else None) or {}
     except ValueError:
         raise DeliveryError("not a Subsonic response") from None
     if body.get("status") != "ok":

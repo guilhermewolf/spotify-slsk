@@ -33,15 +33,28 @@ def _clean_state():
 
 
 class _Resp:
-    def __init__(self, status=200, body=None):
+    """A stream=True requests.Response: a context manager whose body is read
+    through iter_content (json() would read an unbounded body)."""
+
+    def __init__(self, status=200, body=None, raw=None):
         self.status_code = status
         self.ok = status < 400
-        self._body = body
+        self._raw = raw if raw is not None else (json.dumps(body).encode() if body is not None else b"")
+        self.read = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def iter_content(self, size):
+        for i in range(0, len(self._raw), size):
+            self.read += size
+            yield self._raw[i:i + size]
 
     def json(self):
-        if self._body is None:
-            raise ValueError("no json")
-        return self._body
+        raise AssertionError("json() reads an unbounded body")
 
 
 @pytest.fixture
@@ -178,6 +191,29 @@ class TestSubsonic:
         }))
         with pytest.raises(notifications.DeliveryError, match="Wrong username"):
             notifications.send_test(conn, "subsonic")
+
+
+class TestBoundedResponses:
+    def test_senders_stream_and_subsonic_reads_at_most_64_kib(self, conn, monkeypatch):
+        seen = []
+        huge = _Resp(raw=b"x" * (10 * 1024 * 1024))
+        monkeypatch.setattr(notifications.requests, "get",
+                            lambda url, **k: seen.append(k) or huge)
+        db.set_setting(conn, "SUBSONIC_URL", "http://navidrome:4533")
+        db.set_setting(conn, "SUBSONIC_USERNAME", "admin")
+        db.set_setting(conn, "SUBSONIC_PASSWORD", "pw")
+        with pytest.raises(notifications.DeliveryError, match="larger than 64 KiB"):
+            notifications.send_test(conn, "subsonic")
+        assert seen[0]["stream"] is True
+        assert huge.read <= 64 * 1024 + 8192
+
+    def test_ntfy_and_webhook_stream_without_reading(self, conn, sent):
+        db.set_setting(conn, "NTFY_URL", "https://ntfy.example")
+        db.set_setting(conn, "NTFY_TOPIC", "t")
+        db.set_setting(conn, "WEBHOOK_URL", "https://hooks.example/x")
+        notifications.emit("cycle_summary", message="m")
+        notifications.flush(conn)
+        assert [k["stream"] for _, _, k in sent] == [True, True]
 
 
 class TestHealthTransitions:
