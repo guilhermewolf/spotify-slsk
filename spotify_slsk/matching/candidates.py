@@ -1,13 +1,14 @@
 """Search-phase matching: judge every file in an slskd search response.
 
-`evaluate_candidates` applies the quality gates (format allowlist, 320 kbps
+`evaluate_candidates` applies the quality gates (quality profile, 320 kbps
 MP3 rule, effective-bitrate floor, duration, blocklist) and then the strict
 wrong-song rules in `filename_match`; `sort_candidates` orders the accepted
-ones (version tier > format > bitrate > peer upload speed).
+ones (version tier > profile quality > availability > size).
 """
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 from collections.abc import Iterable
@@ -29,7 +30,7 @@ from .normalize import (
     version_mismatch,
     version_tier,
 )
-from .quality import candidate_quality, classify, describe, effective_quality
+from .quality import BY_KEY, candidate_quality, classify, describe, effective_quality
 
 
 def clean_filename(filename: str) -> str:
@@ -387,25 +388,42 @@ def summarize_evaluation(evaluated: list[Candidate], limit: int = 50) -> dict[st
     }
 
 
+def _log_bucket(value) -> int:
+    """Factor-of-two bucket: 0, 1, 2-3, 4-7, ... -> 0, 1, 2, 3, ... so a
+    queue of 5 vs 6 (or 10.1 vs 10.4 MB/s) is a tie decided further down."""
+    return int(math.log2(value + 1)) if value and value > 0 else 0
+
+
+def _size_distance(c: Candidate) -> float:
+    """How far the file's bitrate is from its quality's preferred one;
+    unknown size or length sorts last within its bucket."""
+    q = BY_KEY.get(candidate_quality(c) or "")
+    if not q or not c.get("size") or not c.get("length"):
+        return float("inf")
+    return abs(c["size"] * 8 / c["length"] / 1000 - q.preferred_kbps)
+
+
 def sort_candidates(candidates: Iterable[Candidate]) -> list[Candidate]:
-    """
-    Sort by DJ-version tier (Extended Mix > Original Mix > other), then by
-    preferred extension, then demoted (likely-upsampled hi-res) last, then
-    bitrate desc (unknown last), then peer upload
-    speed desc.
+    """Best first. Lidarr's DownloadDecisionComparer, adapted:
+
+    1. version tier (Extended Mix > Original Mix > other) - the DJ
+       preference outranks quality;
+    2. quality: the index in the profile's allowed list;
+    3. Tier 3 demotion: a likely-upsampled hi-res file after its peers;
+    4. availability: a free upload slot first, then a shorter queue, then a
+       faster peer (queue and speed log2-bucketed so near-equal peers tie);
+    5. size closest to the quality's preferred bitrate.
     """
     profile = config.QUALITY_PROFILE
-
-    def bitrate_rank(bps_k) -> int:
-        return bps_k or 0
-
     return sorted(
         candidates,
         key=lambda c: (
             c.get("version_tier", 2),
             profile.rank(candidate_quality(c)),
             bool(c.get("note")),
-            -bitrate_rank(c.get("bitrate")),
-            -(c.get("user_upload_speed") or 0),
+            not c.get("free_slot"),
+            _log_bucket(c.get("queue_length")),
+            -_log_bucket((c.get("user_upload_speed") or 0) / 1024),
+            _size_distance(c),
         ),
     )

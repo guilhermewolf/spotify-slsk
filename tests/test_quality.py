@@ -298,3 +298,114 @@ class TestCandidatesCarryQuality:
                   "bitRate": 320}]
         (c,) = evaluate_candidates([{"username": "u", "files": files}], "Lose Yourself", "Eminem")
         assert c["reason"] == "quality not allowed by profile: MP3 320"
+
+
+class TestRanking:
+    """sort_candidates over slskd-shaped responses (camelCase, per-peer
+    slot/queue/speed), as the daemon sees them."""
+
+    MB = 1024 * 1024
+
+    def _peer(self, user, filename, *, speed=MB, slot=True, queue=0, **f):
+        return {
+            "username": user, "uploadSpeed": speed, "hasFreeUploadSlot": slot,
+            "queueLength": queue,
+            "files": [{"filename": filename, "length": 300, **f}],
+        }
+
+    def _flac(self, user, depth=16, size=33_750_000, name="Daft Punk - Get Lucky.flac", **peer):
+        # 33.75 MB / 300 s = 900 kbps: FLAC 16-bit's preferred bitrate.
+        return self._peer(user, f"Music\\Daft Punk\\{name}", size=size,
+                          bitDepth=depth, sampleRate=44100 if depth == 16 else 96000, **peer)
+
+    def _mp3(self, user, name="Daft Punk - Get Lucky.mp3", **peer):
+        return self._peer(user, f"@@x\\{name}", size=12_000_000, bitRate=320, **peer)
+
+    def _order(self, monkeypatch, *responses, allowed=("FLAC_24", "FLAC_16", "MP3_320")):
+        from spotify_slsk import config
+        from spotify_slsk.matching.candidates import (
+            evaluate_candidates,
+            sort_candidates,
+        )
+
+        monkeypatch.setattr(config, "QUALITY_PROFILE",
+                            q.make_profile(list(allowed), allowed[-1], False)[0])
+        out = evaluate_candidates(list(responses), "Get Lucky", "Daft Punk")
+        assert all(c["accepted"] for c in out), [c["reason"] for c in out]
+        return [c["user"] for c in sort_candidates(out)]
+
+    def test_version_tier_beats_quality(self, monkeypatch):
+        assert self._order(
+            monkeypatch,
+            self._flac("flac24", depth=24, size=90_000_000),
+            self._mp3("extended_mp3", name="Daft Punk - Get Lucky (Extended Mix).mp3"),
+        ) == ["extended_mp3", "flac24"]
+
+    def test_profile_order_is_the_quality_ranking(self, monkeypatch):
+        args = (self._mp3("mp3"), self._flac("flac16"))
+        assert self._order(monkeypatch, *args) == ["flac16", "mp3"]
+        # A profile that prefers MP3 ranks it first.
+        assert self._order(monkeypatch, *args, allowed=("MP3_320", "FLAC_16")) == ["mp3", "flac16"]
+
+    def test_quality_beats_availability(self, monkeypatch):
+        assert self._order(
+            monkeypatch,
+            self._flac("cd_fast", speed=50 * self.MB),
+            self._flac("hires_slow", depth=24, size=90_000_000, slot=False, queue=40,
+                       speed=100_000),
+        ) == ["hires_slow", "cd_fast"]
+
+    def test_free_slot_beats_queue_and_speed(self, monkeypatch):
+        assert self._order(
+            monkeypatch,
+            self._flac("busy_fast", slot=False, queue=0, speed=50 * self.MB),
+            self._flac("free_slow", slot=True, queue=3, speed=200_000),
+        ) == ["free_slow", "busy_fast"]
+
+    def test_shorter_queue_beats_speed(self, monkeypatch):
+        assert self._order(
+            monkeypatch,
+            self._flac("long_queue_fast", slot=False, queue=30, speed=50 * self.MB),
+            self._flac("short_queue_slow", slot=False, queue=2, speed=200_000),
+        ) == ["short_queue_slow", "long_queue_fast"]
+
+    def test_faster_peer_wins_when_queues_tie(self, monkeypatch):
+        # Queues 5 and 6 share a log2 bucket; speed decides.
+        assert self._order(
+            monkeypatch,
+            self._flac("slow", slot=False, queue=5, speed=300_000),
+            self._flac("fast", slot=False, queue=6, speed=8 * self.MB),
+        ) == ["fast", "slow"]
+
+    def test_size_closest_to_preferred_breaks_a_speed_tie(self, monkeypatch):
+        # 10.1 vs 10.4 MB/s share a bucket; 900 kbps beats 1400 kbps for FLAC 16.
+        assert self._order(
+            monkeypatch,
+            self._flac("fat", size=52_500_000, speed=int(10.4 * self.MB)),
+            self._flac("typical", speed=int(10.1 * self.MB)),
+        ) == ["typical", "fat"]
+
+    def test_multi_peer_fixture_order(self, monkeypatch):
+        import json
+        import pathlib
+
+        from spotify_slsk import config
+        from spotify_slsk.matching.candidates import (
+            evaluate_candidates,
+            sort_candidates,
+        )
+
+        fx = json.loads((pathlib.Path(__file__).parent / "fixtures/slskd/"
+                         "search_responses_multi_peer.json").read_text())
+        monkeypatch.setattr(config, "QUALITY_PROFILE",
+                            q.profile_from_formats([".flac", ".mp3", ".aiff", ".wav"]))
+        t = fx["track"]
+        out = evaluate_candidates(fx["responses"], t["title"], t["artist"],
+                                  expected_duration_ms=t["duration_ms"])
+        ranked = sort_candidates([c for c in out if c["accepted"]])
+        users = [c["user"] for c in ranked]
+        # lossless_peer's "24-bit/88.2 kHz" is 1022 kbps: likely upsampled, so
+        # it ranks as 16-bit and after the plain 16-bit FLAC; MP3 320 last.
+        assert users.index("sparse_peer") < users.index("lossless_peer") < users.index("cbr_peer")
+        assert [c["quality"] for c in ranked] == sorted(
+            (c["quality"] for c in ranked), key=config.QUALITY_PROFILE.rank)
