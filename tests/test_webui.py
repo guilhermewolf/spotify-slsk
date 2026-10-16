@@ -882,6 +882,7 @@ def test_url_map_is_unchanged_by_the_blueprint_split(app_tmp):
         ("/settings", "GET"),
         ("/settings", "POST"),
         ("/settings/test-ntfy", "POST"),
+        ("/settings/quality", "POST"),
         ("/file", "GET"),
         ("/logs", "GET"),
         ("/logs.json", "GET"),
@@ -1039,3 +1040,62 @@ class TestCutoffUnmet:
     def test_wanted_pages_link_each_other(self, app_tmp, client):
         assert b'href="/wanted/cutoff"' in client.get("/wanted").data
         assert b'href="/wanted"' in client.get("/wanted/cutoff").data
+
+
+class TestQualityProfileForm:
+    def _stored(self, app_tmp):
+        from spotify_slsk.matching.quality import parse_profile
+
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        raw = db.list_settings(conn).get("QUALITY_PROFILE")
+        conn.close()
+        return parse_profile(raw)[0] if raw else None
+
+    def test_renders_every_quality_with_plain_controls(self, client):
+        from spotify_slsk.matching.quality import LADDER
+
+        page = client.get("/settings").data
+        assert b'id="quality"' in page
+        for q in LADDER:
+            assert f'name="order_{q.key}"'.encode() in page
+            assert f'value="{q.key}"'.encode() in page
+        assert b"always rejected by the 320 kbps floor" in page
+        assert b"<script>" not in page and b"onclick" not in page
+
+    def test_save_orders_by_number_then_ladder(self, app_tmp, client):
+        r = post(client, "/settings/quality", data={
+            "allowed": ["FLAC_16", "FLAC_24", "MP3_320"],
+            "order_FLAC_16": "1", "order_FLAC_24": "2", "order_MP3_320": "2",
+            "order_WAV": "1",  # not ticked: ignored
+            "cutoff": "FLAC_16", "upgrades_allowed": "1",
+        })
+        assert r.status_code == 302 and r.location.endswith("#quality")
+        p = self._stored(app_tmp)
+        assert p.allowed == ("FLAC_16", "FLAC_24", "MP3_320")
+        assert p.cutoff == "FLAC_16" and p.upgrades_allowed is True
+        page = client.get("/settings").data
+        assert b'value="1"' in page  # FLAC_16 shows order 1
+
+    @pytest.mark.parametrize("data,message", [
+        ({"cutoff": "FLAC_16"}, b"allow at least one quality"),
+        ({"allowed": ["FLAC_16"], "cutoff": "MP3_320"}, b"cutoff must be one of the allowed"),
+        ({"allowed": ["FLAC_16", "EXE"], "cutoff": "FLAC_16"}, b"unknown quality: EXE"),
+        ({"allowed": ["FLAC_16"], "order_FLAC_16": "x", "cutoff": "FLAC_16"},
+         b"must be a whole number"),
+    ])
+    def test_invalid_profiles_are_rejected_and_nothing_is_written(
+        self, app_tmp, client, data, message
+    ):
+        r = post(client, "/settings/quality", data=data, follow_redirects=True)
+        assert message in r.data
+        assert self._stored(app_tmp) is None
+
+    def test_main_settings_form_never_clears_the_profile(self, app_tmp, client):
+        post(client, "/settings/quality",
+             data={"allowed": ["FLAC_16"], "cutoff": "FLAC_16"})
+        post(client, "/settings", data={"MIN_MATCH_SCORE": "0.7"})
+        assert self._stored(app_tmp).allowed == ("FLAC_16",)
+
+    def test_requires_csrf(self, client):
+        assert client.post("/settings/quality", data={"allowed": ["FLAC_16"],
+                                                       "cutoff": "FLAC_16"}).status_code == 400

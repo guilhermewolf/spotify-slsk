@@ -576,3 +576,8 @@ details.confirm[open] { max-width: 22rem; }
 .evidence { display: grid; grid-template-columns: auto 1fr; gap: 0 .6rem; margin: .3rem 0 0; font-size: .8125rem; }
 .evidence dt { font-weight: 600; margin: 0; }
 .evidence dd { margin: 0; }
+
+/* Quality profile editor (settings) */
+.quality-table td { vertical-align: middle; }
+.quality-table input[type="checkbox"] { margin: 0; }
+.quality-table .order-input { width: 5rem; margin: 0; }
