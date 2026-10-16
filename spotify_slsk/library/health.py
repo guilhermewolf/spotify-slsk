@@ -59,7 +59,7 @@ from ..matching.tracks import score_track_match
 from ..utils import fmt_duration, free_path
 
 # Bump when the identity rules below change: every file is re-verified once.
-RULES_VERSION = 1
+RULES_VERSION = 2
 
 # A differing ISRC alone is not a problem (singles, albums, remasters and
 # compilations carry different ISRCs for the same song): it is stored as
