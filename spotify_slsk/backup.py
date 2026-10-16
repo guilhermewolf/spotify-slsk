@@ -5,7 +5,8 @@ daemon and the web UI keep using the database (WAL mode), and land in
 ``<data>/backups/playlist_tracks-YYYYMMDD-HHMMSS.db`` beside the database.
 Each is written to a ``.partial`` file, switched to a self-contained
 rollback journal (no -wal/-shm companions), integrity-checked, and only
-then renamed into place. Retention keeps the newest BACKUP_RETENTION files
+then renamed into place. Backups contain the settings table, secrets
+included, so the directory is 0700 and each file 0600. Retention keeps the newest BACKUP_RETENTION files
 matching that name pattern and touches nothing else in the directory.
 
 To restore: stop the container, copy a backup over
@@ -52,10 +53,16 @@ def create_backup(conn: sqlite3.Connection, now: float | None = None) -> str:
     """Write and verify one backup; returns its path. Raises on failure
     (nothing is left behind but a .partial, removed by housekeeping)."""
     directory = backup_dir(conn)
-    os.makedirs(directory, exist_ok=True)
+    # Backups hold the settings table - webhook/Subsonic secrets, the login
+    # hash, the Flask secret key - so only the container user may read them.
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    os.chmod(directory, 0o700)
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now if now is not None else time.time()))
     dest = os.path.join(directory, f"playlist_tracks-{stamp}.db")
     partial = dest + ".partial"
+    # Created 0600 before SQLite writes a byte into it.
+    os.close(os.open(partial, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600))
+    os.chmod(partial, 0o600)
     target = sqlite3.connect(partial)
     try:
         conn.backup(target)

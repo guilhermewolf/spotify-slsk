@@ -445,7 +445,10 @@ The database is backed up daily to
 API (safe while everything is running), and each backup is integrity-checked
 before it is kept. `BACKUP_RETENTION` (default 7) is how many are kept; `0`
 turns the daily backup off. **Backup now** on System → Status takes one
-immediately. Backups are single self-contained files; only files named like
+immediately. Backups contain every setting, **secrets included** (webhook
+header, Subsonic password, the login hash, the session key), so the folder is
+created `0700` and each file `0600`; keep it that way when you copy them
+elsewhere. Backups are single self-contained files; only files named like
 the above are ever deleted. They cover the database (playlists, track states,
 settings, history), not your music: back up the playlists folder separately.
 

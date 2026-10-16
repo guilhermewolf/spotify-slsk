@@ -31,6 +31,16 @@ class TestBackup:
         copy.close()
         assert not os.path.exists(path + ".partial") and not os.path.exists(path + "-wal")
 
+    def test_backups_are_private(self, conn):
+        import stat
+
+        path = backup.create_backup(conn, now=1.0)
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+        assert stat.S_IMODE(os.stat(backup.backup_dir(conn)).st_mode) == 0o700
+        os.chmod(backup.backup_dir(conn), 0o755)  # an existing, looser dir is tightened
+        backup.create_backup(conn, now=2.0)
+        assert stat.S_IMODE(os.stat(backup.backup_dir(conn)).st_mode) == 0o700
+
     def test_retention_keeps_the_newest_and_ignores_other_files(self, conn, monkeypatch):
         for day in range(1, 6):
             backup.create_backup(conn, now=time.mktime((2026, 1, day, 0, 0, 0, 0, 0, -1)))

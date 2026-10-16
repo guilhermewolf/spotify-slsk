@@ -344,7 +344,9 @@ unnormalised.
   UI requests are shown with `runtime_state.peek_*` (non-consuming).
 - **Backups and housekeeping** (`backup.py`). `create_backup`:
   `conn.backup()` into `<db dir>/backups/playlist_tracks-YYYYMMDD-HHMMSS.db.partial`,
-  `journal_mode=DELETE`, `integrity_check`, then rename; retention deletes only
+  `journal_mode=DELETE`, `integrity_check`, then rename. Backups hold the
+  settings table (secrets, login hash, `_ui_secret_key`): the dir is 0700 and
+  each file is created 0600 before SQLite writes to it. Retention deletes only
   names matching that pattern. `housekeeping`: history prune, VACUUM when ≥ 25%
   of ≥ 1000 pages are free, `PRAGMA optimize`, and deletes only our own
   expired temp files (artwork `.fail` past TTL, `.tmp`, backup `.partial`).
