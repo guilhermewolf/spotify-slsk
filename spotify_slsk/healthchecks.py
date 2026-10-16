@@ -161,6 +161,8 @@ _remote: list[Check] = []
 def _slskd_check() -> Check:
     from .slskd import client as slskd_client
 
+    if not os.getenv("SLSKD_API_KEY"):
+        return _check("slskd", ERROR, "SLSKD_API_KEY is not set")
     try:
         state = slskd_client.get_client().application.state()
         server = state.get("server") or {}

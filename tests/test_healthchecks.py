@@ -95,6 +95,11 @@ class TestRemote:
         monkeypatch.setattr(slskd_client, "get_client", lambda: _Slskd(state))
         assert by_name(healthchecks.refresh_remote(None))["slskd"]["status"] == status
 
+    def test_missing_api_key_is_named(self, monkeypatch):
+        monkeypatch.delenv("SLSKD_API_KEY")
+        check = by_name(healthchecks.refresh_remote(None))["slskd"]
+        assert check == {"name": "slskd", "status": "error", "message": "SLSKD_API_KEY is not set"}
+
     def test_spotify(self, monkeypatch):
         monkeypatch.setattr(slskd_client, "get_client", lambda: _Slskd(ConnectionError()))
 
