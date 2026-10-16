@@ -1048,7 +1048,7 @@ tbody tr:hover > td.actions-col { background: var(--c-raised); }
   border-radius: var(--r-md);
   font-size: var(--t-sm);
 }
-.activity .phase { font-weight: 700; text-transform: capitalize; }
+.activity .phase { font-weight: 700; }
 .activity .ago { color: var(--c-muted); font-size: var(--t-xs); margin-left: auto; }
 .activity.downloading    { border-left-color: var(--c-ok); }
 .activity.syncing        { border-left-color: var(--c-accent); }
@@ -1322,7 +1322,7 @@ tbody tr:hover > td.actions-col { background: var(--c-raised); }
 }
 .log-controls label { margin: 0; display: inline-flex; align-items: center; gap: var(--s-2); }
 .log-controls input { margin: 0; }
-.log-controls select { margin: 0; width: auto; padding-top: 0.2rem; padding-bottom: 0.2rem; }
+.log-controls select { margin: 0; width: auto; height: 2rem; padding-top: 0; padding-bottom: 0; font-size: var(--t-sm); }
 
 /* ==== 19. Login ======================================================== */
 
@@ -1363,3 +1363,5 @@ tr.tag-changed > td { background: color-mix(in srgb, var(--c-warn-bg) 50%, trans
 .two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr)); gap: 0 var(--s-4); }
 /* Placeholders show the inherited value; they must not read as typed text. */
 input::placeholder { color: var(--c-muted); opacity: 0.75; }
+/* Narrow screens: the track column keeps a readable width; the table scrolls. */
+.track-table td:has(> .track-title) { min-width: 11rem; }
