@@ -16,6 +16,7 @@ HISTORY_EVENTS = (
     "upgraded",
     "retried",
     "deleted_file",
+    "replaced_file",
     "quarantined",
     "quarantine_skipped",
 )

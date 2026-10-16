@@ -289,3 +289,29 @@ class TestQuarantine:
         db.insert_track(conn, "pl_x", ("t1", "Heart To Find", "Mat Joe", "Alb"))
         reconcile.startup_check(conn, "pl_x")
         assert db.get_track(conn, "pl_x", "t1")["status"] == "pending"
+
+
+def test_backfill_qualities_reads_each_file_once(tmp_path, monkeypatch):
+    from spotify_slsk import db
+    from spotify_slsk.library import health as h
+
+    conn = db.create_connection(str(tmp_path / "q.db"))
+    db.upsert_playlist_meta(conn, "pid", "pl_q", "Q", "s")
+    db.create_table(conn, "pl_q")
+    for tid in ("a", "b", "c"):
+        db.insert_track(conn, "pl_q", (tid, "S", "A", "Alb"))
+        db.update_download_status(conn, tid, "pl_q", success=True, file_path=f"/x/{tid}.flac")
+    reads = []
+
+    def fake(path):
+        reads.append(path)
+        return None if path.endswith("c.flac") else "FLAC_16"
+
+    monkeypatch.setattr(h, "quality_of_file", fake)
+    assert h.backfill_qualities(conn, max_files=2) == 2
+    assert h.backfill_qualities(conn, max_files=2) == 1
+    assert h.backfill_qualities(conn, max_files=2) == 0  # unreadable is not retried
+    assert sorted(reads) == ["/x/a.flac", "/x/b.flac", "/x/c.flac"]
+    assert db.get_track(conn, "pl_q", "a")["quality"] == "FLAC_16"
+    assert db.get_track(conn, "pl_q", "c")["quality"] is None
+    conn.close()

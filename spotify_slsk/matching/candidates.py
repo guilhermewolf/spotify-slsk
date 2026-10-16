@@ -220,6 +220,7 @@ def evaluate_candidates(
     expected_duration_ms: int | None = None,
     is_blocked: IsBlocked | None = None,
     lossless_only: bool = False,
+    better_quality_than: str | None = None,
 ) -> list[Candidate]:
     """
     Judge every file in slskd search results against the expected track.
@@ -235,7 +236,10 @@ def evaluate_candidates(
     files whose reported length is more than config.MAX_DURATION_DIFF_SECONDS off.
     `is_blocked(username, filename)` (see db.load_blocklist) rejects
     blocklisted peer files and banned peers. `lossless_only` rejects every
-    lossy format (replacing a "suspect" lossless file). Title/artist/version
+    lossy format (replacing a "suspect" lossless file). `better_quality_than`
+    (a quality key; upgrade pass, file below the profile cutoff) also accepts
+    a file of the *same* version tier as `max_version_tier` when its quality
+    ranks strictly better in the profile. Title/artist/version
     use the strict rules in `filename_match`.
     """
     evaluated = []
@@ -353,7 +357,19 @@ def evaluate_candidates(
             if reason:
                 entry["reason"] = reason
             elif max_version_tier is not None and entry["version_tier"] >= max_version_tier:
-                entry["reason"] = "not a better version than the current file"
+                if not (
+                    better_quality_than is not None
+                    and entry["version_tier"] == max_version_tier
+                    and config.QUALITY_PROFILE.rank(entry["quality"])
+                    < config.QUALITY_PROFILE.rank(better_quality_than)
+                ):
+                    entry["reason"] = (
+                        "not a better version or quality than the current file"
+                        if better_quality_than is not None
+                        else "not a better version than the current file"
+                    )
+                else:
+                    entry["accepted"] = True
             else:
                 entry["accepted"] = True
             if entry["reason"]:

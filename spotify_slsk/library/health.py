@@ -32,6 +32,8 @@ from ..db import (
     record_history,
     reset_track_for_redownload,
     save_file_check,
+    set_track_quality,
+    tracks_missing_quality,
 )
 from ..importer.audio_check import (
     CHECKABLE_EXTS,
@@ -48,6 +50,7 @@ from ..importer.tags import (
 )
 from ..matching.candidates import _duration_off, filename_match
 from ..matching.normalize import version_mismatch, version_tier
+from ..matching.quality import quality_of_file
 from ..matching.tracks import score_track_match
 from ..utils import fmt_duration
 
@@ -310,3 +313,54 @@ def quarantine_track(
     )
     logging.info(f"[quarantine] {path} -> {dest or '(file missing)'}; track back to pending")
     return True
+
+
+REPLACED_SUBDIR = "replaced"
+
+
+def retire_replaced_file(
+    conn: sqlite3.Connection, table_name: str, track_id: str, old_path: str, reason: str
+) -> str | None:
+    """Move a library file that an upgrade or manual grab replaced to
+    <playlists_root>/.quarantine/<table>/replaced/ (" (2)" on a collision).
+    Never deletes: until a recycle bin exists, the operator purges by hand.
+    A file outside the playlists root is left where it is. Daemon only.
+    Returns where the file went, or None when it was not moved."""
+    root = os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists")
+    if not _inside(old_path, root):
+        logging.warning(f"[replace] {old_path} is outside {root}; left in place")
+        return None
+    qdir = os.path.join(root, QUARANTINE_DIR, table_name, REPLACED_SUBDIR)
+    try:
+        os.makedirs(qdir, exist_ok=True)
+        dest = _free_path(qdir, os.path.basename(old_path))
+        shutil.move(old_path, dest)
+    except OSError as e:
+        logging.warning(f"[replace] Could not move replaced file {old_path}: {e}")
+        return None
+    logging.info(f"[replace] {old_path} -> {dest} ({reason})")
+    record_history(
+        conn, "replaced_file", table_name=table_name, track_id=track_id,
+        path=old_path, replaced_path=dest, reason=reason,
+    )
+    return dest
+
+
+def backfill_qualities(
+    conn: sqlite3.Connection,
+    max_files: int = 500,
+    heartbeat: Callable[[], None] = lambda: None,
+) -> int:
+    """Read the quality of up to `max_files` downloaded files that have
+    none recorded (pre-v7 rows, reconciled files). Header reads only, so
+    cheap; runs a bounded batch per cycle instead of a blocking migration."""
+    done = 0
+    for pl in list_playlists(conn, only_enabled=True):
+        table = pl["table_name"]
+        heartbeat()
+        for track_id, path in tracks_missing_quality(conn, table, max_files - done):
+            set_track_quality(conn, table, track_id, quality_of_file(path))
+            done += 1
+        if done >= max_files:
+            break
+    return done

@@ -30,7 +30,6 @@ from .db import (
     mark_upgrade_checked,
     prune_history,
     record_cycle,
-    record_history,
     set_setting,
 )
 from .importer.process import process_downloaded_file
@@ -269,10 +268,8 @@ def _process_manual_grabs(conn):
                 and os.path.isfile(old)
                 and os.path.abspath(old) != os.path.abspath(final_path)
             ):
-                os.remove(old)
-                record_history(
-                    conn, "deleted_file", table_name=table_name, track_id=track.id,
-                    path=old, reason="replaced by manual grab",
+                health.retire_replaced_file(
+                    conn, table_name, track.id, old, "replaced by manual grab"
                 )
         except Exception:
             logging.exception(f"Manual grab failed for {track.id} in {table_name}")
@@ -442,6 +439,8 @@ def main() -> None:
                             cycle_totals[k] += counters.get(k, 0)
                 if not _shutdown.is_set():
                     _run_library_scan(conn)
+                if not _shutdown.is_set():
+                    health.backfill_qualities(conn, heartbeat=_touch_heartbeat)
             except Exception:
                 logging.exception("Cycle failed; backing off and retrying")
                 if _shutdown.wait(config.CYCLE_ERROR_BACKOFF_SECONDS):
