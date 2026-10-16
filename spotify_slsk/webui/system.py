@@ -6,15 +6,20 @@ import os
 from flask import (
     Blueprint,
     abort,
+    flash,
+    g,
     jsonify,
+    redirect,
     render_template,
     request,
     send_from_directory,
+    url_for,
 )
 from flask.typing import ResponseReturnValue
 
-from .. import runtime_state
-from .helpers import health_snapshot
+from .. import db, runtime_state, tasks
+from ..library.health import SCAN_PENDING_KEY
+from .helpers import health_snapshot, wake_daemon
 
 bp = Blueprint("system", __name__)
 
@@ -82,3 +87,31 @@ def activity_json() -> ResponseReturnValue:
 def healthz() -> ResponseReturnValue:
     snapshot = health_snapshot()
     return jsonify(snapshot), 200 if snapshot["ok"] else 503
+
+
+# ---- scheduled tasks ----------------------------------------------
+
+@bp.route("/system/tasks")
+def tasks_page() -> ResponseReturnValue:
+    return render_template("system_tasks.html", tasks=tasks.describe(g.conn))
+
+
+@bp.route("/system/tasks/<name>/run", methods=["POST"])
+def task_run(name: str) -> ResponseReturnValue:
+    """Queue a run for the daemon (deduplicated: a second click while the
+    first is queued does nothing). The UI never runs a task itself."""
+    task = tasks.BY_NAME.get(name)
+    if task is None:
+        abort(404)
+    if name == "library_scan":
+        # The scan's own request flag, shared with the Library health button.
+        queued = db.get_setting(g.conn, SCAN_PENDING_KEY, "0") != "1"
+        db.set_setting(g.conn, SCAN_PENDING_KEY, "1")
+    else:
+        queued = db.queue_task(g.conn, name)
+    wake_daemon()
+    if queued:
+        flash(f"{task.label}: queued.", "success")
+    else:
+        flash(f"{task.label} is already queued.", "success")
+    return redirect(url_for("system.tasks_page"))

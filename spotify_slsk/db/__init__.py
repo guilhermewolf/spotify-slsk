@@ -54,6 +54,12 @@ from .settings import (
     list_settings,
     set_setting,
 )
+from .tasks import (
+    list_task_rows,
+    pop_queued_tasks,
+    queue_task,
+    record_task_run,
+)
 from .tracks import (
     MAX_ATTEMPTS_BEFORE_SUSPEND,
     add_tried_file,
@@ -81,6 +87,10 @@ from .tracks import (
 )
 
 __all__ = [
+    "list_task_rows",
+    "pop_queued_tasks",
+    "queue_task",
+    "record_task_run",
     "forget_retired",
     "record_retired",
     "retired_times",

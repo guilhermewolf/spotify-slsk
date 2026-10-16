@@ -346,7 +346,7 @@ class TestBetweenPlaylists:
             lambda c, max_files=500, **k: calls.append(("backfill", max_files)) or 0,
         )
         monkeypatch.setattr(daemon, "_drain_queues", lambda c: calls.append(("queues",)))
-        monkeypatch.setattr(daemon, "_run_housekeeping", lambda c: None)
+        monkeypatch.setattr(daemon, "_run_scheduled", lambda c: None)
 
         totals = daemon._run_cycle(None, conn, [{"playlist_id": "a"}, {"playlist_id": "b"}], None, None)
 

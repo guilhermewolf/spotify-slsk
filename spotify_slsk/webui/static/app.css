@@ -581,3 +581,7 @@ details.confirm[open] { max-width: 22rem; }
 .quality-table td { vertical-align: middle; }
 .quality-table input[type="checkbox"] { margin: 0; }
 .quality-table .order-input { width: 5rem; margin: 0; }
+
+/* A one-button form inside a table cell. */
+.inline-form { margin: 0; }
+.inline-form button { margin: 0; width: auto; padding: 0.25rem 0.6rem; font-size: 0.85rem; }

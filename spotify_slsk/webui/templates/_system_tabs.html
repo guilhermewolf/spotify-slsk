@@ -1,0 +1,6 @@
+<nav aria-label="System pages">
+  <ul class="filters">
+    <li><a href="{{ url_for('system.tasks_page') }}"
+           aria-current="{{ 'true' if system_tab == 'tasks' else 'false' }}">Tasks</a></li>
+  </ul>
+</nav>

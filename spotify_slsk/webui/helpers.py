@@ -65,6 +65,21 @@ def human_bytes(n: float) -> str:
     return f"{n:.1f} PiB"
 
 
+def fmt_ts(epoch: float | None) -> str:
+    """Epoch seconds -> local "YYYY-MM-DD HH:MM"."""
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(epoch)) if epoch else "—"
+
+
+def fmt_interval(seconds: int | None) -> str:
+    """3600 -> "1h", 86400 -> "1d", 300 -> "5m"; 0 -> "on demand"."""
+    if not seconds:
+        return "on demand"
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size and seconds % size == 0:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
+
+
 def wake_daemon() -> None:
     """Interrupt the daemon's cycle sleep so a change shows up in seconds."""
     cb = current_app.config.get("WAKE_DAEMON")

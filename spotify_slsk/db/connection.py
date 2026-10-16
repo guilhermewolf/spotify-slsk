@@ -2,7 +2,7 @@
 import logging
 import sqlite3
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
@@ -248,6 +248,23 @@ def _ensure_recycle_bin_table(conn: sqlite3.Connection) -> None:
         logging.error(f"Error ensuring recycle_bin: {e}")
 
 
+def _ensure_tasks_table(conn: sqlite3.Connection) -> None:
+    """Scheduled-task bookkeeping (schema v9, db.tasks)."""
+    try:
+        with conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS tasks ("
+                "name TEXT PRIMARY KEY, "
+                "last_run REAL, "
+                "last_duration REAL, "
+                "last_result TEXT, "
+                "last_ok INTEGER, "
+                "queued_at REAL)"
+            )
+    except sqlite3.Error as e:
+        logging.error(f"Error ensuring tasks: {e}")
+
+
 def create_connection(db_file: str) -> sqlite3.Connection | None:
     try:
         conn = sqlite3.connect(db_file, timeout=30)
@@ -259,6 +276,7 @@ def create_connection(db_file: str) -> sqlite3.Connection | None:
         _ensure_history_table(conn)
         _ensure_file_checks_table(conn)
         _ensure_recycle_bin_table(conn)
+        _ensure_tasks_table(conn)
         _ensure_schema_version(conn)
 
         # sqlite3.connect() succeeds on a corrupt or non-SQLite file — the

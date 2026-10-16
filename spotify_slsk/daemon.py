@@ -13,10 +13,11 @@ import signal
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 
 import spotipy
 
-from . import config, runtime_state
+from . import config, runtime_state, tasks
 from .db import (
     clear_tried_entries,
     create_connection,
@@ -28,8 +29,10 @@ from .db import (
     get_upgrade_candidates,
     list_playlists,
     mark_upgrade_checked,
+    pop_queued_tasks,
     prune_history,
     record_cycle,
+    record_task_run,
     set_setting,
 )
 from .importer.process import process_downloaded_file
@@ -357,13 +360,15 @@ def _run_library_scan(
     if not (pending or due):
         return
     runtime_state.set_activity("scanning", detail="Library health scan")
+    started = time.time()
     checked, finished = health.scan_step(
         conn, should_stop=_shutdown.is_set, heartbeat=_touch_heartbeat,
         max_files=max_files, max_seconds=max_seconds,
     )
-    logging.info(
-        f"[health] Checked {checked} file(s); "
-        f"{'scan complete' if finished else 'continuing next cycle'}"
+    result = f"checked {checked} file(s); {'scan complete' if finished else 'continuing'}"
+    logging.info(f"[health] {result}")
+    record_task_run(
+        conn, "library_scan", started=started, duration=time.time() - started, result=result
     )
     if finished:
         delete_setting(conn, health.SCAN_PENDING_KEY)
@@ -386,6 +391,7 @@ def _between_playlists(conn: sqlite3.Connection) -> None:
     The library scan used to run only at the end of a cycle, so a cycle
     with a download backlog (hours) starved it."""
     _drain_queues(conn)
+    _run_scheduled(conn)
     if _shutdown.is_set():
         return
     _run_library_scan(
@@ -404,7 +410,10 @@ def _run_cycle(sp, conn: sqlite3.Connection, playlists: list, ntfy_url, ntfy_top
     step after it), then the full-budget library work and housekeeping.
     Returns the summed per-playlist counters."""
     cycle_totals = {"tracks_added": 0, "tracks_downloaded": 0, "tracks_failed": 0}
+    # A "Run now" of a cycle-driven task is answered by this cycle.
+    pop_queued_tasks(conn, ["spotify_sync", "quality_backfill"])
     _drain_queues(conn)
+    _run_scheduled(conn)
     for pl in playlists:
         if _shutdown.is_set():
             break
@@ -416,26 +425,56 @@ def _run_cycle(sp, conn: sqlite3.Connection, playlists: list, ntfy_url, ntfy_top
     if not _shutdown.is_set():
         _run_library_scan(conn)
     if not _shutdown.is_set():
-        health.backfill_qualities(conn, heartbeat=_touch_heartbeat)
+        started = time.time()
+        done = health.backfill_qualities(conn, heartbeat=_touch_heartbeat)
+        record_task_run(
+            conn, "quality_backfill", started=started, duration=time.time() - started,
+            result=f"read the quality of {done} file(s)",
+        )
     if not _shutdown.is_set():
-        _run_housekeeping(conn)
+        _run_scheduled(conn)
     return cycle_totals
 
 
-def _run_housekeeping(conn: sqlite3.Connection) -> None:
-    """Daily: purge the recycle bin (RECYCLE_BIN_RETENTION_DAYS > 0)."""
+def _purge_recycle_bin(conn: sqlite3.Connection) -> str:
+    """Daily when RECYCLE_BIN_RETENTION_DAYS > 0 (see tasks.TASKS)."""
     days = config.RECYCLE_BIN_RETENTION_DAYS
-    if days <= 0:
-        return
-    try:
-        last = float(get_setting(conn, health.RECYCLE_PURGED_KEY, "0") or 0)
-    except ValueError:
-        last = 0.0
-    if time.time() - last < 86400:
-        return
     purged = health.purge_recycle_bin(conn, days)
-    set_setting(conn, health.RECYCLE_PURGED_KEY, str(time.time()))
-    logging.info(f"[recycle] Housekeeping: purged {purged} file(s) older than {days} day(s)")
+    logging.info(f"[recycle] Purged {purged} file(s) older than {days} day(s)")
+    return f"purged {purged} file(s) older than {days} day(s)"
+
+
+# What each scheduled task does. Tasks driven by the cycle itself
+# (spotify_sync, library_scan, quality_backfill) are recorded where they run.
+SCHEDULED: dict[str, Callable[[sqlite3.Connection], str]] = {
+    "recycle_purge": _purge_recycle_bin,
+}
+
+
+def _run_task(conn: sqlite3.Connection, name: str, fn: Callable[[sqlite3.Connection], str]) -> None:
+    """Run one task, timing it and recording the outcome. Never raises: a
+    failing task must not fail the cycle."""
+    started = time.time()
+    runtime_state.set_activity("task", detail=tasks.BY_NAME[name].label)
+    _touch_heartbeat()
+    try:
+        result, ok = fn(conn), True
+    except Exception as e:
+        logging.exception(f"[tasks] {name} failed")
+        result, ok = f"failed: {e}", False
+    record_task_run(
+        conn, name, started=started, duration=time.time() - started, result=result, ok=ok
+    )
+
+
+def _run_scheduled(conn: sqlite3.Connection) -> None:
+    """Run every scheduled task that is due or was requested (Run now)."""
+    requested = pop_queued_tasks(conn, list(SCHEDULED))
+    for name, fn in SCHEDULED.items():
+        if _shutdown.is_set():
+            return
+        if name in requested or tasks.is_due(conn, name):
+            _run_task(conn, name, fn)
 
 
 def _run_startup_reconciliation(sp, conn):
@@ -550,6 +589,15 @@ def main() -> None:
                 if _shutdown.wait(config.CYCLE_ERROR_BACKOFF_SECONDS):
                     break
                 continue
+            record_task_run(
+                conn, "spotify_sync", started=cycle_started_at,
+                duration=time.time() - cycle_started_at,
+                result=(
+                    f"{len(playlists)} playlist(s): {cycle_totals['tracks_added']} added, "
+                    f"{cycle_totals['tracks_downloaded']} downloaded, "
+                    f"{cycle_totals['tracks_failed']} failed"
+                ),
+            )
             # Only record cycles that did real work — empty-playlist ticks
             # would dilute the dashboard view of recent activity.
             if playlists:

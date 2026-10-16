@@ -101,17 +101,18 @@ class TestHousekeeping:
     def test_runs_at_most_daily_and_only_when_enabled(self, setup, monkeypatch):
         conn, files, _ = setup
         monkeypatch.setattr(config, "RECYCLE_BIN_RETENTION_DAYS", 0)
-        daemon._run_housekeeping(conn)
+        daemon._run_scheduled(conn)
         assert files["old_replaced"].exists()
 
         monkeypatch.setattr(config, "RECYCLE_BIN_RETENTION_DAYS", 30)
-        daemon._run_housekeeping(conn)
+        daemon._run_scheduled(conn)
         assert not files["old_replaced"].exists()
 
         files["old_replaced"].write_bytes(b"x")
         db.record_retired(conn, str(files["old_replaced"]), 0)
-        daemon._run_housekeeping(conn)  # same day: not again
+        daemon._run_scheduled(conn)  # same day: not again
         assert files["old_replaced"].exists()
-        db.set_setting(conn, health.RECYCLE_PURGED_KEY, str(time.time() - DAY - 1))
-        daemon._run_housekeeping(conn)
+        db.record_task_run(conn, "recycle_purge", started=time.time() - DAY - 1, duration=0, result="")
+        daemon._run_scheduled(conn)
         assert not files["old_replaced"].exists()
+        assert "purged 1 file" in db.list_task_rows(conn)["recycle_purge"]["last_result"]

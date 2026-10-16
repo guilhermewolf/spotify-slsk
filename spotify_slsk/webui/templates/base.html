@@ -52,6 +52,10 @@
              {% if active_page == 'logs' %}aria-current="page"{% endif %}>Logs</a>
         </li>
         <li>
+          <a href="{{ url_for('system.tasks_page') }}"
+             {% if active_page == 'system' %}aria-current="page"{% endif %}>System</a>
+        </li>
+        <li>
           <a href="{{ url_for('settings.settings') }}"
              {% if active_page == 'settings' %}aria-current="page"{% endif %}>Settings</a>
         </li>

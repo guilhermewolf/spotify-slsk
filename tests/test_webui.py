@@ -890,6 +890,8 @@ def test_url_map_is_unchanged_by_the_blueprint_split(app_tmp):
         ("/logs.json", "GET"),
         ("/activity.json", "GET"),
         ("/healthz", "GET"),
+        ("/system/tasks", "GET"),
+        ("/system/tasks/<name>/run", "POST"),
     }
 
 

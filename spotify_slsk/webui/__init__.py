@@ -27,7 +27,7 @@ from flask import Flask, abort, g, request, session
 from .. import db
 from ..utils import fmt_duration
 from . import health, library, playlists, settings, system, tracks, wanted
-from .helpers import health_snapshot, human_bytes
+from .helpers import fmt_interval, fmt_ts, health_snapshot, human_bytes
 
 # Reserved settings key holding the generated Flask secret. It is not in
 # SETTINGS_SPEC, so it never appears on the settings page.
@@ -129,6 +129,8 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
     # Templates call csrf_token() to render the hidden field.
     app.jinja_env.globals["csrf_token"] = _csrf_token
     app.jinja_env.filters["human_bytes"] = human_bytes
+    app.jinja_env.filters["ts"] = fmt_ts
+    app.jinja_env.filters["interval"] = fmt_interval
     app.jinja_env.filters["duration_ms"] = (
         lambda ms: fmt_duration(ms / 1000) if ms else "—"
     )
