@@ -9,8 +9,10 @@ import os
 
 import pytest
 
-from spotify_slsk import app
-from spotify_slsk import db
+from spotify_slsk import config, daemon, db
+from spotify_slsk.importer import process as importer_process
+from spotify_slsk.library import acquire, reconcile
+from spotify_slsk.spotify import sync as spotify_sync
 
 
 @pytest.fixture
@@ -28,9 +30,9 @@ def _seed(conn, track_id="t1", name="Heart To Find", artists="Mat Joe", album="A
 
 def _stub_metadata(monkeypatch, title, artist, album="Alb"):
     monkeypatch.setattr(
-        app, "extract_metadata_from_file", lambda p: (title, artist, album)
+        importer_process, "extract_metadata_from_file", lambda p: (title, artist, album)
     )
-    monkeypatch.setattr(app, "tag_audio_file", lambda *a, **k: True)
+    monkeypatch.setattr(importer_process, "tag_audio_file", lambda *a, **k: True)
 
 
 class TestProcessDownloadedFileAccepts:
@@ -43,7 +45,7 @@ class TestProcessDownloadedFileAccepts:
         src = downloads / "Mat Joe - Heart To Find.flac"
         src.write_bytes(b"audio")
 
-        ok, final = app.process_downloaded_file(str(src), "pl_x", conn)
+        ok, final = importer_process.process_downloaded_file(str(src), "pl_x", conn)
 
         assert ok is True
         assert final == str(playlists / "pl_x" / "Mat Joe - Heart To Find.flac")
@@ -68,7 +70,7 @@ class TestProcessDownloadedFileRejects:
         bad = downloads / "junk.flac"
         bad.write_bytes(b"audio")
 
-        ok, final = app.process_downloaded_file(str(bad), "pl_x", conn)
+        ok, final = importer_process.process_downloaded_file(str(bad), "pl_x", conn)
 
         assert ok is False and final is None
         assert not bad.exists(), "unusable download was not cleaned up"
@@ -79,11 +81,11 @@ class TestProcessDownloadedFileRejects:
         downloads, _ = sandbox_dirs
         _seed(conn)
         _stub_metadata(monkeypatch, "Something Totally Different", "Other Artist")
-        monkeypatch.setattr(app, "MIN_MATCH_SCORE", 0.62)
+        monkeypatch.setattr(config, "MIN_MATCH_SCORE", 0.62)
         bad = downloads / "Other Artist - Something Totally Different.flac"
         bad.write_bytes(b"audio")
 
-        ok, _ = app.process_downloaded_file(str(bad), "pl_x", conn)
+        ok, _ = importer_process.process_downloaded_file(str(bad), "pl_x", conn)
 
         assert ok is False
         assert not bad.exists()
@@ -101,7 +103,7 @@ class TestProcessDownloadedFileRejects:
         bad = downloads / "junk.flac"
         bad.write_bytes(b"audio")
 
-        app.process_downloaded_file(str(bad), "pl_x", conn)
+        importer_process.process_downloaded_file(str(bad), "pl_x", conn)
 
         assert db.get_track(conn, "pl_x", "t1")["downloaded"] is False
 
@@ -123,7 +125,7 @@ class TestReconcileModeIsNonDestructive:
         existing.parent.mkdir(parents=True)
         existing.write_bytes(b"audio")
 
-        ok, _ = app.process_downloaded_file(
+        ok, _ = importer_process.process_downloaded_file(
             str(existing), "pl_x", conn, reconcile=True
         )
 
@@ -140,7 +142,7 @@ class TestReconcileModeIsNonDestructive:
         existing.parent.mkdir(parents=True)
         existing.write_bytes(b"audio")
 
-        app.process_downloaded_file(str(existing), "pl_x", conn, reconcile=True)
+        importer_process.process_downloaded_file(str(existing), "pl_x", conn, reconcile=True)
 
         assert existing.exists()
 
@@ -154,7 +156,7 @@ class TestReconcileModeIsNonDestructive:
         existing.parent.mkdir(parents=True)
         existing.write_bytes(b"audio")
 
-        ok, final = app.process_downloaded_file(
+        ok, final = importer_process.process_downloaded_file(
             str(existing), "pl_x", conn, reconcile=True
         )
 
@@ -169,14 +171,14 @@ class TestMoveTrackToPlaylistFolder:
         src = downloads / "song.flac"
         src.write_bytes(b"audio")
 
-        dest = app.move_track_to_playlist_folder(str(src), "pl_new")
+        dest = importer_process.move_track_to_playlist_folder(str(src), "pl_new")
 
         assert dest == str(playlists / "pl_new" / "song.flac")
         assert os.path.exists(dest) and not src.exists()
 
     def test_returns_none_when_source_missing(self, sandbox_dirs):
         downloads, _ = sandbox_dirs
-        assert app.move_track_to_playlist_folder(
+        assert importer_process.move_track_to_playlist_folder(
             str(downloads / "nope.flac"), "pl_x"
         ) is None
 
@@ -193,7 +195,7 @@ class TestMoveTrackToPlaylistFolder:
 
         monkeypatch.setattr(shutil, "move", _cross_device)
 
-        dest = app.move_track_to_playlist_folder(str(src), "pl_x")
+        dest = importer_process.move_track_to_playlist_folder(str(src), "pl_x")
 
         assert dest and os.path.exists(dest)
 
@@ -232,7 +234,7 @@ class TestSpotifySyncDiff:
         db.upsert_playlist_meta(conn, "pid", "pl_x", "X", "snap-old")
         sp = _FakeSpotify("X", "snap-new", [_item("existing"), _item("brand-new")])
 
-        new_tracks, table = app.fetch_and_compare_tracks(conn, "pid", sp)
+        new_tracks, table = spotify_sync.fetch_and_compare_tracks(conn, "pid", sp)
 
         assert table == "pl_x"
         assert [t.id for t in new_tracks] == ["brand-new"]
@@ -245,7 +247,7 @@ class TestSpotifySyncDiff:
         db.upsert_playlist_meta(conn, "pid", "pl_x", "X", "same-snap")
         sp = _FakeSpotify("X", "same-snap", [_item("a")])
 
-        new_tracks, _ = app.fetch_and_compare_tracks(conn, "pid", sp)
+        new_tracks, _ = spotify_sync.fetch_and_compare_tracks(conn, "pid", sp)
 
         assert new_tracks == []
         assert sp.track_fetches == 0, "paginated fetch ran despite an unchanged snapshot"
@@ -254,7 +256,7 @@ class TestSpotifySyncDiff:
         db.upsert_playlist_meta(conn, "pid", "pl_x", "X", None)
         sp = _FakeSpotify("X", "snap", [_item("a")])
 
-        new_tracks, _ = app.fetch_and_compare_tracks(conn, "pid", sp)
+        new_tracks, _ = spotify_sync.fetch_and_compare_tracks(conn, "pid", sp)
 
         assert [t.id for t in new_tracks] == ["a"]
         # Pagination stops on the first empty page, so one item costs two calls.
@@ -264,7 +266,7 @@ class TestSpotifySyncDiff:
         db.upsert_playlist_meta(conn, "pid", "pl_x", "X", None)
         sp = _FakeSpotify("X", "snap-123", [_item("a")])
 
-        app.fetch_and_compare_tracks(conn, "pid", sp)
+        spotify_sync.fetch_and_compare_tracks(conn, "pid", sp)
 
         assert db.get_playlist_meta(conn, "pid")[0] == "snap-123"
 
@@ -275,7 +277,7 @@ class TestSpotifySyncDiff:
             "X", "snap", [{"track": None}, {"track": {"id": None}}, _item("ok")]
         )
 
-        new_tracks, _ = app.fetch_and_compare_tracks(conn, "pid", sp)
+        new_tracks, _ = spotify_sync.fetch_and_compare_tracks(conn, "pid", sp)
 
         assert [t.id for t in new_tracks] == ["ok"]
 
@@ -290,7 +292,7 @@ class TestSpotifySyncDiff:
         db.upsert_playlist_meta(conn, "pid", "pl_x", "X", "old")
         sp = _FakeSpotify("X", "new", [_item("still-here")])
 
-        app.fetch_and_compare_tracks(conn, "pid", sp)
+        spotify_sync.fetch_and_compare_tracks(conn, "pid", sp)
 
         assert "gone" in {r[0] for r in db.fetch_all_tracks(conn, "pl_x")}
 
@@ -305,9 +307,9 @@ class TestStartupReconciliation:
         target.parent.mkdir(parents=True)
         target.write_bytes(b"audio")
         # Filenames carry the metadata; no real tags in a stub file.
-        monkeypatch.setattr(app, "_read_audio_tags_safe", lambda p: ("", ""))
+        monkeypatch.setattr(reconcile, "_read_audio_tags_safe", lambda p: ("", ""))
 
-        app.startup_check(conn, "pl_x")
+        reconcile.startup_check(conn, "pl_x")
 
         row = db.get_track(conn, "pl_x", "t1")
         assert row["downloaded"] is True
@@ -315,7 +317,7 @@ class TestStartupReconciliation:
 
     def test_no_folder_is_a_no_op(self, conn, sandbox_dirs):
         _seed(conn)
-        app.startup_check(conn, "pl_x")  # must not raise
+        reconcile.startup_check(conn, "pl_x")  # must not raise
         assert db.get_track(conn, "pl_x", "t1")["downloaded"] is False
 
     def test_verified_existing_path_is_left_alone(
@@ -329,14 +331,14 @@ class TestStartupReconciliation:
         db.update_download_status(
             conn, "t1", "pl_x", success=True, file_path=str(target)
         )
-        monkeypatch.setattr(app, "_read_audio_tags_safe", lambda p: ("", ""))
+        monkeypatch.setattr(reconcile, "_read_audio_tags_safe", lambda p: ("", ""))
 
         writes = []
         monkeypatch.setattr(
-            app, "update_download_status", lambda *a, **k: writes.append(1)
+            reconcile, "update_download_status", lambda *a, **k: writes.append(1)
         )
 
-        app.startup_check(conn, "pl_x")
+        reconcile.startup_check(conn, "pl_x")
 
         assert writes == [], "re-wrote a row whose stored path was already correct"
 
@@ -350,7 +352,7 @@ class TestDurationSync:
         new["track"]["duration_ms"] = 242_000
         sp = _FakeSpotify("X", "snap", [old, new])
 
-        new_tracks, _ = app.fetch_and_compare_tracks(conn, "pid", sp)
+        new_tracks, _ = spotify_sync.fetch_and_compare_tracks(conn, "pid", sp)
 
         assert new_tracks[0].duration_ms == 242_000
         assert db.get_track(conn, "pl_x", "new")["duration_ms"] == 242_000
@@ -367,13 +369,12 @@ class TestUntaggedFallback:
         return Track("t1", "Heart To Find", "Mat Joe", "Alb", "pl_x", duration_ms=duration_ms)
 
     def _setup(self, conn, monkeypatch, sandbox_dirs, filename, length):
-        from spotify_slsk import soulseek_api
         downloads, playlists = sandbox_dirs
         _seed(conn)
         _stub_metadata(monkeypatch, None, None)
-        monkeypatch.setattr(app, "_audio_length_seconds", lambda p: length)
-        monkeypatch.setattr(soulseek_api, "MAX_DURATION_DIFF_SECONDS", 15)
-        monkeypatch.setattr(app, "MIN_MATCH_SCORE", 0.62)
+        monkeypatch.setattr(importer_process, "audio_length_seconds", lambda p: length)
+        monkeypatch.setattr(config, "MAX_DURATION_DIFF_SECONDS", 15)
+        monkeypatch.setattr(config, "MIN_MATCH_SCORE", 0.62)
         src = downloads / filename
         src.write_bytes(b"audio")
         return src, playlists
@@ -382,7 +383,7 @@ class TestUntaggedFallback:
         src, playlists = self._setup(
             conn, monkeypatch, sandbox_dirs, "Mat Joe - Heart To Find.flac", 245.0
         )
-        ok, final = app.process_downloaded_file(
+        ok, final = importer_process.process_downloaded_file(
             str(src), "pl_x", conn, expected_track=self._track()
         )
         assert ok is True
@@ -393,7 +394,7 @@ class TestUntaggedFallback:
         src, _ = self._setup(
             conn, monkeypatch, sandbox_dirs, "Mat Joe - Heart To Find.flac", 120.0
         )
-        ok, _ = app.process_downloaded_file(
+        ok, _ = importer_process.process_downloaded_file(
             str(src), "pl_x", conn, expected_track=self._track()
         )
         assert ok is False
@@ -405,7 +406,7 @@ class TestUntaggedFallback:
         src, _ = self._setup(
             conn, monkeypatch, sandbox_dirs, "Other Guy - Something Else.flac", 242.0
         )
-        ok, _ = app.process_downloaded_file(
+        ok, _ = importer_process.process_downloaded_file(
             str(src), "pl_x", conn, expected_track=self._track()
         )
         assert ok is False and not src.exists()
@@ -414,7 +415,7 @@ class TestUntaggedFallback:
         src, _ = self._setup(
             conn, monkeypatch, sandbox_dirs, "Mat Joe - Heart To Find.flac", 242.0
         )
-        ok, _ = app.process_downloaded_file(
+        ok, _ = importer_process.process_downloaded_file(
             str(src), "pl_x", conn, expected_track=self._track(duration_ms=None)
         )
         assert ok is False
@@ -425,7 +426,7 @@ class TestUntaggedFallback:
         src, _ = self._setup(
             conn, monkeypatch, sandbox_dirs, "Mat Joe - Heart To Find (Dub Mix).flac", 242.0
         )
-        ok, _ = app.process_downloaded_file(
+        ok, _ = importer_process.process_downloaded_file(
             str(src), "pl_x", conn, expected_track=self._track()
         )
         assert ok is False
@@ -434,7 +435,7 @@ class TestUntaggedFallback:
         src, _ = self._setup(
             conn, monkeypatch, sandbox_dirs, "01 - Heart To Find.flac", 242.0
         )
-        ok, _ = app.process_downloaded_file(
+        ok, _ = importer_process.process_downloaded_file(
             str(src), "pl_x", conn, expected_track=self._track(),
             source={"user": "p", "filename": "@@m\\Mat Joe\\Single\\01 - Heart To Find.flac"},
         )
@@ -444,7 +445,7 @@ class TestUntaggedFallback:
         src, _ = self._setup(
             conn, monkeypatch, sandbox_dirs, "Mat Joe - Heart To Find.flac", 242.0
         )
-        ok, _ = app.process_downloaded_file(
+        ok, _ = importer_process.process_downloaded_file(
             str(src), "pl_x", conn, reconcile=True, expected_track=self._track()
         )
         assert ok is False and src.exists()
@@ -460,7 +461,7 @@ class TestRejectionBlocklists:
         bad.write_bytes(b"audio")
         source = {"user": "peer", "filename": "@@a\\x.flac", "size": 5}
 
-        app.process_downloaded_file(str(bad), "pl_x", conn, track_id="t1", source=source)
+        importer_process.process_downloaded_file(str(bad), "pl_x", conn, track_id="t1", source=source)
 
         assert db.list_blocklist(conn) == []
         assert "x.flac" in db.get_tried_files(conn, "pl_x", "t1")
@@ -474,22 +475,21 @@ class TestRejectionBlocklists:
         bad.write_bytes(b"audio")
         source = {"user": "peer", "filename": "@@a\\x.flac", "size": 5}
 
-        app.process_downloaded_file(str(bad), "pl_x", conn, source=source)
+        importer_process.process_downloaded_file(str(bad), "pl_x", conn, source=source)
 
         assert db.is_blocklisted(conn, "peer", "@@a\\x.flac")
 
     def test_truncated_file_blocklists_its_source(self, conn, monkeypatch, sandbox_dirs):
-        from spotify_slsk import soulseek_api
         downloads, _ = sandbox_dirs
         _seed(conn)
         _stub_metadata(monkeypatch, "Heart To Find", "Mat Joe")
-        monkeypatch.setattr(soulseek_api, "MAX_DURATION_DIFF_SECONDS", 15)
-        monkeypatch.setattr(app, "_audio_length_seconds", lambda p: 30.0)
+        monkeypatch.setattr(config, "MAX_DURATION_DIFF_SECONDS", 15)
+        monkeypatch.setattr(importer_process, "audio_length_seconds", lambda p: 30.0)
         bad = downloads / "Mat Joe - Heart To Find.flac"
         bad.write_bytes(b"audio")
         source = {"user": "peer", "filename": "@@a\\y.flac", "size": 5, "length": 240}
 
-        ok, _ = app.process_downloaded_file(str(bad), "pl_x", conn, track_id="t1", source=source)
+        ok, _ = importer_process.process_downloaded_file(str(bad), "pl_x", conn, track_id="t1", source=source)
 
         assert ok is False and not bad.exists()
         assert db.is_blocklisted(conn, "peer", "@@a\\y.flac")
@@ -500,7 +500,7 @@ class TestRejectionBlocklists:
         _stub_metadata(monkeypatch, None, None)
         f = downloads / "x.flac"
         f.write_bytes(b"audio")
-        app.process_downloaded_file(
+        importer_process.process_downloaded_file(
             str(f), "pl_x", conn, reconcile=True, source={"user": "peer", "filename": "x"}
         )
         assert db.list_blocklist(conn) == []
@@ -514,12 +514,12 @@ class TestHistoryEvents:
         _stub_metadata(monkeypatch, "Something Totally Different", "Other Artist")
         bad = downloads / "bad.flac"
         bad.write_bytes(b"audio")
-        app.process_downloaded_file(str(bad), "pl_x", conn, source={"user": "peer", "filename": "bad.flac"})
+        importer_process.process_downloaded_file(str(bad), "pl_x", conn, source={"user": "peer", "filename": "bad.flac"})
 
         _stub_metadata(monkeypatch, "Heart To Find", "Mat Joe")
         good = downloads / "good.flac"
         good.write_bytes(b"audio")
-        app.process_downloaded_file(str(good), "pl_x", conn, source={"user": "peer2", "filename": "good.flac"})
+        importer_process.process_downloaded_file(str(good), "pl_x", conn, source={"user": "peer2", "filename": "good.flac"})
 
         events = [(r["event"], r["playlist_id"]) for r in db.list_history(conn)]
         assert events == [
@@ -533,21 +533,21 @@ class TestHistoryEvents:
         _stub_metadata(monkeypatch, None, None)
         f = downloads / "x.flac"
         f.write_bytes(b"audio")
-        app.process_downloaded_file(str(f), "pl_x", conn, reconcile=True)
+        importer_process.process_downloaded_file(str(f), "pl_x", conn, reconcile=True)
         assert db.list_history(conn) == []
 
     def test_nothing_acceptable_records_download_failed(self, conn, monkeypatch):
-        from spotify_slsk import soulseek_api
-        monkeypatch.setattr(soulseek_api, "_run_one_search", lambda q, timeout=60: [])
-        soulseek_api.search_and_download("Mat Joe", "Heart To Find", conn, "pl_x", "t1")
+        from spotify_slsk.slskd import search as slskd_search
+        monkeypatch.setattr(slskd_search, "_run_one_search", lambda q, timeout=60: [])
+        slskd_search.search_and_download("Mat Joe", "Heart To Find", conn, "pl_x", "t1")
         rows = db.list_history(conn)
         assert [r["event"] for r in rows] == ["download_failed"]
         assert rows[0]["data"]["reason"].startswith("no acceptable candidate")
 
     def test_upgrade_pass_finding_nothing_is_not_a_failure(self, conn, monkeypatch):
-        from spotify_slsk import soulseek_api
-        monkeypatch.setattr(soulseek_api, "_run_one_search", lambda q, timeout=60: [])
-        soulseek_api.search_and_download(
+        from spotify_slsk.slskd import search as slskd_search
+        monkeypatch.setattr(slskd_search, "_run_one_search", lambda q, timeout=60: [])
+        slskd_search.search_and_download(
             "Mat Joe", "Heart To Find", conn, "pl_x", "t1", max_version_tier=1
         )
         assert db.list_history(conn) == []
@@ -555,7 +555,8 @@ class TestHistoryEvents:
 
 class TestManualGrabs:
     def test_daemon_downloads_and_imports_a_queued_grab(self, conn, monkeypatch, sandbox_dirs):
-        from spotify_slsk import runtime_state, soulseek_api
+        from spotify_slsk import runtime_state
+        from spotify_slsk.slskd import transfers as slskd_transfers
         downloads, playlists = sandbox_dirs
         _seed(conn)
         _stub_metadata(monkeypatch, "Heart To Find", "Mat Joe")
@@ -567,14 +568,14 @@ class TestManualGrabs:
             seen.update(table=table, tid=tid, source=source)
             return str(src)
 
-        monkeypatch.setattr(soulseek_api, "grab_candidate", fake_grab)
+        monkeypatch.setattr(slskd_transfers, "grab_candidate", fake_grab)
         runtime_state.pop_manual_grabs()
         runtime_state.enqueue_manual_grab({
             "playlist_id": "pid", "table_name": "pl_x", "track_id": "t1",
             "candidate": {"user": "peer", "filename": "Mat Joe - Heart To Find.flac", "size": 5},
         })
 
-        app._process_manual_grabs(conn)
+        daemon._process_manual_grabs(conn)
 
         assert seen == {"table": "pl_x", "tid": "t1", "source": "manual"}
         row = db.get_track(conn, "pl_x", "t1")
@@ -583,18 +584,20 @@ class TestManualGrabs:
         assert runtime_state.pop_manual_grabs() == []
 
     def test_failed_manual_grab_does_not_count_an_attempt(self, conn, monkeypatch):
-        from spotify_slsk import runtime_state, soulseek_api
+        from spotify_slsk import runtime_state
+        from spotify_slsk.slskd import transfers as slskd_transfers
         _seed(conn)
-        monkeypatch.setattr(soulseek_api, "grab_candidate", lambda *a, **k: None)
+        monkeypatch.setattr(slskd_transfers, "grab_candidate", lambda *a, **k: None)
         runtime_state.enqueue_manual_grab({
             "playlist_id": "pid", "table_name": "pl_x", "track_id": "t1",
             "candidate": {"user": "peer", "filename": "x.flac", "size": 5},
         })
-        app._process_manual_grabs(conn)
+        daemon._process_manual_grabs(conn)
         assert db.get_track(conn, "pl_x", "t1")["attempts"] == 0
 
     def test_manual_grab_replaces_old_file_only_for_its_own_track(self, conn, monkeypatch, sandbox_dirs):
-        from spotify_slsk import runtime_state, soulseek_api
+        from spotify_slsk import runtime_state
+        from spotify_slsk.slskd import transfers as slskd_transfers
         downloads, playlists = sandbox_dirs
         _seed(conn)
         _seed(conn, "t2", name="Another Song", artists="Someone")
@@ -605,12 +608,12 @@ class TestManualGrabs:
         _stub_metadata(monkeypatch, "Another Song", "Someone")
         src = downloads / "Someone - Another Song.flac"
         src.write_bytes(b"audio")
-        monkeypatch.setattr(soulseek_api, "grab_candidate", lambda *a, **k: str(src))
+        monkeypatch.setattr(slskd_transfers, "grab_candidate", lambda *a, **k: str(src))
         runtime_state.enqueue_manual_grab({
             "playlist_id": "pid", "table_name": "pl_x", "track_id": "t1",
             "candidate": {"user": "peer", "filename": "x.flac", "size": 5},
         })
-        app._process_manual_grabs(conn)
+        daemon._process_manual_grabs(conn)
         assert old.exists(), "t1's file must survive a grab that imported as t2"
 
 
@@ -632,7 +635,7 @@ class TestVerifiesTheRequestedTrackOnly:
         f = downloads / "Eminem - Lose Yourself.flac"
         f.write_bytes(b"audio")
 
-        ok, _ = app.process_downloaded_file(str(f), "pl_x", conn, track_id="t1")
+        ok, _ = importer_process.process_downloaded_file(str(f), "pl_x", conn, track_id="t1")
 
         assert ok is False
         assert not f.exists()
@@ -650,7 +653,7 @@ class TestVerifiesTheRequestedTrackOnly:
         f = downloads / "Mat Joe - Heart To Find.flac"
         f.write_bytes(b"audio")
 
-        ok, _ = app.process_downloaded_file(str(f), "pl_x", conn, track_id="t2")
+        ok, _ = importer_process.process_downloaded_file(str(f), "pl_x", conn, track_id="t2")
 
         assert ok is True
         assert db.get_track(conn, "pl_x", "t2")["downloaded"] is True
@@ -660,16 +663,16 @@ class TestVerifiesTheRequestedTrackOnly:
         from spotify_slsk.models import Track
 
         seen = {}
-        monkeypatch.setattr(app, "search_and_download", lambda **k: "/x.flac")
+        monkeypatch.setattr(acquire, "search_and_download", lambda **k: "/x.flac")
 
         def _process(path, pl, c, reconcile=False, track_id=None, expected_track=None, source=None):
             # Tier 1 passes the Track itself (its id is the requested track).
             seen["track_id"] = track_id or expected_track.id
             return False, None
 
-        monkeypatch.setattr(app, "process_downloaded_file", _process)
+        monkeypatch.setattr(acquire, "process_downloaded_file", _process)
         _seed(conn, "t1")
-        app.handle_track_download(
+        acquire.handle_track_download(
             Track("t1", "Heart To Find", "Mat Joe", "Alb", "p"), "pl_x", conn
         )
         assert seen["track_id"] == "t1"
@@ -685,14 +688,14 @@ class TestUpgradeReplacesOnlyItsOwnFile:
         db.update_download_status(conn, "t1", "pl_x", success=True, file_path=str(old))
         new = playlists / "Mat Joe - Heart To Find (Extended Mix).flac"
         new.write_bytes(b"new")
-        monkeypatch.setattr(app, "search_and_download", lambda **k: str(new))
+        monkeypatch.setattr(acquire, "search_and_download", lambda **k: str(new))
         return Track("t1", "Heart To Find", "Mat Joe", "Alb", "pl_x"), old, new
 
     def test_old_file_kept_when_import_did_not_land_on_this_track(self, conn, monkeypatch, sandbox_dirs):
         track, old, new = self._setup(conn, monkeypatch, sandbox_dirs)
         # Verified, but the row still points at the old file.
-        monkeypatch.setattr(app, "process_downloaded_file", lambda *a, **k: (True, str(new)))
-        app.try_upgrade_track(track, "pl_x", conn, str(old))
+        monkeypatch.setattr(acquire, "process_downloaded_file", lambda *a, **k: (True, str(new)))
+        acquire.try_upgrade_track(track, "pl_x", conn, str(old))
         assert old.exists()
 
     def test_old_file_replaced_when_import_landed_here(self, conn, monkeypatch, sandbox_dirs):
@@ -702,14 +705,14 @@ class TestUpgradeReplacesOnlyItsOwnFile:
             db.update_download_status(conn, "t1", "pl_x", success=True, file_path=str(new))
             return True, str(new)
 
-        monkeypatch.setattr(app, "process_downloaded_file", _process)
-        assert app.try_upgrade_track(track, "pl_x", conn, str(old)) is True
+        monkeypatch.setattr(acquire, "process_downloaded_file", _process)
+        assert acquire.try_upgrade_track(track, "pl_x", conn, str(old)) is True
         assert not old.exists() and new.exists()
 
     def test_same_path_is_never_deleted(self, conn, monkeypatch, sandbox_dirs):
         track, old, _ = self._setup(conn, monkeypatch, sandbox_dirs)
-        monkeypatch.setattr(app, "process_downloaded_file", lambda *a, **k: (True, str(old)))
-        app.try_upgrade_track(track, "pl_x", conn, str(old))
+        monkeypatch.setattr(acquire, "process_downloaded_file", lambda *a, **k: (True, str(old)))
+        acquire.try_upgrade_track(track, "pl_x", conn, str(old))
         assert old.exists()
 
 
@@ -729,9 +732,33 @@ class TestPlaceholderPlaylistIsRepointedBeforeInsert:
                 return super().playlist_tracks(pid, offset, limit)
 
         sp = _SP("My Mix", "snap", [_item("a"), _item("b"), _item("c")])
-        app.fetch_and_compare_tracks(conn, "pid", sp)
+        spotify_sync.fetch_and_compare_tracks(conn, "pid", sp)
 
         assert seen["table"] == "pl_my_mix"
         _, table, name, _ = db.get_playlist_meta(conn, "pid")
         assert (table, name) == ("pl_my_mix", "My Mix")
         assert db.playlist_stats(conn, "pl_my_mix")["total"] == 3
+
+
+class TestTagWriters:
+    """One tag writer serves the daemon and the web UI's re-tag action; the
+    daemon wrapper must keep its never-raise contract."""
+
+    def test_wav_is_skipped_but_counts_as_tagged(self, tmp_path):
+        from spotify_slsk.importer.tags import tag_audio_file
+        assert tag_audio_file(str(tmp_path / "a.wav"), "t", "a", "b") is True
+
+    def test_unsupported_format_is_reported_not_raised(self, tmp_path):
+        from spotify_slsk.importer.tags import tag_audio_file
+        assert tag_audio_file(str(tmp_path / "a.ogg"), "t", "a", "b") is False
+
+    def test_unreadable_file_is_reported_not_raised(self, tmp_path):
+        from spotify_slsk.importer.tags import tag_audio_file
+        bad = tmp_path / "a.mp3"
+        bad.write_bytes(b"not audio")
+        assert tag_audio_file(str(bad), "t", "a", "b") is False
+
+    def test_write_tags_raises_for_the_ui_to_report(self, tmp_path):
+        from spotify_slsk.importer.tags import write_tags
+        with pytest.raises(ValueError, match="Unsupported extension"):
+            write_tags(str(tmp_path / "a.wav"), "t", "a", "b")

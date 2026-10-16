@@ -18,8 +18,6 @@ import logging
 import threading
 import time
 from collections import deque
-from typing import Optional
-
 
 _lock = threading.Lock()
 _activity: dict = {
@@ -38,13 +36,13 @@ _activity: dict = {
 def set_activity(
     phase: str,
     *,
-    detail: Optional[str] = None,
-    playlist_id: Optional[str] = None,
-    playlist_name: Optional[str] = None,
-    table_name: Optional[str] = None,
-    track_id: Optional[str] = None,
-    track_name: Optional[str] = None,
-    track_artist: Optional[str] = None,
+    detail: str | None = None,
+    playlist_id: str | None = None,
+    playlist_name: str | None = None,
+    table_name: str | None = None,
+    track_id: str | None = None,
+    track_name: str | None = None,
+    track_artist: str | None = None,
 ) -> None:
     """Replace the current activity record. ``since`` resets to now."""
     with _lock:
@@ -128,17 +126,17 @@ SEARCH_HISTORY_PER_TRACK = 20
 SEARCH_HISTORY_MAX_TRACKS = 500
 
 _search_lock = threading.Lock()
-_search_history: "dict[str, deque]" = {}
+_search_history: dict[str, deque] = {}
 
 
 def record_search(
-    track_id: Optional[str],
+    track_id: str | None,
     query: str,
     *,
     result_count: int = 0,
-    candidate_count: Optional[int] = None,
-    rejected_count: Optional[int] = None,
-    rejections: Optional[list] = None,
+    candidate_count: int | None = None,
+    rejected_count: int | None = None,
+    rejections: list | None = None,
 ) -> None:
     """Record one query attempt for a track. No-op if ``track_id`` is falsy.
 
@@ -201,7 +199,7 @@ def _expired(entry: dict, now: float) -> bool:
     return now - entry["finished"] > INTERACTIVE_TTL_SECONDS
 
 
-def start_interactive_search(key):
+def start_interactive_search(key: tuple[str, str]) -> object | None:
     """Claim the slot for ``key``. Returns an ownership token to pass to
     finish_interactive_search, or None if a search is already running.
 
@@ -227,7 +225,12 @@ def start_interactive_search(key):
         return token
 
 
-def finish_interactive_search(key, token, results=None, error=None) -> None:
+def finish_interactive_search(
+    key: tuple[str, str],
+    token: object,
+    results: list[dict] | None = None,
+    error: str | None = None,
+) -> None:
     """Record the outcome — only if ``token`` still owns the slot."""
     with _interactive_lock:
         entry = _interactive.get(key)
@@ -241,7 +244,7 @@ def finish_interactive_search(key, token, results=None, error=None) -> None:
         )
 
 
-def get_interactive_search(key):
+def get_interactive_search(key: tuple[str, str]) -> dict | None:
     """Snapshot of the search for ``key``, or None if absent/expired."""
     with _interactive_lock:
         entry = _interactive.get(key)

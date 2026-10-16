@@ -215,7 +215,7 @@ class TestTriedFiles:
     def test_clear_tried_entries_actually_clears_the_history(self, conn):
         """The rejected-filename history must be readable-then-empty.
 
-        app.handle_track_download calls clear_tried_entries after a verified
+        acquire.handle_track_download calls clear_tried_entries after a verified
         download so a filename rejected once isn't blacklisted forever. It
         previously wrote to a dead `tried_files` column while the history
         lived in the `_tried` table, making the call a silent no-op.
@@ -514,14 +514,17 @@ class TestHistory:
         conn.close()
 
     def test_reload_settings_clamps_retention(self, tmp_path, monkeypatch):
-        from spotify_slsk import app
+        from spotify_slsk import config
         conn = db.create_connection(str(tmp_path / "h.db"))
         monkeypatch.setenv("HISTORY_RETENTION_DAYS", "0")
-        monkeypatch.setattr(app, "_slsk_refresh_from_db", lambda c: None)
-        monkeypatch.setattr(app, "HISTORY_RETENTION_DAYS", 90)  # restored after
-        monkeypatch.setattr(app, "MIN_MATCH_SCORE", app.MIN_MATCH_SCORE)
-        app._reload_settings(conn)
-        assert app.HISTORY_RETENTION_DAYS == 1
+        # reload() rebinds every tunable; snapshot them so they are restored.
+        for name in ("HISTORY_RETENTION_DAYS", "MIN_MATCH_SCORE", "PREFERRED_FORMATS",
+                     "MIN_PEER_UPLOAD_SPEED", "MIN_EFFECTIVE_MP3_KBPS",
+                     "EARLY_STOP_RESPONSES", "EXTERNAL_PROCESS_WAIT_TIMEOUT",
+                     "MAX_DURATION_DIFF_SECONDS"):
+            monkeypatch.setattr(config, name, getattr(config, name))
+        config.reload(conn)
+        assert config.HISTORY_RETENTION_DAYS == 1
         conn.close()
 
     def test_none_conn_is_a_noop(self):

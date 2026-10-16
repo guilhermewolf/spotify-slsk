@@ -365,7 +365,7 @@ class TestSecretKeyPersistence:
 class TestSettingsValidation:
     """A setting that silently fails to apply is worse than no setting.
 
-    _reload_settings keeps the previous value when a stored value won't
+    config.reload keeps the previous value when a stored value won't
     parse, so an unvalidated save reported success for a value the daemon
     then ignored forever.
     """
@@ -503,6 +503,7 @@ class TestLiveObservability:
 
     def test_logs_json_increments_seq(self, client):
         import logging
+
         from spotify_slsk import runtime_state
         runtime_state._log_buffer.clear()
         runtime_state._log_seq = 0
@@ -695,7 +696,9 @@ class TestInteractiveSearchUI:
 
     def _search(self, app_tmp, client, monkeypatch):
         import time as _time
-        from spotify_slsk import runtime_state, soulseek_api
+
+        from spotify_slsk import runtime_state
+        from spotify_slsk.slskd import search as slskd_search
 
         self._seed(app_tmp)
         captured = {}
@@ -704,7 +707,7 @@ class TestInteractiveSearchUI:
             captured.update(artist=artist, title=title, duration_ms=duration_ms)
             return [dict(self.CAND_OK), dict(self.CAND_BAD)]
 
-        monkeypatch.setattr(soulseek_api, "interactive_search", fake)
+        monkeypatch.setattr(slskd_search, "interactive_search", fake)
         runtime_state._interactive.pop(("pid1", "t1"), None)
         runtime_state.pop_manual_grabs()
         r = post(client, "/track/pid1/t1/search")
@@ -814,3 +817,42 @@ def test_activity_banner_keeps_polling(client):
     html = client.get("/").data.decode()
     wrapper = html[html.index('hx-select="#activity-banner"') - 200:html.index('hx-select="#activity-banner"')]
     assert 'hx-swap="innerHTML"' in wrapper
+
+
+def test_url_map_is_unchanged_by_the_blueprint_split(app_tmp):
+    """Blueprints rename endpoints, never URLs: bookmarks, the htmx polling
+    paths in templates/JS and any reverse proxy rules depend on these."""
+    rules = {
+        (r.rule, m)
+        for r in app_tmp.url_map.iter_rules()
+        for m in r.methods - {"HEAD", "OPTIONS"}
+        if r.endpoint != "static"
+    }
+    assert rules == {
+        ("/", "GET"),
+        ("/playlist/<playlist_id>", "GET"),
+        ("/track/<playlist_id>/<track_id>", "GET"),
+        ("/playlists", "POST"),
+        ("/playlist/<playlist_id>/toggle", "POST"),
+        ("/playlist/<playlist_id>/delete", "POST"),
+        ("/playlist/<playlist_id>/refresh", "POST"),
+        ("/track/<playlist_id>/<track_id>/retry", "POST"),
+        ("/track/<playlist_id>/<track_id>/search", "POST"),
+        ("/track/<playlist_id>/<track_id>/search", "GET"),
+        ("/track/<playlist_id>/<track_id>/grab", "POST"),
+        ("/track/<playlist_id>/<track_id>/retag", "POST"),
+        ("/wanted", "GET"),
+        ("/wanted/search", "POST"),
+        ("/history", "GET"),
+        ("/blocklist", "GET"),
+        ("/blocklist/<int:entry_id>/delete", "POST"),
+        ("/blocklist/ban-user", "POST"),
+        ("/settings", "GET"),
+        ("/settings", "POST"),
+        ("/settings/test-ntfy", "POST"),
+        ("/file", "GET"),
+        ("/logs", "GET"),
+        ("/logs.json", "GET"),
+        ("/activity.json", "GET"),
+        ("/healthz", "GET"),
+    }

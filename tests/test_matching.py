@@ -1,11 +1,11 @@
-"""Unit tests for the local-file <-> DB matcher in app.py."""
+"""Unit tests for the local-file <-> DB matcher (matching/tracks.py)."""
 import os
 
 # Avoid requiring real slskd env at import time — the lazy client never runs.
 os.environ.setdefault("SLSKD_HOST_URL", "http://localhost")
 os.environ.setdefault("SLSKD_API_KEY", "x")
 
-from spotify_slsk.app import (
+from spotify_slsk.matching.tracks import (
     _artists_overlap,
     _looks_like_match,
     _remix_equivalent,
@@ -15,7 +15,7 @@ from spotify_slsk.app import (
     _tokenize,
     score_track_match,
 )
-from spotify_slsk.utils import sanitize_table_name, get_playlist_id
+from spotify_slsk.utils import get_playlist_id, sanitize_table_name
 
 
 class TestTokenize:

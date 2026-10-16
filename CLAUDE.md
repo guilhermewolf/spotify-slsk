@@ -26,18 +26,28 @@ targets — if `make check` passes locally, CI should agree.
 
 ```bash
 make install                         # runtime + dev dependencies
-make check                           # compile + lint + test + audit
+make check                           # compile + lint + typecheck + test + audit
 make check PYTHON=.venv/bin/python   # against a virtualenv
 ```
 
-Individual targets: `make compile`, `make lint`, `make test`, `make audit`,
+Python **3.12** (`requires-python` in `pyproject.toml`, the Docker base image
+and CI all agree; the Makefile defaults to `python3.12`). Individual targets:
+`make compile`, `make lint`, `make typecheck`, `make test`, `make audit`,
 `make docker-build`.
 
-- `make test` — 459 tests. Fast (~1s); no network, no external services.
+- `make lint` — ruff with `E,F,W,I,B,UP` (config in `pyproject.toml`). Fix
+  findings rather than adding ignores.
+- `make typecheck` — mypy over `spotify_slsk/` (`ignore_missing_imports`,
+  `check_untyped_defs`). Every public function is annotated; keep it that way.
+- `make test` — 558 tests. Fast (~3s); no network, no external services.
 - `make audit` — `pip-audit` against the pinned `requirements.txt`. Advisories
   fail CI, so dependency CVEs surface on a PR rather than in production.
 - CI also builds the image and asserts it runs as uid 1000 and that no
   `.env` / `data/` / `playlists/` / `slsk_app/` path leaked into it.
+
+`pyproject.toml` holds project metadata and tool config; `requirements.txt` /
+`requirements-dev.txt` remain the **pinned lock** used by the Dockerfile,
+`make install` and `pip-audit`. Bump pins there.
 
 `test.py` at the repo root is a gitignored scratchpad.
 
@@ -50,11 +60,17 @@ this is deliberate — do not weaken it:
   `os.environ.setdefault(...)` calls are no-ops when the developer's shell
   already exports real values; before conftest existed, running `pytest` with a
   sourced `.env` pointed the suite at the real slskd and at the real music
-  library — the directory `app._reject_and_log` will `os.remove` from.
+  library — the directory `importer.process._reject_and_log` will `os.remove` from.
 - `SLSKD_DOWNLOADS_DIR`, `SLSKD_PLAYLISTS_DIR`, `HEARTBEAT_FILE` and the
   spotipy cache all point into a per-session temp tree.
 - Constructing a real `slskd_api.SlskdClient` raises, as does any real outbound
-  HTTP request. Tests that need those boundaries mock them explicitly.
+  HTTP request. Tests that need those boundaries mock them explicitly
+  (usually `slskd.client.get_client`).
+- Monkeypatch **where a name is looked up**, not where it is defined. Modules
+  in `slskd/` reach the client through the module (`slskd_client.get_client()`,
+  `slskd_client.interruptible_sleep()`), so one patch of `spotify_slsk.slskd.client`
+  covers every caller; names imported with `from x import y` (e.g.
+  `importer.process.tag_audio_file`) must be patched on the importing module.
 - `tests/test_isolation.py` asserts all of the above, so weakening conftest
   fails the suite rather than silently re-pointing it at production.
 
@@ -63,24 +79,40 @@ Use the `sandbox_dirs` fixture for anything touching the filesystem.
 ## Layout
 
 ```
-spotify_slsk/          the application package
-  __main__.py          entrypoint: python -m spotify_slsk
-  app.py               daemon orchestration
-  db.py                SQLite persistence
-  soulseek_api.py      slskd search/download
-  models.py utils.py log_config.py
-  webui/               Flask dashboard (templates/, static/)
+spotify_slsk/
+  __main__.py          entrypoint: python -m spotify_slsk -> daemon.main
+  daemon.py            main(), startup order, cycle loop, heartbeat, signals, wake
+  config.py            every tunable: env defaults, reload(conn), SETTINGS_SPEC
+  notify.py            ntfy
+  models.py            Track + shared type aliases (Candidate, IsBlocked)
+  runtime_state.py     in-process observability + manual-grab queue
+  log_config.py utils.py
+  db/                  SQLite: connection (+migrations), playlists, tracks,
+                       settings, cycles, blocklist, history; re-exported by db/__init__
+  spotify/             client.py (client + name lookup), sync.py (fetch/diff/insert)
+  slskd/               models.py (typed JSON), client.py, search.py, transfers.py
+  matching/            normalize.py (shared), candidates.py (search phase),
+                       tracks.py (local phase)
+  importer/            tags.py (read/write tags, audio length), process.py (verify,
+                       tag, move, reject/delete/blocklist)
+  library/             acquire.py (download + upgrade a track), reconcile.py (startup_check)
+  webui/               app factory + blueprints (templates/, static/)
 tests/                 pytest suite (conftest.py enforces isolation)
+  fixtures/slskd/      slskd payloads in the real wire shape
 ```
 
-Everything is inside the package, so imports between modules are relative
-(`from .db import ...`). The daemon resolves `./data/playlist_tracks.db`
+Dependency direction: `daemon` → `library`/`importer`/`spotify`/`slskd` →
+`matching` → `config`/`db`/`models`. Nothing imports `daemon` or `webui`;
+`webui` reaches the daemon only through `runtime_state` and the
+`wake_callback`. Imports between modules are relative (`from ..db import ...`).
+`from spotify_slsk import db` keeps working: `db/__init__.py` re-exports every
+public name. The daemon resolves `./data/playlist_tracks.db`
 relative to the working directory — run it from the repo root, which is what
 the container does (`WORKDIR /app`).
 
 ## Architecture
 
-Single long-running process (`spotify_slsk/app.py::main`) with two threads:
+Single long-running process (`spotify_slsk/daemon.py::main`) with two threads:
 
 1. **Daemon thread** (main) — loops over enabled playlists: fetch/diff from Spotify, download pending tracks, tag, move. Interruptible by SIGTERM via `_shutdown` Event.
 2. **Web UI thread** — Flask app from `spotify_slsk/webui/` serving the dashboard. Each request opens its own SQLite connection; WAL mode makes concurrent reads alongside the daemon's writer safe.
@@ -100,21 +132,32 @@ Startup order in `main()` matters and is load-bearing:
    waits. It does not raise: an slskd outage must not take down the dashboard
    the operator needs to diagnose it. Cycles do not start until slskd is
    healthy, because every download would fail and two failures suspend a track
-   for two days — turning a brief outage into a self-inflicted backlog.
+   for two days — turning a brief outage into a self-inflicted backlog. This
+   includes a missing `SLSKD_API_KEY` (slskd-api raises `ValueError` building
+   the client): the client is built inside the retry loop.
 7. One-shot on-disk reconciliation (`startup_check`) — matches existing files to DB rows so they aren't re-downloaded.
-8. Enter the cycle loop: `_touch_heartbeat()` → `_reload_settings()` → iterate `list_playlists(only_enabled=True)`. On any unhandled exception, log and back off `CYCLE_ERROR_BACKOFF_SECONDS`. Between cycles, `_wake_event.wait(CYCLE_INTERVAL_SECONDS)` — interruptible by the UI's `wake_now()`.
+8. Enter the cycle loop: `_touch_heartbeat()` → `config.reload(conn)` → iterate `list_playlists(only_enabled=True)`. On any unhandled exception, log and back off `CYCLE_ERROR_BACKOFF_SECONDS`. Between cycles, `_wake_event.wait(CYCLE_INTERVAL_SECONDS)` — interruptible by the UI's `wake_now()`.
 9. On shutdown, close the SQLite connection in a `finally`.
 
 Docker `HEALTHCHECK` compares `HEARTBEAT_FILE` mtime against `HEARTBEAT_STALE_SECONDS` (default 900s). The heartbeat is touched **per playlist and per track**, not once per cycle: one track can occupy minutes (60s search + up to 300s transfer + 60s post-processing per candidate), so a coarser touch made a busy daemon indistinguishable from a wedged one.
 
 ### Module responsibilities
 
-- **`spotify_slsk/app.py`** — orchestrator. Spotify client setup, Spotify→DB env migration, startup reconciliation, cycle loop, metadata tagging via `mutagen`, file moves, ntfy. Owns the **local-file ↔ DB** matcher (`difflib`-based).
-- **`spotify_slsk/soulseek_api.py`** — `get_client()` lazy slskd factory, search waterfall (multi-query + CJK passthrough + early-stop on response count), candidate filtering in `evaluate_candidates` (blocklist + format allowlist + fixed 320 floor for MP3s with a known bitrate + effective-bitrate floor via `_effective_mp3_kbps` + duration vs Spotify + the strict name rules in `filename_match`: basename-only title coverage, whole-name artist, symmetric version-gate via `_version_mismatch`), which returns every file with `accepted` and a human `reason` — `extract_candidates` is the accepted subset. `grab_candidate` is the single enqueue/wait/verify step shared by auto and manual grabs (tried + history on any failure; blocklist only on definitive peer faults). `interactive_search` is the read-only, collect-everything variant for the track page. Sort (version tier > format > bitrate > peer upload speed), cleanup via `searches.delete` in `finally`. `refresh_from_db(conn)` reloads tunables at each cycle start; `_interruptible_sleep` honors the shared shutdown Event.
-- **`spotify_slsk/db.py`** — SQLite persistence. WAL mode + `busy_timeout=5000` + `PRAGMA user_version` migrations. Per-playlist dynamic tables (`pl_<sanitized_name>` + `pl_<…>_tried`) plus a global `playlists_meta` catalogue keyed by Spotify id, a global `settings` key-value bag, a global `blocklist` (peer files, or whole peers when `filename` is NULL) and a global `history` event log. `get_setting(conn, key, default)` prefers DB, falls back to env, then default — so any env var becomes a mutable setting for free.
+- **`daemon.py`** — `main()` and the startup order above; `process_playlist` (sync → pending downloads → throttled upgrade pass), `_process_manual_grabs`, `_run_startup_reconciliation`, `block_until_slskd_healthy`, the `_shutdown`/`_wake_event` Events, `wake_now()` and the heartbeat. The only module allowed to drive downloads and imports.
+- **`config.py`** — single source of truth for tunables. Deploy-time values are read from env once; UI-editable ones are module attributes rebound by `reload(conn)` at each cycle start, so **read them as `config.NAME` at call time**, never `from .config import NAME`. Also holds `SETTINGS_SPEC` + `validate_setting` (used by the settings page) and `normalize_ext_list`.
+- **`spotify/`** — `client.setup_spotify_client()` (returns `None` without credentials; token cache at `SPOTIPY_CACHE_PATH`), `client.fetch_playlist_name` (web UI, retries transport errors); `sync.fetch_and_compare_tracks` (snapshot short-circuit, diff, insert, duration backfill), `sync.migrate_env_playlists` (first boot).
+- **`slskd/models.py`** — tolerant typed views of slskd JSON: `SearchResponse`/`PeerFile` (camelCase in; `ext` from the filename because `extension` is often `""`; `lockedFiles` kept separate and never offered), `Search`, `Transfer` with `outcome` (`TransferOutcome` or `None` while pending) and `peer_fault`. All slskd JSON is read through these. `remote_basename` lives here.
+- **`slskd/client.py`** — `get_client()` (lazy, shared by the daemon thread), `new_client()` (for other threads), shutdown wiring (`set_shutdown_event`, `interruptible_sleep`, `shutting_down`), `wait_for_slskd_healthy`.
+- **`slskd/search.py`** — query waterfall (multi-query + CJK passthrough), `_run_one_search` (server-side `responseLimit` early stop; the search is **always deleted in `finally`**), `search_and_download` (falls through on no *usable* candidates; records per-query search history), `download_and_verify`, and `interactive_search` (read-only, collect-everything, own client).
+- **`slskd/transfers.py`** — `grab_candidate`, the single enqueue/wait/verify step shared by auto and manual grabs (tried + history on any failure; blocklist only on definitive peer faults; a raised API error records nothing permanent), `wait_for_completion`, completion grace, `last_download`.
+- **`matching/`** — see "Matchers" under Gotchas. `normalize.py` (folding, artist splitting, version keywords/tiers — shared), `candidates.py` (`evaluate_candidates`: blocklist + format allowlist + fixed 320 floor for MP3s with a known bitrate + effective-bitrate floor + duration vs Spotify + the strict name rules in `filename_match`; returns every file with `accepted` and a human `reason`; `sort_candidates`: version tier > format > bitrate > peer upload speed), `tracks.py` (`score_track_match`, `_looks_like_match`, difflib helpers).
+- **`importer/`** — `tags.py`: `write_tags` (raises; used by the UI re-tag), `tag_audio_file` (never raises; daemon), `extract_metadata_from_file`, `audio_length_seconds`. `process.py`: `process_downloaded_file` (verify against the requested track, untagged filename+duration fallback, tag, move, record) and `_reject_and_log` (the only place a downloaded file is deleted).
+- **`library/`** — `acquire.py`: `handle_track_download`, `try_upgrade_track`. `reconcile.py`: `startup_check` and its local file index (non-destructive).
+- **`notify.py`** — ntfy; silent when unconfigured.
+- **`db/`** — SQLite persistence, split by table family and re-exported from `db/__init__.py`. WAL mode + `busy_timeout=5000` + `PRAGMA user_version` migrations (`db/connection.py`). Per-playlist dynamic tables (`pl_<sanitized_name>` + `pl_<…>_tried`) plus a global `playlists_meta` catalogue keyed by Spotify id, a global `settings` key-value bag, a global `blocklist` (peer files, or whole peers when `filename` is NULL) and a global `history` event log. `get_setting(conn, key, default)` prefers DB, falls back to env, then default — so any env var becomes a mutable setting for free.
 - **`spotify_slsk/webui/`** — Flask dashboard (see next section).
 - **`spotify_slsk/runtime_state.py`** — in-process observability: thread-safe current-activity dict, a bounded log ring buffer (fed by a handler installed in `log_config`), per-track slskd search history (with accepted/rejected counts and reasons), interactive-search results keyed by (playlist_id, track_id) with a 10-minute TTL, and the manual-grab queue the UI fills and the daemon drains. All of it is per-process and resets on restart — deliberately not persisted.
-- **`spotify_slsk/utils.py`** — `sanitize_table_name`, `get_playlist_id`.
+- **`spotify_slsk/utils.py`** — `sanitize_table_name`, `get_playlist_id`, `fmt_duration`.
 - **`spotify_slsk/log_config.py`** — timezone-aware logging; `LIB_LOGLEVEL` (default WARNING) silences noisy third-party loggers independently of app `LOGLEVEL`.
 
 ### Web UI
@@ -125,6 +168,16 @@ unauthenticated mutating routes, and self-hosting is what allows the CSP to stay
 at `script-src 'self'`. `spotify_slsk/webui/static/app.css` is the small design layer on top
 of Pico. Note the classless Pico build ships **no** `.secondary`/`.outline`
 classes; `app.css` defines them.
+
+`webui/__init__.py::create_app` owns everything cross-cutting (secret key,
+cookie flags, CSRF guard, security headers/CSP, per-request DB connection, the
+header health badge) and registers one blueprint per area: `playlists`
+(dashboard, playlist page, playlist mutations), `tracks` (track page,
+retry/re-tag, interactive search/grab), `wanted` (wanted, history, blocklist),
+`settings` (settings, ntfy probe), `system` (file, logs, activity, healthz).
+Endpoints are blueprint-qualified — templates use `url_for('playlists.dashboard')`,
+not `url_for('dashboard')`. URLs are pinned by
+`test_url_map_is_unchanged_by_the_blueprint_split`.
 
 Routes:
 - `GET /` — dashboard: library totals + playlist cards (htmx-refreshed every 15s as one swap)
@@ -144,10 +197,10 @@ Routes:
 search runs on a UI background thread with its own slskd client (not the
 daemon's shared session) and a blocklist snapshot, and never writes. A grab is
 queued in `runtime_state`; the daemon drains the queue at the top of each cycle
-and after each playlist (`app._process_manual_grabs`).
+and after each playlist (`daemon._process_manual_grabs`).
 
 **Two constraints any new UI code must respect:**
-1. **Every POST needs `csrf_token()` in its form** — the `before_request` guard rejects tokenless requests with 400.
+1. **Every POST needs `csrf_token()` in its form** — the app-level `before_request` guard (it covers every blueprint) rejects tokenless requests with 400.
 2. **No inline `<script>`** — the CSP is `script-src 'self'`. The theme toggle and the log tail live in `static/theme.js` and `static/logs.js` for exactly this reason. Inline handlers fail silently in the browser, not in tests.
 
 ### Security boundary
@@ -209,7 +262,7 @@ unnormalised.
    before calling it "file not found after download".
 8. A download with no title/artist tags is accepted only when the daemon knows
    the expected track AND the file's name passes the strict candidate rules
-   (`soulseek_api.filename_match`, peer path preferred so its folder can supply
+   (`matching.candidates.filename_match`, peer path preferred so its folder can supply
    the artist) AND the real (mutagen) duration is within
    `SLSKD_MAX_DURATION_DIFF_SECONDS` of Spotify's. Unknown durations, or the
    setting at 0, mean reject.
@@ -222,7 +275,7 @@ Files enter via the shared `/downloads` volume, then move to `/playlists/<table>
 Deploy-time / infra (env only):
 - `SPOTIPY_CLIENT_ID`, `SPOTIPY_CLIENT_SECRET`, `SLSKD_API_KEY`, `NTFY_URL`, `NTFY_TOPIC`
 - `SLSKD_HOST_URL`, `SLSKD_URL_BASE`, `SLSKD_DOWNLOADS_DIR`, `SLSKD_PLAYLISTS_DIR`
-- `CYCLE_INTERVAL_SECONDS` (300), `CYCLE_ERROR_BACKOFF_SECONDS` (60)
+- `CYCLE_INTERVAL_SECONDS` (300), `CYCLE_ERROR_BACKOFF_SECONDS` (60), `SLSKD_HTTP_TIMEOUT` (30)
 - `HEARTBEAT_FILE`, `HEARTBEAT_STALE_SECONDS`
 - `LOGLEVEL`, `LIB_LOGLEVEL`, `TIMEZONE`
 - `PUID`/`PGID` (compose user override; the image itself is `USER 1000:1000`)
@@ -230,7 +283,7 @@ Deploy-time / infra (env only):
 - `SPOTIFY_PLAYLIST_URLS` — read **only on first boot** to seed the DB
 
 UI-editable (env is a default; DB override wins). All are validated on save —
-see `SETTINGS_SPEC` and `validate_setting` in `spotify_slsk/webui/__init__.py`:
+see `SETTINGS_SPEC` and `validate_setting` in `spotify_slsk/config.py`:
 - `MIN_MATCH_SCORE` (0.62), `SLSKD_PREFERRED_FORMATS`, `SLSKD_MIN_PEER_UPLOAD_SPEED` (0),
   `SLSKD_MIN_EFFECTIVE_MP3_KBPS` (280), `SLSKD_EARLY_STOP_RESPONSES` (20),
   `SLSKD_MAX_DURATION_DIFF_SECONDS` (15; 0 disables the duration filter and the
@@ -249,17 +302,18 @@ threaded through the download call chain. The real per-track cap is
 ### Gotchas
 
 - **Table names come from Spotify playlist titles.** `sanitize_table_name` is lossy-but-stable; changing its output orphans existing rows. **Colliding sanitized names share a table** (`"Chill"` and `"chill"` both → `pl_chill`), which also means deleting one playlist drops the other's rows. Known, unfixed — a fix needs a migration.
-- **Matchers are not unified by design.** Token rules in `soulseek_api.py` (search results) vs difflib in `app.py` (local files / DB) serve different phases. `app.py` additionally has two matchers of its own: `score_track_match` (threshold-based, gates a *destructive* accept/delete) and `_looks_like_match` (plausibility, non-destructive reconcile). The differing risk profiles are why they haven't been merged. They *do* share the normalisation helpers (`_fold`, `_ARTIST_SPLIT_RE`, `_artist_names`, `_version_keywords`) in `soulseek_api.py`.
+- **Matchers are not unified by design.** Token rules in `matching/candidates.py` (search results, judged by file *name*) vs difflib in `matching/tracks.py` (local files / DB, judged by *tags*) serve different phases. `tracks.py` has two matchers of its own: `score_track_match` (threshold-based, gates a *destructive* accept/delete) and `_looks_like_match` (plausibility, non-destructive reconcile). The differing risk profiles are why they haven't been merged. They *do* share the normalisation helpers in `matching/normalize.py` (`fold`, `ARTIST_SPLIT_RE`, `credited_names`, `version_keywords`). There is no rapidfuzz any more.
 - **Wrong-song guards (do not loosen without a regression case).** ~15% of downloads once pointed at the wrong song; `tests/test_wrong_song_regressions.py` holds the real cases. The rules:
-  - slskd peer paths use **backslashes** — always `_remote_basename`, never `os.path.basename`. Candidates keep the full peer path in `filename` (slskd needs it to enqueue) and the real basename in `basename` (what `_tried` stores).
-  - Candidate title evidence comes from the **basename only**: every expected title word (minus feat. credits, neutral words, years) must be present and make up ≥ `MIN_TITLE_COVERAGE` of the basename's title-ish words. Artist evidence must be a **whole name** (`_artist_in`), and may come from the peer's folders (shares are `Artist\Album\NN - Title`).
-  - Versions are compared **symmetrically** (`_version_keywords`: remix, dub, vip, club mix, live, acoustic, instrumental, karaoke, cover, sped up, slowed, nightcore, 8d, bootleg, rework, flip, named "X Mix"/"X Edit"...). Original/Extended Mix, Radio Edit, Album Version and Remastered are neutral so `_version_tier` can still prefer the Extended Mix.
+  - slskd peer paths use **backslashes** — always `remote_basename` (or `PeerFile.basename`), never `os.path.basename`. Candidates keep the full peer path in `filename` (slskd needs it to enqueue) and the real basename in `basename` (what `_tried` stores).
+  - Candidate title evidence comes from the **basename only**: every expected title word (minus feat. credits, neutral words, years) must be present and make up ≥ `MIN_TITLE_COVERAGE` of the basename's title-ish words. Artist evidence must be a **whole name** (`artist_in`), and may come from the peer's folders (shares are `Artist\Album\NN - Title`).
+  - Versions are compared **symmetrically** (`version_keywords`: remix, dub, vip, club mix, live, acoustic, instrumental, karaoke, cover, sped up, slowed, nightcore, 8d, bootleg, rework, flip, named "X Mix"/"X Edit"...). Original/Extended Mix, Radio Edit, Album Version and Remastered are neutral so `version_tier` can still prefer the Extended Mix.
   - `score_track_match` requires an **artist overlap** and the same version (remixer included); there is no title-only accept.
   - A download is verified against the **requested track only** (`process_downloaded_file(..., track_id=)`); it is never re-homed onto another row. Only track-less calls (reconcile) use the playlist-wide `find_closest_match`.
 - **`startup_check` passes `destructive=False`** so a bad match never deletes an existing library file — regular downloads *do* delete on mismatch. There are tests pinning both halves; keep them.
-- **Validated settings matter**: `_reload_settings` silently keeps the previous value when a stored value won't parse, so an unvalidated save would report success for a setting that never applies.
-- **`slskd_api==0.1.5`** is pinned. `_transfer_outcome` treats any `"Completed, X"` other than `"Completed, Succeeded"` as a failure (Rejected, TimedOut, Errored, Aborted...); bumping may break `wait_for_completion`.
-- **slskd fields are camelCase** (`bitRate`, `bitDepth`, `sampleRate`, `isVariableBitRate`, `uploadSpeed`). A lowercase `bitrate` read silently returned None for years. `tests/fixtures/slskd/` holds payloads in the real shape.
+- **Validated settings matter**: `config.reload` silently keeps the previous value when a stored value won't parse, so an unvalidated save would report success for a setting that never applies.
+- **slskd versions.** Compose pins the slskd server at **0.26.1** (0.26 moved `global`/`groups` under `transfers` and renamed `integration` → `integrations`; README has the migration). `slskd-api==0.2.4` is a thin HTTP wrapper; the transfer-state strings come from the **server**. `Transfer.outcome` treats any `"Completed, X"` other than `"Completed, Succeeded"` as a failure (Rejected, TimedOut, Errored, Aborted, Cancelled); only Errored/Rejected/Aborted (and "failed") are a peer fault. `tests/test_slskd_contract.py` pins every production state plus 401/404/500/connection/timeout handling at every call site — run it when bumping either.
+- **slskd fields are camelCase** (`bitRate`, `bitDepth`, `sampleRate`, `isVariableBitRate`, `uploadSpeed`). A lowercase `bitrate` read silently returned None for years. Read slskd JSON only through `slskd/models.py`; `tests/fixtures/slskd/` holds payloads in the real shape.
+- **slskd HTTP timeout.** `new_client` passes `timeout=SLSKD_HTTP_TIMEOUT` (default 30s) to `SlskdClient`; slskd-api's default is none, and a slskd that accepts but never answers would otherwise block the daemon thread until the healthcheck restarts the container. Every slskd call is a short request, so 30s is generous.
 - **SQLite WAL mode** means the DB file is always accompanied by `-wal` and `-shm` files. Backups must capture all three or run `PRAGMA wal_checkpoint(TRUNCATE)` first.
 - **Tracks removed from a Spotify playlist upstream are kept locally** — the library is append-only. `tests/test_pipeline.py` pins this so a change is deliberate.
-- **Schema version is 5.** v5 (`db._migrate_to_v5`, run from `_ensure_schema_version`) adds `duration_ms` to every catalogued per-playlist table at connect time — not lazily in `create_table`, because the UI reads tables of playlists the daemon hasn't synced since the upgrade — and clears every stored `snapshot_id` so the next sync re-reads Spotify and backfills durations (`db.backfill_durations`). `blocklist` and `history` are `CREATE TABLE IF NOT EXISTS`. `TestSchemaMigrations.test_v4_db_upgrades_to_v5` builds a real v4 DB. Upgrading from an older DB is automatic and tested (`TestSchemaMigrations`): the ALTER TABLE guards in `_ensure_playlists_meta_table` handle v2 DBs, `create_table` adds `last_upgrade_check` to older per-playlist tables, `CREATE TABLE IF NOT EXISTS` handles settings, and v4 added `cycle_history` (one row per completed cycle, capped to ~200 rows by `db.record_cycle`). The `tried_files` column on per-playlist tables is dead — nothing reads it; it is retained only so existing DBs need no migration.
+- **Schema version is 5.** v5 (`db/connection.py::_migrate_to_v5`, run from `_ensure_schema_version`) adds `duration_ms` to every catalogued per-playlist table at connect time — not lazily in `create_table`, because the UI reads tables of playlists the daemon hasn't synced since the upgrade — and clears every stored `snapshot_id` so the next sync re-reads Spotify and backfills durations (`db.backfill_durations`). `blocklist` and `history` are `CREATE TABLE IF NOT EXISTS`. `TestSchemaMigrations.test_v4_db_upgrades_to_v5` builds a real v4 DB. Upgrading from an older DB is automatic and tested (`TestSchemaMigrations`): the ALTER TABLE guards in `_ensure_playlists_meta_table` handle v2 DBs, `create_table` adds `last_upgrade_check` to older per-playlist tables, `CREATE TABLE IF NOT EXISTS` handles settings, and v4 added `cycle_history` (one row per completed cycle, capped to ~200 rows by `db.record_cycle`). The `tried_files` column on per-playlist tables is dead — nothing reads it; it is retained only so existing DBs need no migration.

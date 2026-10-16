@@ -19,32 +19,32 @@
 
   <header class="site-header">
     <nav class="site-nav" aria-label="Primary">
-      <a class="brand" href="{{ url_for('dashboard') }}">
+      <a class="brand" href="{{ url_for('playlists.dashboard') }}">
         <span class="brand-mark" aria-hidden="true"></span>spotify-slsk
       </a>
       <ul class="nav-links">
         <li>
-          <a href="{{ url_for('dashboard') }}"
+          <a href="{{ url_for('playlists.dashboard') }}"
              {% if active_page == 'dashboard' %}aria-current="page"{% endif %}>Dashboard</a>
         </li>
         <li>
-          <a href="{{ url_for('wanted_page') }}"
+          <a href="{{ url_for('wanted.wanted_page') }}"
              {% if active_page == 'wanted' %}aria-current="page"{% endif %}>Wanted</a>
         </li>
         <li>
-          <a href="{{ url_for('history_page') }}"
+          <a href="{{ url_for('wanted.history_page') }}"
              {% if active_page == 'history' %}aria-current="page"{% endif %}>History</a>
         </li>
         <li>
-          <a href="{{ url_for('blocklist_page') }}"
+          <a href="{{ url_for('wanted.blocklist_page') }}"
              {% if active_page == 'blocklist' %}aria-current="page"{% endif %}>Blocklist</a>
         </li>
         <li>
-          <a href="{{ url_for('logs_page') }}"
+          <a href="{{ url_for('system.logs_page') }}"
              {% if active_page == 'logs' %}aria-current="page"{% endif %}>Logs</a>
         </li>
         <li>
-          <a href="{{ url_for('settings') }}"
+          <a href="{{ url_for('settings.settings') }}"
              {% if active_page == 'settings' %}aria-current="page"{% endif %}>Settings</a>
         </li>
         <li>
@@ -54,7 +54,7 @@
       </ul>
       {% if health is defined and health %}
       <a class="health health-{{ 'ok' if health.ok else 'bad' }}"
-         href="{{ url_for('healthz') }}"
+         href="{{ url_for('system.healthz') }}"
          title="{{ health.reason }}">
         <span class="dot" aria-hidden="true"></span>
         <span>{{ 'Healthy' if health.ok else 'Degraded' }}</span>

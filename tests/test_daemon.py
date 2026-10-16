@@ -8,17 +8,20 @@ import threading
 
 import pytest
 
-from spotify_slsk import app
+from spotify_slsk import config, daemon, notify
+from spotify_slsk.slskd import client as slskd_client
+from spotify_slsk.spotify import client as spotify_client
+from spotify_slsk.spotify import sync as spotify_sync
 
 
 @pytest.fixture(autouse=True)
 def _reset_shutdown():
     """Keep module-level daemon state from leaking between tests."""
-    app._shutdown.clear()
-    app._wake_event.clear()
+    daemon._shutdown.clear()
+    daemon._wake_event.clear()
     yield
-    app._shutdown.clear()
-    app._wake_event.clear()
+    daemon._shutdown.clear()
+    daemon._wake_event.clear()
 
 
 class TestNtfyNotifications:
@@ -26,12 +29,12 @@ class TestNtfyNotifications:
 
     def test_unconfigured_sends_nothing(self, monkeypatch):
         calls = []
-        monkeypatch.setattr(app.requests, "post", lambda *a, **k: calls.append(a))
+        monkeypatch.setattr(notify.requests, "post", lambda *a, **k: calls.append(a))
 
-        app.send_ntfy_notification(None, None, "hello")
-        app.send_ntfy_notification("", "", "hello")
-        app.send_ntfy_notification("https://ntfy.sh", None, "hello")
-        app.send_ntfy_notification(None, "topic", "hello")
+        notify.send_ntfy_notification(None, None, "hello")
+        notify.send_ntfy_notification("", "", "hello")
+        notify.send_ntfy_notification("https://ntfy.sh", None, "hello")
+        notify.send_ntfy_notification(None, "topic", "hello")
 
         # Previously this POSTed to the literal URL "None/None", raised, and
         # logged an ERROR on every playlist of every cycle.
@@ -49,8 +52,8 @@ class TestNtfyNotifications:
             sent["data"] = data
             return _Resp()
 
-        monkeypatch.setattr(app.requests, "post", _post)
-        app.send_ntfy_notification("https://ntfy.example", "mytopic", "hi")
+        monkeypatch.setattr(notify.requests, "post", _post)
+        notify.send_ntfy_notification("https://ntfy.example", "mytopic", "hi")
 
         assert sent["url"] == "https://ntfy.example/mytopic"
         assert sent["data"] == "hi"
@@ -61,11 +64,11 @@ class TestSpotifyClientSetup:
         def _raise():
             raise Exception("You need to set your Spotify API credentials")
 
-        monkeypatch.setattr(app, "SpotifyClientCredentials", _raise)
+        monkeypatch.setattr(spotify_client, "SpotifyClientCredentials", _raise)
 
         # Must not raise: the dashboard has to come up so the operator can
         # see why nothing is syncing.
-        assert app.setup_spotify_client() is None
+        assert spotify_client.setup_spotify_client() is None
 
 
 class TestSlskdHealthWait:
@@ -83,11 +86,11 @@ class TestSlskdHealthWait:
 
     def test_returns_false_on_timeout_instead_of_raising(self, monkeypatch):
         monkeypatch.setattr(
-            app, "get_slskd_client", lambda: self._client_always_failing()
+            slskd_client, "get_client", lambda: self._client_always_failing()
         )
         # Previously this raised RuntimeError, which propagated out of main()
         # and killed the process — including the web UI.
-        assert app.wait_for_slskd_healthy("http://x", "k", timeout=0) is False
+        assert slskd_client.wait_for_slskd_healthy("http://x", "k", timeout=0) is False
 
     def test_returns_true_when_connected_and_logged_in(self, monkeypatch):
         class _App:
@@ -97,8 +100,9 @@ class TestSlskdHealthWait:
         class _Client:
             application = _App()
 
-        monkeypatch.setattr(app, "get_slskd_client", lambda: _Client())
-        assert app.wait_for_slskd_healthy("http://x", "k", timeout=5) is True
+        monkeypatch.setattr(
+            slskd_client, "get_client", lambda: _Client())
+        assert slskd_client.wait_for_slskd_healthy("http://x", "k", timeout=5) is True
 
     def test_not_logged_in_is_not_healthy(self, monkeypatch):
         class _App:
@@ -108,27 +112,28 @@ class TestSlskdHealthWait:
         class _Client:
             application = _App()
 
-        monkeypatch.setattr(app, "get_slskd_client", lambda: _Client())
-        assert app.wait_for_slskd_healthy("http://x", "k", timeout=0) is False
+        monkeypatch.setattr(
+            slskd_client, "get_client", lambda: _Client())
+        assert slskd_client.wait_for_slskd_healthy("http://x", "k", timeout=0) is False
 
     def test_block_until_healthy_exits_on_shutdown(self, monkeypatch):
-        monkeypatch.setattr(app, "wait_for_slskd_healthy", lambda *a, **k: False)
+        monkeypatch.setattr(daemon, "wait_for_slskd_healthy", lambda *a, **k: False)
 
         # Simulate SIGTERM arriving while we wait for the dependency.
-        threading.Timer(0.05, app._shutdown.set).start()
+        threading.Timer(0.05, daemon._shutdown.set).start()
         assert (
-            app.block_until_slskd_healthy("http://x", "k", retry_seconds=0.01)
+            daemon.block_until_slskd_healthy("http://x", "k", retry_seconds=0.01)
             is False
         )
 
     def test_block_until_healthy_keeps_heartbeat_fresh(self, monkeypatch, tmp_path):
         """A dependency outage is not our outage — don't let Docker restart us."""
         heartbeat = tmp_path / "heartbeat"
-        monkeypatch.setattr(app, "HEARTBEAT_FILE", str(heartbeat))
-        monkeypatch.setattr(app, "wait_for_slskd_healthy", lambda *a, **k: False)
+        monkeypatch.setattr(config, "HEARTBEAT_FILE", str(heartbeat))
+        monkeypatch.setattr(daemon, "wait_for_slskd_healthy", lambda *a, **k: False)
 
-        threading.Timer(0.05, app._shutdown.set).start()
-        app.block_until_slskd_healthy("http://x", "k", retry_seconds=0.01)
+        threading.Timer(0.05, daemon._shutdown.set).start()
+        daemon.block_until_slskd_healthy("http://x", "k", retry_seconds=0.01)
 
         assert heartbeat.exists(), "heartbeat went stale while waiting for slskd"
 
@@ -142,35 +147,35 @@ class TestHeartbeatDuringWork:
         unhealthy and restarted mid-download.
         """
         heartbeat = tmp_path / "heartbeat"
-        monkeypatch.setattr(app, "HEARTBEAT_FILE", str(heartbeat))
+        monkeypatch.setattr(config, "HEARTBEAT_FILE", str(heartbeat))
 
         touches = []
-        real_touch = app._touch_heartbeat
+        real_touch = daemon._touch_heartbeat
 
         def _counting_touch():
             touches.append(1)
             real_touch()
 
-        monkeypatch.setattr(app, "_touch_heartbeat", _counting_touch)
+        monkeypatch.setattr(daemon, "_touch_heartbeat", _counting_touch)
         monkeypatch.setattr(
-            app, "fetch_and_compare_tracks", lambda conn, pid, sp: ([], "pl_x")
+            daemon, "fetch_and_compare_tracks", lambda conn, pid, sp: ([], "pl_x")
         )
         # process_playlist reads the stored name for the activity badge.
         monkeypatch.setattr(
-            app, "get_playlist_meta", lambda conn, pid: (None, "pl_x", "X", None)
+            daemon, "get_playlist_meta", lambda conn, pid: (None, "pl_x", "X", None)
         )
         monkeypatch.setattr(
-            app,
+            daemon,
             "get_pending_tracks",
             lambda conn, name: [
-                app.Track(f"t{i}", f"Song {i}", "Artist", "Album", "pl_x")
+                daemon.Track(f"t{i}", f"Song {i}", "Artist", "Album", "pl_x")
                 for i in range(3)
             ],
         )
-        monkeypatch.setattr(app, "handle_track_download", lambda *a, **k: True)
-        monkeypatch.setattr(app, "_run_upgrade_pass", lambda conn, name: None)
+        monkeypatch.setattr(daemon, "handle_track_download", lambda *a, **k: True)
+        monkeypatch.setattr(daemon, "_run_upgrade_pass", lambda conn, name: None)
 
-        app.process_playlist(object(), object(), "pid", None, None)
+        daemon.process_playlist(object(), object(), "pid", None, None)
 
         # once for the playlist + once per pending track
         assert len(touches) >= 4
@@ -179,32 +184,32 @@ class TestHeartbeatDuringWork:
 class TestShutdownResponsiveness:
     def test_process_playlist_stops_between_tracks(self, monkeypatch):
         monkeypatch.setattr(
-            app, "fetch_and_compare_tracks", lambda conn, pid, sp: ([], "pl_x")
+            daemon, "fetch_and_compare_tracks", lambda conn, pid, sp: ([], "pl_x")
         )
         # process_playlist reads the stored name for the activity badge.
         monkeypatch.setattr(
-            app, "get_playlist_meta", lambda conn, pid: (None, "pl_x", "X", None)
+            daemon, "get_playlist_meta", lambda conn, pid: (None, "pl_x", "X", None)
         )
         monkeypatch.setattr(
-            app,
+            daemon,
             "get_pending_tracks",
             lambda conn, name: [
-                app.Track(f"t{i}", f"Song {i}", "Artist", "Album", "pl_x")
+                daemon.Track(f"t{i}", f"Song {i}", "Artist", "Album", "pl_x")
                 for i in range(5)
             ],
         )
-        monkeypatch.setattr(app, "_run_upgrade_pass", lambda conn, name: None)
+        monkeypatch.setattr(daemon, "_run_upgrade_pass", lambda conn, name: None)
 
         attempted = []
 
         def _download(track, *a, **k):
             attempted.append(track.id)
-            app._shutdown.set()  # SIGTERM arrives during the first download
+            daemon._shutdown.set()  # SIGTERM arrives during the first download
             return True
 
-        monkeypatch.setattr(app, "handle_track_download", _download)
+        monkeypatch.setattr(daemon, "handle_track_download", _download)
 
-        app.process_playlist(object(), object(), "pid", None, None)
+        daemon.process_playlist(object(), object(), "pid", None, None)
 
         assert attempted == ["t0"], "daemon kept downloading after shutdown request"
 
@@ -212,21 +217,20 @@ class TestShutdownResponsiveness:
 class TestHeartbeatFile:
     def test_touch_writes_a_timestamp(self, monkeypatch, tmp_path):
         heartbeat = tmp_path / "hb"
-        monkeypatch.setattr(app, "HEARTBEAT_FILE", str(heartbeat))
-        app._touch_heartbeat()
+        monkeypatch.setattr(config, "HEARTBEAT_FILE", str(heartbeat))
+        daemon._touch_heartbeat()
         assert float(heartbeat.read_text()) > 0
 
     def test_touch_never_raises_on_unwritable_path(self, monkeypatch, tmp_path):
         # A wedged heartbeat must not itself crash the cycle.
-        monkeypatch.setattr(
-            app, "HEARTBEAT_FILE", str(tmp_path / "no-such-dir" / "hb")
+        monkeypatch.setattr(config, "HEARTBEAT_FILE", str(tmp_path / "no-such-dir" / "hb")
         )
-        app._touch_heartbeat()  # must not raise
+        daemon._touch_heartbeat()  # must not raise
 
     def test_uses_configured_path(self, monkeypatch, tmp_path):
         target = tmp_path / "custom-heartbeat"
-        monkeypatch.setattr(app, "HEARTBEAT_FILE", str(target))
-        app._touch_heartbeat()
+        monkeypatch.setattr(config, "HEARTBEAT_FILE", str(target))
+        daemon._touch_heartbeat()
         assert os.path.exists(target)
 
 
@@ -248,7 +252,7 @@ class TestMissingSpotifyCredentials:
             "SPOTIFY_PLAYLIST_URLS", "https://open.spotify.com/playlist/abc"
         )
         conn = db.create_connection(str(tmp_path / "t.db"))
-        app._migrate_env_playlists(conn, None)  # must not raise
+        spotify_sync.migrate_env_playlists(conn, None)  # must not raise
         assert db.list_playlists(conn) == [], "imported a playlist with no client"
         conn.close()
 
@@ -258,23 +262,34 @@ class TestMissingSpotifyCredentials:
         conn = db.create_connection(str(tmp_path / "t.db"))
         db.upsert_playlist_meta(conn, "pid1", "pl_x", "X", None)
         db.create_table(conn, "pl_x")
-        app._run_startup_reconciliation(None, conn)  # must not raise
+        daemon._run_startup_reconciliation(None, conn)  # must not raise
         conn.close()
 
 
 
 def test_spotify_token_cache_goes_to_the_configured_path(monkeypatch, tmp_path):
-    from spotify_slsk import app as daemon
+    from spotify_slsk.spotify import client as spotify_client
     monkeypatch.setenv("SPOTIPY_CLIENT_ID", "id")
     monkeypatch.setenv("SPOTIPY_CLIENT_SECRET", "secret")
     monkeypatch.setenv("SPOTIPY_CACHE_PATH", str(tmp_path / "tok"))
-    sp = daemon.setup_spotify_client()
+    sp = spotify_client.setup_spotify_client()
     assert sp.auth_manager.cache_handler.cache_path == str(tmp_path / "tok")
 
 
 def test_sqlite_connect_is_not_logged_at_info(tmp_path, caplog):
     import logging
+
     from spotify_slsk import db
     with caplog.at_level(logging.INFO):
         db.create_connection(str(tmp_path / "x.db")).close()
     assert not [r for r in caplog.records if "Connected to SQLite" in r.getMessage()]
+
+
+def test_missing_slskd_api_key_does_not_crash_the_wait(monkeypatch):
+    """SlskdClient raises ValueError without an API key. That used to escape
+    main() before the cycle loop - killing the web UI with it."""
+    def _no_key():
+        raise ValueError("Please provide an API-Key, a valid token or username/password.")
+
+    monkeypatch.setattr(slskd_client, "get_client", _no_key)
+    assert slskd_client.wait_for_slskd_healthy("h", None, timeout=0.05, check_interval=0.01) is False

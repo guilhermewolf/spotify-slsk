@@ -39,7 +39,7 @@ dashboard for adding playlists, watching progress and retrying what failed.
 
 ## Requirements
 
-- Docker and Docker Compose (recommended), or Python 3.11+
+- Docker and Docker Compose (recommended), or Python 3.12+
 - A running [`slskd`](https://github.com/slskd/slskd) instance and a Soulseek account
 - Spotify API credentials (client ID/secret) — playlists must be public
 
@@ -83,6 +83,40 @@ overrides the environment variable and changes apply on the next cycle:
 `SLSKD_MAX_DURATION_DIFF_SECONDS`, `SLSKD_WAIT_TIMEOUT`,
 `HISTORY_RETENTION_DAYS`, `UPGRADE_CHECK_INTERVAL_HOURS`.
 
+## Upgrading slskd to 0.26
+
+The bundled compose files now pin `slskd/slskd:0.26.1` (previously 0.23.1).
+slskd 0.26 **refuses to start** with a 0.23-era `slskd.yml`, because config
+keys moved ([slskd#1672](https://github.com/slskd/slskd/pull/1672)). Before
+upgrading, edit `slsk_app/slskd.yml`:
+
+| 0.23 key | 0.26 key |
+|---|---|
+| `global.upload` / `global.limits` / `global.download` | `transfers.upload` (with `limits` nested under it) / `transfers.download` |
+| `groups` | `transfers.groups` |
+| `integration` (webhooks, scripts, ...) | `integrations` |
+| `permissions.file.mode` | `transfers.download.destination.permissions.mode` |
+
+For example:
+
+```yaml
+# 0.23                         # 0.26
+global:                        transfers:
+  upload:                        upload:
+    slots: 20                      slots: 20
+  download:                      download:
+    slots: 500                     slots: 500
+groups: { ... }                  groups: { ... }
+integration: { ... }           integrations: { ... }
+```
+
+Compare against slskd's
+[example config for 0.26.1](https://github.com/slskd/slskd/blob/0.26.1/config/slskd.example.yml)
+if slskd still logs a configuration error. Nothing changes on the
+spotify-slsk side: the transfer states it reads (`Completed, Succeeded`,
+`Queued, Remotely`, ...) are the same, and they are pinned by
+`tests/test_slskd_contract.py`.
+
 ## Security
 
 **The dashboard has no authentication.** Compose binds it to `127.0.0.1` for
@@ -98,7 +132,7 @@ database and music library out of the image — do not remove it.
 ## Development
 
 ```bash
-python3 -m venv .venv
+python3.12 -m venv .venv
 make install PYTHON=.venv/bin/python
 make check   PYTHON=.venv/bin/python
 
@@ -106,12 +140,13 @@ make check   PYTHON=.venv/bin/python
 .venv/bin/python -m spotify_slsk
 ```
 
-The application lives in the `spotify_slsk/` package; `tests/` sits alongside
-it. Run from the repo root — the SQLite path is resolved relative to the
+The application lives in the `spotify_slsk/` package (`daemon.py` is the
+entrypoint; `spotify/`, `slskd/`, `matching/`, `importer/`, `library/`, `db/` and
+`webui/` hold the rest — CLAUDE.md has the map); `tests/` sits alongside it. Run from the repo root — the SQLite path is resolved relative to the
 working directory.
 
-`make check` runs the same compile, lint, test and dependency-audit steps as
-CI. The test suite is hermetic: `tests/conftest.py` forces fake credentials, an
+`make check` runs the same compile, lint (ruff), typecheck (mypy), test and
+dependency-audit steps as CI, on Python 3.12. The test suite is hermetic: `tests/conftest.py` forces fake credentials, an
 unreachable slskd host and temporary download/playlist directories, and makes a
 real slskd client or outbound HTTP request raise. It cannot touch your library
 or your database.

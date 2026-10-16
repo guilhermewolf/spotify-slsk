@@ -15,3 +15,6 @@ data-test/
 playlists-test/
 docker-compose.test.yaml
 graphify-out/
+.mypy_cache/
+*.egg-info/
+.claude/

@@ -17,7 +17,7 @@
 <!-- The whole live region refreshes together so the tiles and the per-playlist
      numbers can never disagree mid-poll. -->
 <div id="live"
-     hx-get="{{ url_for('dashboard') }}"
+     hx-get="{{ url_for('playlists.dashboard') }}"
      hx-trigger="every 15s"
      hx-select="#live"
      hx-swap="outerHTML">
@@ -55,7 +55,7 @@
     <article class="playlist-card {{ 'is-disabled' if not pl.enabled }} {{ 'row-active' if is_active }}">
       <div class="playlist-card-head">
         <h2>
-          <a href="{{ url_for('playlist_detail', playlist_id=pl.playlist_id) }}">{{ pl.name }}</a>
+          <a href="{{ url_for('playlists.playlist_detail', playlist_id=pl.playlist_id) }}">{{ pl.name }}</a>
           {% if not pl.enabled %}<span class="badge badge-disabled">paused</span>{% endif %}
           {% if is_active %}<span class="badge badge-retrying">working now</span>{% endif %}
         </h2>
@@ -85,8 +85,8 @@
 
       <div class="card-actions">
         <a role="button" class="secondary outline"
-           href="{{ url_for('playlist_detail', playlist_id=pl.playlist_id) }}">View tracks</a>
-        <form method="POST" action="{{ url_for('toggle_playlist', playlist_id=pl.playlist_id) }}">
+           href="{{ url_for('playlists.playlist_detail', playlist_id=pl.playlist_id) }}">View tracks</a>
+        <form method="POST" action="{{ url_for('playlists.toggle_playlist', playlist_id=pl.playlist_id) }}">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <button type="submit" class="secondary outline">
             {{ 'Pause syncing' if pl.enabled else 'Resume syncing' }}
@@ -94,7 +94,7 @@
         </form>
         {# No-JS confirm: the CSP blocks inline onsubmit handlers, so the old
            confirm() never ran. The route also requires confirm=1. #}
-        <form method="POST" action="{{ url_for('delete_playlist', playlist_id=pl.playlist_id) }}">
+        <form method="POST" action="{{ url_for('playlists.delete_playlist', playlist_id=pl.playlist_id) }}">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <details class="confirm">
             <summary role="button" class="outline danger">Remove…</summary>
@@ -146,7 +146,7 @@
 
 <article>
   <header><strong>Add a playlist</strong></header>
-  <form method="POST" action="{{ url_for('add_playlist') }}">
+  <form method="POST" action="{{ url_for('playlists.add_playlist') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <label for="playlist_url">Spotify playlist URL</label>
     <div class="filter-form">

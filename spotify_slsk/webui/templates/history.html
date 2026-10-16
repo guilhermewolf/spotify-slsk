@@ -10,7 +10,7 @@
   </div>
 </div>
 
-<form class="filter-form" method="GET" action="{{ url_for('history_page') }}">
+<form class="filter-form" method="GET" action="{{ url_for('wanted.history_page') }}">
   <select name="event" aria-label="Event">
     <option value="">All events</option>
     {% for e in events %}
@@ -32,7 +32,7 @@
   {% if older_id %}
   <p>
     <a role="button" class="secondary outline"
-       href="{{ url_for('history_page', event=event, playlist=playlist_id, before_id=older_id) }}">Older &rarr;</a>
+       href="{{ url_for('wanted.history_page', event=event, playlist=playlist_id, before_id=older_id) }}">Older &rarr;</a>
   </p>
   {% endif %}
 {% else %}

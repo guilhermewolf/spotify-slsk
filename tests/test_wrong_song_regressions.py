@@ -9,8 +9,12 @@ import pytest
 os.environ.setdefault("SLSKD_HOST_URL", "http://localhost")
 os.environ.setdefault("SLSKD_API_KEY", "x")
 
-from spotify_slsk import soulseek_api
-from spotify_slsk.soulseek_api import _remote_basename, extract_candidates, filename_match
+from spotify_slsk.matching import candidates as matching_candidates
+from spotify_slsk.matching.candidates import extract_candidates, filename_match
+from spotify_slsk.slskd import client as slskd_client
+from spotify_slsk.slskd import search as slskd_search
+from spotify_slsk.slskd import transfers as slskd_transfers
+from spotify_slsk.slskd.models import remote_basename
 
 
 def _results(*filenames, user="user1"):
@@ -27,13 +31,13 @@ def _results(*filenames, user="user1"):
 
 class TestRemotePathSplitting:
     def test_backslash_path(self):
-        assert _remote_basename(
+        assert remote_basename(
             "@@abc\\music\\Рахманинов\\Vespers (All-Night Vigil)\\06 Ave Maria.flac"
         ) == "06 Ave Maria.flac"
 
     def test_forward_slash_and_bare(self):
-        assert _remote_basename("a/b/c.mp3") == "c.mp3"
-        assert _remote_basename("c.mp3") == "c.mp3"
+        assert remote_basename("a/b/c.mp3") == "c.mp3"
+        assert remote_basename("c.mp3") == "c.mp3"
 
     def test_folder_names_are_not_scored_as_title(self):
         # Expected "AVE - All Night": the folder "All-Night Vigil" used to
@@ -70,13 +74,13 @@ class TestRemotePathSplitting:
         class _Client:
             transfers = _Transfers()
 
-        monkeypatch.setattr(soulseek_api, "get_client", lambda: _Client())
-        monkeypatch.setattr(soulseek_api, "wait_for_completion", lambda c: None)
-        monkeypatch.setattr(soulseek_api, "get_tried_files", lambda *a: [])
+        monkeypatch.setattr(slskd_client, "get_client", lambda: _Client())
+        monkeypatch.setattr(slskd_transfers, "wait_for_completion", lambda c: None)
+        monkeypatch.setattr(slskd_search, "get_tried_files", lambda *a: [])
         monkeypatch.setattr(
-            soulseek_api, "add_tried_file", lambda c, p, t, f: added.append(f)
+            slskd_transfers, "add_tried_file", lambda c, p, t, f: added.append(f)
         )
-        soulseek_api.download_and_verify(
+        slskd_search.download_and_verify(
             _results("music\\Mat Joe\\Mat Joe - Heart To Find.flac"),
             "Heart To Find", "Mat Joe", None, "pl_x", "t1",
         )
@@ -150,7 +154,7 @@ class TestCandidateKeepsRightSongs:
         assert len(extract_candidates(_results(filename), title, artist)) == 1
 
     def test_extended_mix_still_ranks_first(self):
-        out = soulseek_api.sort_candidates(extract_candidates(_results(
+        out = matching_candidates.sort_candidates(extract_candidates(_results(
             "Mat Joe - Heart To Find (Original Mix).flac",
             "Mat Joe - Heart To Find.flac",
             "Mat Joe - Heart To Find (Extended Mix).flac",
@@ -199,7 +203,7 @@ class TestVersionSymmetry:
         )) == 1
 
 
-from spotify_slsk.app import _titles_token_equivalent, score_track_match  # noqa: E402
+from spotify_slsk.matching.tracks import _titles_token_equivalent, score_track_match  # noqa: E402
 
 MIN_MATCH = 0.62  # app default
 
@@ -279,7 +283,7 @@ class TestArtistSplitting:
         assert score >= MIN_MATCH, reason
 
     def test_separators(self):
-        from spotify_slsk.app import _split_artists
+        from spotify_slsk.matching.tracks import _split_artists
 
         assert _split_artists("A; B") == {"a", "b"}
         assert _split_artists("A x B") == {"a", "b"}

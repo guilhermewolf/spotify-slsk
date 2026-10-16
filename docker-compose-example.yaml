@@ -1,14 +1,33 @@
-version: '3.8'
-
+# Example deployment using the published image. Copy to docker-compose.yaml,
+# create a .env from .env-example, and `docker compose up -d`.
 services:
   spotify-slsk:
-    build: .
-    env:
-      - SPOTIPY_CLIENT_ID=your-spotify-client-id
-      - SPOTIPY_CLIENT_SECRET=your-spotify-client-secret
-      - SPOTIPY_PLAYLIST_URLS="" #Comma separated list of Spotify playlist URLs
-      - SLDL_USER=your-slsk-username
-      - SLDL_PASS=your-slsk-password
+    image: ghcr.io/guilhermewolf/spotify-slsk/spotify-slsk:latest
+    env_file:
+      - .env
     volumes:
       - ./data:/app/data
+      - ./downloads:/downloads
+      - ./playlists:/playlists
+    ports:
+      # Web UI has no authentication: keep it on loopback, or put an
+      # authenticating reverse proxy in front.
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      slskd:
+        condition: service_started
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+
+  slskd:
+    # 0.26 renamed/moved config keys - see "Upgrading slskd to 0.26" in README.
+    image: slskd/slskd:0.26.1
+    env_file:
+      - .env
+    volumes:
+      - ./downloads:/downloads
+      - ./downloads/incomplete:/downloads/incomplete
+      - ./slsk_app:/app
+    ports:
+      - "127.0.0.1:5030:5030"
     restart: unless-stopped

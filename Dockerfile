@@ -1,4 +1,6 @@
-FROM python:3.11-alpine
+# Minor version pinned; the patch level floats so base-image security fixes
+# land on rebuild. Must match requires-python in pyproject.toml and CI.
+FROM python:3.12-alpine
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -32,7 +34,7 @@ HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 \
         || exit 1
 
 # Exec form (no shell) so PID 1 is python itself and receives SIGTERM
-# directly — spotify_slsk.app installs the handler that drives the
+# directly — spotify_slsk.daemon installs the handler that drives the
 # graceful shutdown. Run as a module so WORKDIR stays /app and the
 # daemon's relative "./data/playlist_tracks.db" keeps resolving.
 CMD ["python", "-m", "spotify_slsk"]

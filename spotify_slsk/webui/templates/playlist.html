@@ -3,14 +3,14 @@
 {% block title %}{{ name }} · spotify-slsk{% endblock %}
 {% block content %}
 
-<a class="back-link" href="{{ url_for('dashboard') }}">&larr; All playlists</a>
+<a class="back-link" href="{{ url_for('playlists.dashboard') }}">&larr; All playlists</a>
 
 <div class="page-head">
   <div>
     <h1>{{ name }}</h1>
     <p class="subtle">Last synced {{ last_synced or 'never' }}</p>
   </div>
-  <form method="POST" action="{{ url_for('refresh_playlist', playlist_id=playlist_id) }}">
+  <form method="POST" action="{{ url_for('playlists.refresh_playlist', playlist_id=playlist_id) }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <button type="submit" class="secondary outline">Re-sync from Spotify</button>
   </form>
@@ -30,7 +30,7 @@
     ] %}
     {% for label, value, count in chips %}
     <li>
-      <a href="{{ url_for('playlist_detail', playlist_id=playlist_id, status=value, q=query or none) }}"
+      <a href="{{ url_for('playlists.playlist_detail', playlist_id=playlist_id, status=value, q=query or none) }}"
          aria-current="{{ 'true' if status_filter == value else 'false' }}">
         {{ label }} <span class="subtle">{{ count }}</span>
       </a>
@@ -40,7 +40,7 @@
 </nav>
 
 <form class="filter-form" method="GET" role="search"
-      action="{{ url_for('playlist_detail', playlist_id=playlist_id) }}">
+      action="{{ url_for('playlists.playlist_detail', playlist_id=playlist_id) }}">
   {% if status_filter %}<input type="hidden" name="status" value="{{ status_filter }}">{% endif %}
   <input type="search" id="q" name="q" value="{{ query }}" style="flex:1"
          aria-label="Filter tracks by title, artist or album"
@@ -48,7 +48,7 @@
   <button type="submit" class="secondary outline">Search</button>
   {% if query %}
     <a role="button" class="secondary outline"
-       href="{{ url_for('playlist_detail', playlist_id=playlist_id, status=status_filter or none) }}">Clear</a>
+       href="{{ url_for('playlists.playlist_detail', playlist_id=playlist_id, status=status_filter or none) }}">Clear</a>
   {% endif %}
 </form>
 
@@ -71,7 +71,7 @@
       <tr class="{{ 'row-active' if is_active }}">
         <td>
           <a class="track-title"
-             href="{{ url_for('track_detail', playlist_id=playlist_id, track_id=t.id) }}">{{ t.name }}</a>
+             href="{{ url_for('tracks.track_detail', playlist_id=playlist_id, track_id=t.id) }}">{{ t.name }}</a>
           {% if is_active %}<span class="badge badge-retrying">downloading now</span>{% endif %}
           <div class="subtle">{{ t.artists }}</div>
         </td>
@@ -88,7 +88,7 @@
         <td class="nowrap">
           {% if not t.downloaded %}
           <form method="POST"
-                action="{{ url_for('retry_track', playlist_id=playlist_id, track_id=t.id) }}">
+                action="{{ url_for('tracks.retry_track', playlist_id=playlist_id, track_id=t.id) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="secondary outline">Retry</button>
           </form>

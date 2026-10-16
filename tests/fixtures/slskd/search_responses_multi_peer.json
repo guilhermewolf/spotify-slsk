@@ -1,0 +1,67 @@
+{
+ "note": "Synthetic GET /api/v0/searches/{id}/responses payload modelled on real slskd 0.26 output: camelCase; bitRate only on lossy files, bitDepth/sampleRate only on lossless; extension often empty; locked files listed separately; optional fields missing on some peers. `expected` is what evaluate_candidates must conclude per (username, basename).",
+ "track": {"title": "Get Lucky", "artist": "Daft Punk, Pharrell Williams", "duration_ms": 369000},
+ "responses": [
+  {
+   "username": "lossless_peer", "uploadSpeed": 5242880, "hasFreeUploadSlot": true, "queueLength": 0, "token": 7,
+   "fileCount": 2, "lockedFileCount": 1,
+   "files": [
+    {"code": 1, "extension": "", "filename": "Music\\Daft Punk\\Random Access Memories (2013)\\08 - Daft Punk - Get Lucky.flac",
+     "size": 47185920, "length": 369, "bitDepth": 24, "sampleRate": 88200, "isLocked": false},
+    {"code": 1, "extension": "jpg", "filename": "Music\\Daft Punk\\Random Access Memories (2013)\\cover.jpg",
+     "size": 524288, "isLocked": false}
+   ],
+   "lockedFiles": [
+    {"code": 1, "extension": "flac", "filename": "Music\\Daft Punk\\Random Access Memories (2013)\\08 - Get Lucky (Hi-Res).flac",
+     "size": 90000000, "length": 369, "bitDepth": 24, "sampleRate": 192000, "isLocked": true}
+   ]
+  },
+  {
+   "username": "vbr_peer", "uploadSpeed": 1048576, "hasFreeUploadSlot": false, "queueLength": 12, "token": 7,
+   "fileCount": 1, "lockedFileCount": 0, "lockedFiles": [],
+   "files": [
+    {"code": 1, "extension": "mp3", "filename": "@@vbr\\Daft Punk - Get Lucky (V0).mp3",
+     "size": 11300000, "length": 369, "bitRate": 245, "isVariableBitRate": true, "isLocked": false}
+   ]
+  },
+  {
+   "username": "cbr_peer", "uploadSpeed": 2097152, "hasFreeUploadSlot": true, "queueLength": 0, "token": 7,
+   "fileCount": 1, "lockedFileCount": 0, "lockedFiles": [],
+   "files": [
+    {"code": 1, "extension": "mp3", "filename": "@@cbr\\Daft Punk feat. Pharrell Williams - Get Lucky.mp3",
+     "size": 14760000, "length": 369, "bitRate": 320, "isVariableBitRate": false, "isLocked": false}
+   ]
+  },
+  {
+   "username": "radio_edit_peer", "uploadSpeed": 3145728, "hasFreeUploadSlot": true, "queueLength": 0, "token": 7,
+   "fileCount": 1, "lockedFileCount": 0, "lockedFiles": [],
+   "files": [
+    {"code": 1, "extension": "flac", "filename": "Singles\\Daft Punk - Get Lucky (Radio Edit).flac",
+     "size": 25000000, "length": 248, "bitDepth": 16, "sampleRate": 44100, "isLocked": false}
+   ]
+  },
+  {
+   "username": "sparse_peer",
+   "files": [
+    {"filename": "share\\Daft Punk - Get Lucky.flac", "size": 40000000},
+    {"size": 1}
+   ]
+  },
+  {
+   "username": "wrong_song_peer", "uploadSpeed": 9999999, "hasFreeUploadSlot": true, "queueLength": 0,
+   "files": [
+    {"code": 1, "extension": "flac", "filename": "Albums\\Discovery\\Daft Punk - One More Time.flac",
+     "size": 50000000, "length": 369, "bitDepth": 16, "sampleRate": 44100, "isLocked": false}
+   ]
+  }
+ ],
+ "expected": [
+  {"user": "lossless_peer", "basename": "08 - Daft Punk - Get Lucky.flac", "accepted": true},
+  {"user": "lossless_peer", "basename": "cover.jpg", "accepted": false, "reason": "format not allowed: .jpg"},
+  {"user": "vbr_peer", "basename": "Daft Punk - Get Lucky (V0).mp3", "accepted": false, "reason": "bitrate 245 < 320"},
+  {"user": "cbr_peer", "basename": "Daft Punk feat. Pharrell Williams - Get Lucky.mp3", "accepted": true},
+  {"user": "radio_edit_peer", "basename": "Daft Punk - Get Lucky (Radio Edit).flac", "accepted": false, "reason": "duration 4:08 vs 6:09"},
+  {"user": "sparse_peer", "basename": "Daft Punk - Get Lucky.flac", "accepted": true},
+  {"user": "wrong_song_peer", "basename": "Daft Punk - One More Time.flac", "accepted": false, "reason": "title words missing from filename"}
+ ]
+}

@@ -3,7 +3,7 @@
 {% block title %}{{ track.name }} · spotify-slsk{% endblock %}
 {% block content %}
 
-<a class="back-link" href="{{ url_for('playlist_detail', playlist_id=playlist_id) }}">
+<a class="back-link" href="{{ url_for('playlists.playlist_detail', playlist_id=playlist_id) }}">
   &larr; {{ playlist_name }}
 </a>
 
@@ -37,7 +37,7 @@
   <dt>Preview</dt>
   <dd>
     <audio controls preload="none" style="width:100%;max-width:480px;">
-      <source src="{{ url_for('serve_file', rel=track.rel_path) }}">
+      <source src="{{ url_for('system.serve_file', rel=track.rel_path) }}">
       Your browser doesn't support the audio element.
     </audio>
   </dd>
@@ -54,7 +54,7 @@
 
 {% if not track.downloaded %}
 <form method="POST"
-      action="{{ url_for('retry_track', playlist_id=playlist_id, track_id=track.id) }}">
+      action="{{ url_for('tracks.retry_track', playlist_id=playlist_id, track_id=track.id) }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <button type="submit" style="width:auto">Retry now</button>
   <small class="subtle">
@@ -65,7 +65,7 @@
 
 {% if track.downloaded and track.path %}
 <form method="POST"
-      action="{{ url_for('retag_track', playlist_id=playlist_id, track_id=track.id) }}">
+      action="{{ url_for('tracks.retag_track', playlist_id=playlist_id, track_id=track.id) }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <button type="submit" class="secondary outline" style="width:auto">Re-tag from DB</button>
   <small class="subtle">
@@ -76,7 +76,7 @@
 
 <h2 style="font-size:1.05rem;margin-top:2rem;">Interactive search</h2>
 <form method="POST"
-      action="{{ url_for('interactive_search_start', playlist_id=playlist_id, track_id=track.id) }}">
+      action="{{ url_for('tracks.interactive_search_start', playlist_id=playlist_id, track_id=track.id) }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <button type="submit" class="secondary outline" style="width:auto"
           {% if search and search.status == 'running' %}disabled{% endif %}>Search slskd now</button>
