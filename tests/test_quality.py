@@ -260,15 +260,24 @@ class TestEnsureQualityProfile:
         assert db.get_setting(conn, "QUALITY_PROFILE") == mine.to_json()
         conn.close()
 
-    def test_bad_stored_profile_keeps_the_previous(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("raw", [
+        '{"allowed": [], "cutoff": "x"}',
+        '{"allowed": [["FLAC_16"]], "cutoff": "FLAC_16"}',
+        '{"allowed": [{"a": 1}], "cutoff": {"b": 2}}',
+        '{"allowed": ["FLAC_16"], "cutoff": ["FLAC_16"]}',
+        '{"allowed": [1, null], "cutoff": "FLAC_16"}',
+        '[1, 2]',
+    ])
+    def test_bad_stored_profile_falls_back_to_the_formats(self, tmp_path, monkeypatch, raw, caplog):
         from spotify_slsk import config, db
 
-        before = q.QualityProfile(("FLAC_16",), "FLAC_16", False)
-        monkeypatch.setattr(config, "QUALITY_PROFILE", before)
+        monkeypatch.delenv("SLSKD_PREFERRED_FORMATS", raising=False)
         conn = db.create_connection(str(tmp_path / "x.db"))
-        db.set_setting(conn, "QUALITY_PROFILE", '{"allowed": [], "cutoff": "x"}')
-        config.reload(conn)
-        assert config.QUALITY_PROFILE == before
+        db.set_setting(conn, "SLSKD_PREFERRED_FORMATS", "flac")
+        db.set_setting(conn, "QUALITY_PROFILE", raw)
+        config.reload(conn)  # must not raise
+        assert config.QUALITY_PROFILE == q.profile_from_formats([".flac"])
+        assert "Invalid QUALITY_PROFILE" in caplog.text
         conn.close()
 
 
@@ -463,3 +472,9 @@ class TestReleaseTerms:
         ok = self._eval(monkeypatch, "Eminem\\8 Mile (CD)\\Eminem - Lose Yourself.flac",
                         required="vinyl, /\\bcd\\b/")
         assert ok["accepted"] is True
+
+
+def test_make_profile_never_raises_on_odd_types():
+    for allowed, cutoff in ([["x"]], "x"), ([{}], "x"), (["FLAC_16"], ["FLAC_16"]), ("FLAC_16", "FLAC_16"):
+        p, err = q.make_profile(allowed, cutoff, False)
+        assert p is None and err

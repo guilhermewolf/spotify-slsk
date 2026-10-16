@@ -95,7 +95,7 @@ def _cutoff_unmet():
     """Downloaded tracks (enabled playlists) whose effective quality is
     below the profile cutoff, or whose lossless file is "suspect". Returns
     (rows, unmeasured_count, profile)."""
-    profile = config.load_quality_profile(g.conn) or config.QUALITY_PROFILE
+    profile = config.load_quality_profile(g.conn)
     checks = {(c["table_name"], c["track_id"]): c for c in db.list_file_checks(g.conn)}
     rows, unmeasured = [], 0
     for pl in db.list_playlists(g.conn, only_enabled=True):

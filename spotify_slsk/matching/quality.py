@@ -205,7 +205,12 @@ class QualityProfile:
 def make_profile(
     allowed: list[str], cutoff: str, upgrades_allowed: bool
 ) -> tuple[QualityProfile | None, str | None]:
-    """Validated constructor. Returns (profile, error); exactly one is None."""
+    """Validated constructor. Returns (profile, error); exactly one is None.
+    Never raises, whatever JSON a stored row holds."""
+    if not isinstance(allowed, list) or not all(isinstance(k, str) for k in allowed):
+        return None, "allowed must be a list of quality names"
+    if not isinstance(cutoff, str):
+        return None, "cutoff must be a quality name"
     unknown = [k for k in allowed if k not in BY_KEY]
     if unknown:
         return None, f"unknown quality: {', '.join(map(str, unknown))}"
@@ -227,8 +232,8 @@ def parse_profile(value: str | None) -> tuple[QualityProfile | None, str | None]
         upgrades = data.get("upgrades_allowed", False)
     except (ValueError, TypeError, KeyError, AttributeError) as e:
         return None, f"not a quality profile: {e}"
-    if not isinstance(allowed, list) or not isinstance(upgrades, bool):
-        return None, "not a quality profile"
+    if not isinstance(upgrades, bool):
+        return None, "upgrades_allowed must be true or false"
     return make_profile(allowed, cutoff, upgrades)
 
 

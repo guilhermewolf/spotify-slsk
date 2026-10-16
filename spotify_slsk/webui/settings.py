@@ -62,7 +62,7 @@ def settings() -> ResponseReturnValue:
         key: db.get_setting(g.conn, key, default=default)
         for key, default, _help, _kind in SETTINGS_SPEC
     }
-    profile = config.load_quality_profile(g.conn) or config.QUALITY_PROFILE
+    profile = config.load_quality_profile(g.conn)
     # Allowed qualities in profile order, then the rest in ladder order.
     quality_rows = sorted(LADDER, key=lambda q: profile.rank(q.key))
     return render_template(

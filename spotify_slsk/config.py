@@ -164,9 +164,7 @@ def reload(conn: sqlite3.Connection) -> None:
             REQUIRED_TERMS = terms
         else:
             IGNORED_TERMS = terms
-    profile = load_quality_profile(conn)
-    if profile is not None:
-        QUALITY_PROFILE = profile
+    QUALITY_PROFILE = load_quality_profile(conn)
     try:
         MIN_PEER_UPLOAD_SPEED = int(
             get_setting(conn, "SLSKD_MIN_PEER_UPLOAD_SPEED", "0")
@@ -199,19 +197,23 @@ def reload(conn: sqlite3.Connection) -> None:
 QUALITY_PROFILE_KEY = "QUALITY_PROFILE"
 
 
-def load_quality_profile(conn: sqlite3.Connection) -> QualityProfile | None:
-    """The stored profile; before one is stored, the profile equivalent to
-    SLSKD_PREFERRED_FORMATS. None (logged) when the stored value is invalid,
-    so reload keeps the previous profile."""
+def load_quality_profile(conn: sqlite3.Connection) -> QualityProfile:
+    """The stored profile; before one is stored - or when the stored value
+    is invalid (logged as an error) - the profile equivalent to
+    SLSKD_PREFERRED_FORMATS. Never raises: a bad row must not fail every
+    cycle."""
     raw = get_setting(conn, QUALITY_PROFILE_KEY, None)
-    if not raw:
-        return profile_from_formats(
-            normalize_ext_list(get_setting(conn, "SLSKD_PREFERRED_FORMATS", DEFAULT_FORMATS))
+    if raw:
+        profile, error = parse_profile(raw)
+        if profile is not None:
+            return profile
+        logging.error(
+            f"Invalid {QUALITY_PROFILE_KEY} in the settings table ({error}); "
+            f"using the profile derived from SLSKD_PREFERRED_FORMATS until it is re-saved"
         )
-    profile, error = parse_profile(raw)
-    if error:
-        logging.warning(f"Bad {QUALITY_PROFILE_KEY}; keeping previous: {error}")
-    return profile
+    return profile_from_formats(
+        normalize_ext_list(get_setting(conn, "SLSKD_PREFERRED_FORMATS", DEFAULT_FORMATS))
+    )
 
 
 def ensure_quality_profile(conn: sqlite3.Connection) -> None:
@@ -227,7 +229,7 @@ def ensure_quality_profile(conn: sqlite3.Connection) -> None:
         )
     if QUALITY_PROFILE_KEY in stored:
         return
-    profile = load_quality_profile(conn) or QUALITY_PROFILE
+    profile = load_quality_profile(conn)
     set_setting(conn, QUALITY_PROFILE_KEY, profile.to_json())
     if "SLSKD_PREFERRED_FORMATS" in stored:
         delete_setting(conn, "SLSKD_PREFERRED_FORMATS")
