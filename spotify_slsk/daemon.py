@@ -332,7 +332,19 @@ def _process_renames(conn: sqlite3.Connection) -> None:
             logging.exception(f"Rename failed for {track_id} in {table_name}")
 
 
-def _run_library_scan(conn: sqlite3.Connection) -> None:
+# Between playlists the scan and the quality backfill get a small budget, so
+# a cycle that spends hours downloading still makes progress on them without
+# delaying the next playlist by more than ~30 s.
+BETWEEN_PLAYLISTS_SCAN_FILES = 50
+BETWEEN_PLAYLISTS_SCAN_SECONDS = 30.0
+BETWEEN_PLAYLISTS_BACKFILL_FILES = 50
+
+
+def _run_library_scan(
+    conn: sqlite3.Connection,
+    max_files: int = health.MAX_FILES_PER_STEP,
+    max_seconds: float = health.MAX_SECONDS_PER_STEP,
+) -> None:
     """One bounded step of the library health scan, when one is requested
     (UI button) or due (LIBRARY_SCAN_INTERVAL_HOURS). Report-only."""
     pending = get_setting(conn, health.SCAN_PENDING_KEY, "0") == "1"
@@ -346,7 +358,8 @@ def _run_library_scan(conn: sqlite3.Connection) -> None:
         return
     runtime_state.set_activity("scanning", detail="Library health scan")
     checked, finished = health.scan_step(
-        conn, should_stop=_shutdown.is_set, heartbeat=_touch_heartbeat
+        conn, should_stop=_shutdown.is_set, heartbeat=_touch_heartbeat,
+        max_files=max_files, max_seconds=max_seconds,
     )
     logging.info(
         f"[health] Checked {checked} file(s); "
@@ -355,6 +368,58 @@ def _run_library_scan(conn: sqlite3.Connection) -> None:
     if finished:
         delete_setting(conn, health.SCAN_PENDING_KEY)
         set_setting(conn, health.SCAN_COMPLETED_KEY, str(time.time()))
+
+
+def _drain_queues(conn: sqlite3.Connection) -> None:
+    """Everything the web UI queued for the daemon: quarantines first (so
+    the reset rows re-download this cycle), then renames, manual grabs and
+    requested upgrade checks. Runs at the start of a cycle and between
+    playlists, so nothing the operator asked for waits a whole cycle."""
+    _process_quarantines(conn)
+    _process_renames(conn)
+    _process_manual_grabs(conn)
+    _process_upgrade_requests(conn)
+
+
+def _between_playlists(conn: sqlite3.Connection) -> None:
+    """Queued requests plus a small step of the background library work.
+    The library scan used to run only at the end of a cycle, so a cycle
+    with a download backlog (hours) starved it."""
+    _drain_queues(conn)
+    if _shutdown.is_set():
+        return
+    _run_library_scan(
+        conn, max_files=BETWEEN_PLAYLISTS_SCAN_FILES,
+        max_seconds=BETWEEN_PLAYLISTS_SCAN_SECONDS,
+    )
+    if _shutdown.is_set():
+        return
+    health.backfill_qualities(
+        conn, max_files=BETWEEN_PLAYLISTS_BACKFILL_FILES, heartbeat=_touch_heartbeat
+    )
+
+
+def _run_cycle(sp, conn: sqlite3.Connection, playlists: list, ntfy_url, ntfy_topic) -> dict[str, int]:
+    """One cycle: queued requests, each playlist (with the between-playlist
+    step after it), then the full-budget library work and housekeeping.
+    Returns the summed per-playlist counters."""
+    cycle_totals = {"tracks_added": 0, "tracks_downloaded": 0, "tracks_failed": 0}
+    _drain_queues(conn)
+    for pl in playlists:
+        if _shutdown.is_set():
+            break
+        counters = process_playlist(sp, conn, pl["playlist_id"], ntfy_url, ntfy_topic)
+        for k in cycle_totals:
+            cycle_totals[k] += (counters or {}).get(k, 0)
+        if not _shutdown.is_set():
+            _between_playlists(conn)
+    if not _shutdown.is_set():
+        _run_library_scan(conn)
+    if not _shutdown.is_set():
+        health.backfill_qualities(conn, heartbeat=_touch_heartbeat)
+    if not _shutdown.is_set():
+        _run_housekeeping(conn)
+    return cycle_totals
 
 
 def _run_housekeeping(conn: sqlite3.Connection) -> None:
@@ -478,33 +543,8 @@ def main() -> None:
                     f"Starting new cycle ({len(playlists)} enabled playlist(s))"
                 )
             cycle_started_at = time.time()
-            cycle_totals = {
-                "tracks_added": 0,
-                "tracks_downloaded": 0,
-                "tracks_failed": 0,
-            }
             try:
-                _process_quarantines(conn)
-                _process_renames(conn)
-                _process_manual_grabs(conn)
-                _process_upgrade_requests(conn)
-                for pl in playlists:
-                    if _shutdown.is_set():
-                        break
-                    counters = process_playlist(
-                        sp, conn, pl["playlist_id"], ntfy_url, ntfy_topic
-                    )
-                    # Between playlists too: a grab shouldn't wait a full cycle.
-                    _process_manual_grabs(conn)
-                    if counters:
-                        for k in cycle_totals:
-                            cycle_totals[k] += counters.get(k, 0)
-                if not _shutdown.is_set():
-                    _run_library_scan(conn)
-                if not _shutdown.is_set():
-                    health.backfill_qualities(conn, heartbeat=_touch_heartbeat)
-                if not _shutdown.is_set():
-                    _run_housekeeping(conn)
+                cycle_totals = _run_cycle(sp, conn, playlists, ntfy_url, ntfy_topic)
             except Exception:
                 logging.exception("Cycle failed; backing off and retrying")
                 if _shutdown.wait(config.CYCLE_ERROR_BACKOFF_SECONDS):

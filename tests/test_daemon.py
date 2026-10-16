@@ -319,3 +319,52 @@ def test_requested_upgrade_checks_bypass_the_interval(tmp_path, monkeypatch):
     assert stamped is not None
     assert runtime_state.pop_upgrade_checks() == []
     conn.close()
+
+
+class TestBetweenPlaylists:
+    """A long download cycle must not starve the library scan, the quality
+    backfill or the UI's queued requests (prod: a scan requested hours ago
+    had checked one file)."""
+
+    def test_scan_and_backfill_get_a_small_step_after_each_playlist(self, monkeypatch, tmp_path):
+        from spotify_slsk import db
+        from spotify_slsk.library import health
+
+        conn = db.create_connection(str(tmp_path / "t.db"))
+        db.set_setting(conn, health.SCAN_PENDING_KEY, "1")
+        calls = []
+        monkeypatch.setattr(
+            daemon, "process_playlist",
+            lambda sp, c, pid, *a: calls.append(("playlist", pid)) or {"tracks_downloaded": 1},
+        )
+        monkeypatch.setattr(
+            health, "scan_step",
+            lambda c, **k: calls.append(("scan", k["max_files"], k["max_seconds"])) or (0, False),
+        )
+        monkeypatch.setattr(
+            health, "backfill_qualities",
+            lambda c, max_files=500, **k: calls.append(("backfill", max_files)) or 0,
+        )
+        monkeypatch.setattr(daemon, "_drain_queues", lambda c: calls.append(("queues",)))
+        monkeypatch.setattr(daemon, "_run_housekeeping", lambda c: None)
+
+        totals = daemon._run_cycle(None, conn, [{"playlist_id": "a"}, {"playlist_id": "b"}], None, None)
+
+        small = ("scan", daemon.BETWEEN_PLAYLISTS_SCAN_FILES, daemon.BETWEEN_PLAYLISTS_SCAN_SECONDS)
+        assert calls == [
+            ("queues",),
+            ("playlist", "a"), ("queues",), small, ("backfill", daemon.BETWEEN_PLAYLISTS_BACKFILL_FILES),
+            ("playlist", "b"), ("queues",), small, ("backfill", daemon.BETWEEN_PLAYLISTS_BACKFILL_FILES),
+            ("scan", health.MAX_FILES_PER_STEP, health.MAX_SECONDS_PER_STEP), ("backfill", 500),
+        ]
+        assert totals["tracks_downloaded"] == 2
+        conn.close()
+
+    def test_drain_queues_runs_every_ui_queue(self, monkeypatch):
+        ran = []
+        for name in ("_process_quarantines", "_process_renames",
+                     "_process_manual_grabs", "_process_upgrade_requests"):
+            monkeypatch.setattr(daemon, name, lambda c, n=name: ran.append(n))
+        daemon._drain_queues(object())
+        assert ran == ["_process_quarantines", "_process_renames",
+                       "_process_manual_grabs", "_process_upgrade_requests"]
