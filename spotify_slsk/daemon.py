@@ -7,6 +7,7 @@ in ``main()`` is load-bearing; CLAUDE.md explains each step.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import signal
@@ -17,7 +18,7 @@ from collections.abc import Callable
 
 import spotipy
 
-from . import config, healthchecks, runtime_state, tasks
+from . import config, healthchecks, notifications, runtime_state, tasks
 from .db import (
     clear_tried_entries,
     create_connection,
@@ -42,7 +43,6 @@ from .library.acquire import handle_track_download, try_upgrade_track
 from .library.reconcile import startup_check
 from .log_config import setup_logging
 from .models import Track
-from .notify import send_ntfy_notification
 from .slskd import client as slskd_client
 from .slskd import transfers
 from .slskd.client import wait_for_slskd_healthy
@@ -112,8 +112,6 @@ def process_playlist(
     sp: spotipy.Spotify,
     conn: sqlite3.Connection,
     playlist_id: str,
-    ntfy_url: str | None,
-    ntfy_topic: str | None,
 ) -> dict[str, int]:
     """Sync + download for one playlist. Returns per-playlist counters
     (tracks_added/downloaded/failed) so the caller can aggregate them
@@ -141,8 +139,11 @@ def process_playlist(
     }
 
     if new_tracks:
-        msg = f"Playlist updated: {len(new_tracks)} new track(s) added to {playlist_name}"
-        send_ntfy_notification(ntfy_url, ntfy_topic, msg)
+        notifications.emit(
+            "playlist_synced", playlist_id=playlist_id, playlist=playlist_name,
+            added=len(new_tracks),
+            message=f"{len(new_tracks)} new track(s) added to {playlist_name}",
+        )
 
     tracks = get_pending_tracks(conn, playlist_name)
     if tracks:
@@ -185,8 +186,6 @@ def process_playlist(
     )
     _run_upgrade_pass(conn, playlist_name)
     playlist_files.write_playlist_files(conn, playlist_id)
-
-    send_ntfy_notification(ntfy_url, ntfy_topic, f"Finished processing playlist: {playlist_name}")
     return counters
 
 
@@ -390,7 +389,9 @@ def _drain_queues(conn: sqlite3.Connection) -> None:
 def _between_playlists(conn: sqlite3.Connection) -> None:
     """Queued requests plus a small step of the background library work.
     The library scan used to run only at the end of a cycle, so a cycle
-    with a download backlog (hours) starved it."""
+    with a download backlog (hours) starved it. Notifications go out here
+    too: one batch per playlist."""
+    notifications.flush(conn)
     _drain_queues(conn)
     _run_scheduled(conn)
     if _shutdown.is_set():
@@ -406,7 +407,7 @@ def _between_playlists(conn: sqlite3.Connection) -> None:
     )
 
 
-def _run_cycle(sp, conn: sqlite3.Connection, playlists: list, ntfy_url, ntfy_topic) -> dict[str, int]:
+def _run_cycle(sp, conn: sqlite3.Connection, playlists: list) -> dict[str, int]:
     """One cycle: queued requests, each playlist (with the between-playlist
     step after it), then the full-budget library work and housekeeping.
     Returns the summed per-playlist counters."""
@@ -418,7 +419,7 @@ def _run_cycle(sp, conn: sqlite3.Connection, playlists: list, ntfy_url, ntfy_top
     for pl in playlists:
         if _shutdown.is_set():
             break
-        counters = process_playlist(sp, conn, pl["playlist_id"], ntfy_url, ntfy_topic)
+        counters = process_playlist(sp, conn, pl["playlist_id"])
         for k in cycle_totals:
             cycle_totals[k] += (counters or {}).get(k, 0)
         if not _shutdown.is_set():
@@ -434,6 +435,17 @@ def _run_cycle(sp, conn: sqlite3.Connection, playlists: list, ntfy_url, ntfy_top
         )
     if not _shutdown.is_set():
         _run_scheduled(conn)
+    if sum(cycle_totals.values()):
+        notifications.emit(
+            "cycle_summary", playlists=len(playlists), **cycle_totals,
+            message=(
+                f"{len(playlists)} playlist(s): {cycle_totals['tracks_added']} added, "
+                f"{cycle_totals['tracks_downloaded']} downloaded, "
+                f"{cycle_totals['tracks_failed']} failed"
+            ),
+        )
+    notifications.flush(conn)
+    notifications.rescan_library(conn)
     return cycle_totals
 
 
@@ -460,9 +472,21 @@ def _db_integrity(conn: sqlite3.Connection) -> str:
 
 def _health_checks(conn: sqlite3.Connection) -> str:
     """Refresh the remote checks (slskd, Spotify) for /healthz and the
-    status page."""
+    status page, and notify the checks whose status changed. The previous
+    statuses are stored, so a restart does not re-announce a known issue."""
     healthchecks.refresh_remote(_spotify)
-    return healthchecks.summary(healthchecks.collect(conn))
+    checks = healthchecks.collect(conn)
+    try:
+        previous = json.loads(get_setting(conn, notifications.HEALTH_STATE_KEY, "{}") or "{}")
+    except ValueError:
+        previous = {}
+    notifications.health_transitions(previous, checks)
+    set_setting(
+        conn, notifications.HEALTH_STATE_KEY,
+        json.dumps({c["name"]: c["status"] for c in checks}),
+    )
+    notifications.flush(conn)
+    return healthchecks.summary(checks)
 
 
 # What each scheduled task does. Tasks driven by the cycle itself
@@ -521,14 +545,16 @@ def main() -> None:
 
     setup_logging()
     _install_signal_handlers()
+    notifications.install()
+    # Before the first health check, so it does not report (and notify) a
+    # missing heartbeat on every boot.
+    _touch_heartbeat()
     slskd_client.set_shutdown_event(_shutdown)
     logging.info("Starting main process")
     runtime_state.set_activity("starting", detail="Daemon booting")
 
     slskd_api_key = os.getenv("SLSKD_API_KEY")
     slskd_host_url = os.getenv("SLSKD_HOST_URL", "http://slskd:5030")
-    ntfy_url = os.getenv("NTFY_URL")
-    ntfy_topic = os.getenv("NTFY_TOPIC")
 
 
     conn = create_connection("./data/playlist_tracks.db")
@@ -569,9 +595,6 @@ def main() -> None:
             return  # shutdown requested while waiting
         queue_task(conn, "health_checks")  # slskd is back: say so promptly
 
-        send_ntfy_notification(
-            ntfy_url, ntfy_topic, "Spotify Playlist Downloader starting"
-        )
         # Both of these need Spotify. Their own try/except would swallow the
         # resulting AttributeError, but the operator would then get a
         # 'NoneType' has no attribute 'playlist' traceback per playlist per
@@ -611,7 +634,7 @@ def main() -> None:
                 )
             cycle_started_at = time.time()
             try:
-                cycle_totals = _run_cycle(sp, conn, playlists, ntfy_url, ntfy_topic)
+                cycle_totals = _run_cycle(sp, conn, playlists)
             except Exception:
                 logging.exception("Cycle failed; backing off and retrying")
                 if _shutdown.wait(config.CYCLE_ERROR_BACKOFF_SECONDS):

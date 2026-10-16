@@ -29,6 +29,7 @@ from .cycles import (
 from .history import (
     FAILURE_EVENTS,
     HISTORY_EVENTS,
+    add_history_listener,
     latest_failures,
     list_history,
     prune_history,
@@ -144,6 +145,7 @@ __all__ = [
     "load_blocklist",
     "is_blocklisted",
     "HISTORY_EVENTS",
+    "add_history_listener",
     "FAILURE_EVENTS",
     "record_history",
     "list_history",

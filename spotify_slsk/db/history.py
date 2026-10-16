@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from collections.abc import Callable
 from typing import Any
 
 # ---- history --------------------------------------------------------------
@@ -24,6 +25,16 @@ HISTORY_EVENTS = (
     "recycle_purged",
 )
 FAILURE_EVENTS = ("download_failed", "import_rejected")
+
+# Called with (event, playlist_id, track_id, data) after each recorded event
+# (notifications.install). A listener must be cheap and must not raise.
+HistoryListener = Callable[[str, str | None, str | None, dict[str, Any]], None]
+_listeners: list[HistoryListener] = []
+
+
+def add_history_listener(listener: HistoryListener) -> None:
+    if listener not in _listeners:
+        _listeners.append(listener)
 
 
 def record_history(
@@ -57,6 +68,12 @@ def record_history(
             )
     except (sqlite3.Error, TypeError, ValueError) as e:
         logging.error(f"Could not record history event {event}: {e}")
+        return
+    for listener in _listeners:
+        try:
+            listener(event, playlist_id, track_id, payload)
+        except Exception:
+            logging.exception(f"History listener failed for {event}")
 
 
 def list_history(

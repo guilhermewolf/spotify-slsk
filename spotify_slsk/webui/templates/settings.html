@@ -14,8 +14,7 @@
   </div>
 </div>
 
-{# Two groups: what counts as an acceptable file, and how the search behaves.
-   Keys are matched explicitly so a new setting must be placed deliberately. #}
+{# Keys are matched explicitly so a new setting must be placed deliberately. #}
 {% set groups = [
   ('Match quality', 'What counts as an acceptable file',
    ['MIN_MATCH_SCORE', 'SLSKD_MIN_EFFECTIVE_MP3_KBPS',
@@ -31,6 +30,10 @@
   ('Search & transfers', 'How the daemon talks to slskd',
    ['SLSKD_MIN_PEER_UPLOAD_SPEED', 'SLSKD_EARLY_STOP_RESPONSES', 'SLSKD_WAIT_TIMEOUT',
     'UPGRADE_CHECK_INTERVAL_HOURS', 'HISTORY_RETENTION_DAYS']),
+  ('Notifications', 'ntfy, a generic webhook, and a Subsonic / Navidrome rescan after imports',
+   ['NTFY_URL', 'NTFY_TOPIC', 'NTFY_EVENTS',
+    'WEBHOOK_URL', 'WEBHOOK_HEADER_NAME', 'WEBHOOK_HEADER_VALUE', 'WEBHOOK_EVENTS',
+    'SUBSONIC_URL', 'SUBSONIC_USERNAME', 'SUBSONIC_PASSWORD']),
   ('System', 'Health checks, backups and housekeeping',
    ['MIN_FREE_SPACE_GB'])
 ] %}
@@ -50,10 +53,20 @@
       <div class="setting">
         <label for="{{ key }}">{{ key }}</label>
         <span class="help" id="{{ key }}_help">{{ help_text }}</span>
+        {% if kind == 'secret' %}
+        {# Never rendered back: blank keeps the stored value. #}
+        <input type="password" id="{{ key }}" name="{{ key }}" value="" autocomplete="new-password"
+               placeholder="{{ effective[key] + ' (set) - leave blank to keep' if effective[key] else 'not set' }}"
+               aria-describedby="{{ key }}_help {{ key }}_effective">
+        {% if overrides.get(key) %}
+        <label class="subtle"><input type="checkbox" name="clear_{{ key }}" value="1"> Clear the stored value</label>
+        {% endif %}
+        {% else %}
         <input type="text" id="{{ key }}" name="{{ key }}"
                value="{{ overrides.get(key, '') }}"
                placeholder="{{ effective[key] }}"
                aria-describedby="{{ key }}_help {{ key }}_effective">
+        {% endif %}
         <span class="effective" id="{{ key }}_effective">
           In effect: <code>{{ effective[key] }}</code>
           {%- if overrides.get(key) %} (overridden here)
@@ -134,21 +147,19 @@
   </form>
 </article>
 
-<article>
+<article id="notifications">
   <header>
-    <strong>Notifications</strong>
-    <div class="subtle">ntfy is configured by environment variable, not here</div>
+    <strong>Test notifications</strong>
+    <div class="subtle">Uses the saved settings above; save first</div>
   </header>
-  <p class="subtle">
-    Sends one notification to the configured <code>NTFY_URL</code> /
-    <code>NTFY_TOPIC</code> so you can confirm delivery works.
-  </p>
-  <form method="POST" action="{{ url_for('settings.test_ntfy') }}">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <button type="submit" class="secondary outline" style="width:auto">
-      Send test notification
-    </button>
-  </form>
+  <div class="card-actions">
+    {% for provider, label in [('ntfy', 'Send ntfy test'), ('webhook', 'Send webhook test'), ('subsonic', 'Start a Subsonic scan')] %}
+    <form method="POST" action="{{ url_for('settings.test_notification', provider=provider) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button type="submit" class="secondary outline" style="width:auto">{{ label }}</button>
+    </form>
+    {% endfor %}
+  </div>
 </article>
 
 {% endblock %}

@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import sqlite3
+from urllib.parse import urlsplit
 
 from .db import delete_setting, get_setting, list_settings, set_setting
 from .library import naming
@@ -104,6 +105,12 @@ def normalize_ext_list(env_val: str) -> list[str]:
             items.append(fmt)
     return items
 
+
+# Notification events (notifications.py), in the order the settings page lists them.
+NOTIFICATION_EVENTS = (
+    "grabbed", "imported", "upgraded", "download_failed", "import_rejected",
+    "quarantined", "health_issue", "health_restored", "playlist_synced", "cycle_summary",
+)
 
 # ---- deploy-time (env only) -------------------------------------------------
 
@@ -313,6 +320,16 @@ SETTINGS_SPEC = [
     ("WRITE_PLAYLIST_COVER", "1", "Keep a cover.jpg (cover.png for PNG images) in each playlist folder from the Spotify playlist image, cached under data/artwork. A cover you put there yourself is never replaced (1 = on, 0 = off)", "bool"),
     ("RECYCLE_BIN_RETENTION_DAYS", "0", "Files replaced by an upgrade or a manual grab go to the recycle bin, .quarantine/<playlist>/replaced/. When this is above 0, a daily step deletes those older than this many days (counted from when they were replaced). 0 = keep them forever. Files you quarantined yourself (.quarantine/<playlist>/) are never deleted automatically", "int0"),
     ("MIN_FREE_SPACE_GB", "5", "Health check: warn when the playlists volume has less free space than this many GB. 0 disables the check", "int0"),
+    ("NTFY_URL", "", "ntfy server, e.g. https://ntfy.sh. Notifications are sent when this and NTFY_TOPIC are set", "url"),
+    ("NTFY_TOPIC", "", "ntfy topic to publish to", "text"),
+    ("NTFY_EVENTS", "playlist_synced,cycle_summary,health_issue,health_restored", "Events sent to ntfy (comma-separated): " + ", ".join(NOTIFICATION_EVENTS) + ". Per-track events are batched into one message per playlist per cycle", "events"),
+    ("WEBHOOK_URL", "", "POST a JSON body {event, ts, data} here for each notification (10 s timeout; paused for up to an hour after a failure). Empty = off", "url"),
+    ("WEBHOOK_HEADER_NAME", "", "Optional header sent with every webhook call, e.g. Authorization or X-Api-Key", "header"),
+    ("WEBHOOK_HEADER_VALUE", "", "Value of that header (a secret: stored, never shown or logged)", "secret"),
+    ("WEBHOOK_EVENTS", ",".join(NOTIFICATION_EVENTS), "Events sent to the webhook (comma-separated): " + ", ".join(NOTIFICATION_EVENTS), "events"),
+    ("SUBSONIC_URL", "", "Subsonic / Navidrome server, e.g. http://navidrome:4533. After a cycle that imported or upgraded files, it is asked to rescan its library (once per cycle). Empty = off", "url"),
+    ("SUBSONIC_USERNAME", "", "Subsonic user allowed to start a scan (Navidrome: an admin)", "text"),
+    ("SUBSONIC_PASSWORD", "", "That user's password (a secret: stored, never shown or logged; sent only as a salted token)", "secret"),
     ("LIBRARY_SCAN_INTERVAL_HOURS", "0", "Re-verify every library file (tags, duration, ISRC, lossless check) this often; report-only, a few hundred files per cycle. 0 = only when you press Scan library", "int0"),
 ]
 
@@ -354,6 +371,29 @@ def validate_setting(kind: str, value: str) -> tuple[str | None, str | None]:
     if kind == "template":
         error = naming.validate_template(value)
         return (None, error) if error else (value, None)
+
+    if kind == "url":
+        parts = urlsplit(value.strip())
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            return None, "must be an http:// or https:// URL"
+        return value.strip(), None
+
+    if kind == "events":
+        events = [e.strip().lower() for e in value.split(",") if e.strip()]
+        unknown = [e for e in events if e not in NOTIFICATION_EVENTS]
+        if unknown:
+            return None, f"unknown event(s) {', '.join(unknown)}; known: {', '.join(NOTIFICATION_EVENTS)}"
+        return ",".join(dict.fromkeys(events)), None
+
+    if kind == "header":
+        if not re.fullmatch(r"[A-Za-z0-9!#$%&'*+.^_`|~-]+", value.strip()):
+            return None, "must be an HTTP header name (letters, digits and dashes)"
+        return value.strip(), None
+
+    if kind == "secret":
+        if any(c in value for c in "\r\n\0"):
+            return None, "must be a single line"
+        return value, None
 
     if kind == "terms":
         terms, error = parse_terms(value)

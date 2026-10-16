@@ -1,4 +1,4 @@
-"""Daemon orchestration behaviour: notifications, startup, liveness, shutdown.
+"""Daemon orchestration behaviour: startup, liveness, shutdown.
 
 These paths had no coverage at all, yet they decide whether the process
 survives a dependency outage and whether Docker considers it healthy.
@@ -8,7 +8,7 @@ import threading
 
 import pytest
 
-from spotify_slsk import config, daemon, notify
+from spotify_slsk import config, daemon
 from spotify_slsk.slskd import client as slskd_client
 from spotify_slsk.spotify import client as spotify_client
 from spotify_slsk.spotify import sync as spotify_sync
@@ -22,41 +22,6 @@ def _reset_shutdown():
     yield
     daemon._shutdown.clear()
     daemon._wake_event.clear()
-
-
-class TestNtfyNotifications:
-    """ntfy is optional; an unconfigured deployment must stay silent."""
-
-    def test_unconfigured_sends_nothing(self, monkeypatch):
-        calls = []
-        monkeypatch.setattr(notify.requests, "post", lambda *a, **k: calls.append(a))
-
-        notify.send_ntfy_notification(None, None, "hello")
-        notify.send_ntfy_notification("", "", "hello")
-        notify.send_ntfy_notification("https://ntfy.sh", None, "hello")
-        notify.send_ntfy_notification(None, "topic", "hello")
-
-        # Previously this POSTed to the literal URL "None/None", raised, and
-        # logged an ERROR on every playlist of every cycle.
-        assert calls == []
-
-    def test_configured_posts_to_url_and_topic(self, monkeypatch):
-        sent = {}
-
-        class _Resp:
-            status_code = 200
-            text = "ok"
-
-        def _post(url, data=None, **kwargs):
-            sent["url"] = url
-            sent["data"] = data
-            return _Resp()
-
-        monkeypatch.setattr(notify.requests, "post", _post)
-        notify.send_ntfy_notification("https://ntfy.example", "mytopic", "hi")
-
-        assert sent["url"] == "https://ntfy.example/mytopic"
-        assert sent["data"] == "hi"
 
 
 class TestSpotifyClientSetup:
@@ -175,7 +140,7 @@ class TestHeartbeatDuringWork:
         monkeypatch.setattr(daemon, "handle_track_download", lambda *a, **k: True)
         monkeypatch.setattr(daemon, "_run_upgrade_pass", lambda conn, name: None)
 
-        daemon.process_playlist(object(), object(), "pid", None, None)
+        daemon.process_playlist(object(), object(), "pid")
 
         # once for the playlist + once per pending track
         assert len(touches) >= 4
@@ -209,7 +174,7 @@ class TestShutdownResponsiveness:
 
         monkeypatch.setattr(daemon, "handle_track_download", _download)
 
-        daemon.process_playlist(object(), object(), "pid", None, None)
+        daemon.process_playlist(object(), object(), "pid")
 
         assert attempted == ["t0"], "daemon kept downloading after shutdown request"
 
@@ -348,7 +313,7 @@ class TestBetweenPlaylists:
         monkeypatch.setattr(daemon, "_drain_queues", lambda c: calls.append(("queues",)))
         monkeypatch.setattr(daemon, "_run_scheduled", lambda c: None)
 
-        totals = daemon._run_cycle(None, conn, [{"playlist_id": "a"}, {"playlist_id": "b"}], None, None)
+        totals = daemon._run_cycle(None, conn, [{"playlist_id": "a"}, {"playlist_id": "b"}])
 
         small = ("scan", daemon.BETWEEN_PLAYLISTS_SCAN_FILES, daemon.BETWEEN_PLAYLISTS_SCAN_SECONDS)
         assert calls == [
