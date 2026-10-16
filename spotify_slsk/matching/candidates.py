@@ -426,6 +426,9 @@ def summarize_evaluation(evaluated: list[Candidate], limit: int = 50) -> dict[st
     }
 
 
+_UNKNOWN_QUEUE = 1_000
+
+
 def _log_bucket(value) -> int:
     """Factor-of-two bucket: 0, 1, 2-3, 4-7, ... -> 0, 1, 2, 3, ... so a
     queue of 5 vs 6 (or 10.1 vs 10.4 MB/s) is a tie decided further down."""
@@ -460,7 +463,8 @@ def sort_candidates(candidates: Iterable[Candidate]) -> list[Candidate]:
             profile.rank(candidate_quality(c)),
             bool(c.get("note")),
             not c.get("free_slot"),
-            _log_bucket(c.get("queue_length")),
+            # Unknown queue: after every known one (a peer that didn't say).
+            _UNKNOWN_QUEUE if c.get("queue_length") is None else _log_bucket(c["queue_length"]),
             -_log_bucket((c.get("user_upload_speed") or 0) / 1024),
             _size_distance(c),
         ),

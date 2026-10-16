@@ -39,7 +39,7 @@ and CI all agree; the Makefile defaults to `python3.12`). Individual targets:
   findings rather than adding ignores.
 - `make typecheck` — mypy over `spotify_slsk/` (`ignore_missing_imports`,
   `check_untyped_defs`). Every public function is annotated; keep it that way.
-- `make test` — 731 tests. Fast (~5s); no network, no external services. The
+- `make test` — 747 tests. Fast (~5s); no network, no external services. The
   real-FLAC decode tests need the `flac` CLI (CI apt-installs it) and skip with
   a reason without it.
 - `make audit` — `pip-audit` against the pinned `requirements.txt`. Advisories
@@ -407,7 +407,7 @@ threaded through the download call chain. The real per-track cap is
   FLAC 16-bit], cutoff FLAC 16-bit). Per-playlist profiles are not
   implemented. **Ranking** (`sort_candidates`, Lidarr's
   DownloadDecisionComparer adapted): version tier > profile index >
-  likely-upsampled demotion > free upload slot > shorter queue (log2 bucket)
+  likely-upsampled demotion > free upload slot (unknown = not free) > shorter queue (log2 bucket; unknown queue after every known one)
   > faster peer (log2 bucket of KiB/s) > size closest to the quality's
   `preferred_kbps`. **Upgrades** (`try_upgrade_track`, rate limit unchanged):
   a strictly better version tier at the same or a better profile quality

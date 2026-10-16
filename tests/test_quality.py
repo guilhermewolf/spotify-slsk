@@ -500,3 +500,20 @@ class TestTermPaths:
         monkeypatch.setenv("IGNORED_TERMS", "karaoke, /(oops/")
         assert config._env_terms("IGNORED_TERMS") == []
         assert "Invalid IGNORED_TERMS in the environment" in caplog.text
+
+
+def test_unknown_queue_and_slot_rank_after_known(monkeypatch):
+    from spotify_slsk import config
+    from spotify_slsk.matching.candidates import sort_candidates
+
+    monkeypatch.setattr(config, "QUALITY_PROFILE", q.profile_from_formats([".flac"]))
+    base = {"ext": ".flac", "bit_depth": 16, "version_tier": 2, "user_upload_speed": 1_000_000}
+    cands = [
+        dict(base, user="unknown_queue", free_slot=False, queue_length=None),
+        dict(base, user="long_queue", free_slot=False, queue_length=500),
+        dict(base, user="unknown_slot", free_slot=None, queue_length=0),
+        dict(base, user="free", free_slot=True, queue_length=None),
+    ]
+    assert [c["user"] for c in sort_candidates(cands)] == [
+        "free", "unknown_slot", "long_queue", "unknown_queue",
+    ]
