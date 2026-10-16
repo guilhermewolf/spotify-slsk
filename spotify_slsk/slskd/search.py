@@ -184,6 +184,8 @@ def search_and_download(
     timeout: int = 60,
     duration_ms: int | None = None,
     lossless_only: bool = False,
+    better_quality_than: str | None = None,
+    current_quality: str | None = None,
 ) -> str | None:
     """Run the full query waterfall, attempting download from each.
 
@@ -209,6 +211,8 @@ def search_and_download(
                 expected_duration_ms=duration_ms,
                 is_blocked=is_blocked,
                 lossless_only=lossless_only,
+                better_quality_than=better_quality_than,
+                current_quality=current_quality,
             )
             if results
             else []

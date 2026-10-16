@@ -321,3 +321,179 @@ class TestIsrcOnImport:
         downloads, _ = sandbox_dirs
         ok, _, tagged = self._run(conn, monkeypatch, downloads, "Heart To Find", "Mat Joe", None)
         assert ok is True and tagged[0]["isrc"] == "GBAYE0601498"
+
+
+class TestQualityUpgrade:
+    """Tier 4: a file below the profile cutoff is re-searched for the same
+    version in a strictly better quality - only with upgrades allowed."""
+
+    @pytest.fixture
+    def profile(self, monkeypatch):
+        from spotify_slsk.matching.quality import make_profile
+
+        def _set(upgrades=True, allowed=("FLAC_24", "FLAC_16"), cutoff="FLAC_24"):
+            monkeypatch.setattr(config, "QUALITY_PROFILE",
+                                make_profile(list(allowed), cutoff, upgrades)[0])
+        return _set
+
+    def _row(self, conn, sandbox_dirs, name="Mat Joe - Heart To Find (Extended Mix).flac",
+             quality="FLAC_16"):
+        _, playlists = sandbox_dirs
+        current = playlists / name
+        current.write_bytes(b"x")
+        db.update_download_status(conn, "t1", "pl_x", success=True, file_path=str(current))
+        if quality:
+            db.set_track_quality(conn, "pl_x", "t1", quality)
+        return current
+
+    def _capture(self, monkeypatch):
+        seen = {}
+
+        def _search(**kwargs):
+            seen.update(kwargs)
+            return None
+
+        monkeypatch.setattr(acquire, "search_and_download", _search)
+        return seen
+
+    def test_below_cutoff_top_tier_is_searched_for_better_quality(
+        self, conn, monkeypatch, sandbox_dirs, profile
+    ):
+        profile(upgrades=True)
+        current = self._row(conn, sandbox_dirs)
+        seen = self._capture(monkeypatch)
+        acquire.try_upgrade_track(Track("t1", "Heart To Find", "Mat Joe", "Alb", "pl_x"),
+                                  "pl_x", conn, str(current))
+        assert seen["better_quality_than"] == "FLAC_16"
+        assert seen["max_version_tier"] == 0 and seen["lossless_only"] is False
+
+    def test_upgrades_off_means_no_quality_search(self, conn, monkeypatch, sandbox_dirs, profile):
+        profile(upgrades=False)
+        current = self._row(conn, sandbox_dirs)
+        monkeypatch.setattr(acquire, "search_and_download", lambda **k: pytest.fail("searched"))
+        acquire.try_upgrade_track(Track("t1", "Heart To Find", "Mat Joe", "Alb", "pl_x"),
+                                  "pl_x", conn, str(current))
+
+    def test_at_cutoff_is_left_alone(self, conn, monkeypatch, sandbox_dirs, profile):
+        profile(upgrades=True, cutoff="FLAC_16")
+        current = self._row(conn, sandbox_dirs)
+        monkeypatch.setattr(acquire, "search_and_download", lambda **k: pytest.fail("searched"))
+        acquire.try_upgrade_track(Track("t1", "Heart To Find", "Mat Joe", "Alb", "pl_x"),
+                                  "pl_x", conn, str(current))
+
+    def test_tier_upgrade_unaffected_when_quality_meets_cutoff(
+        self, conn, monkeypatch, sandbox_dirs, profile
+    ):
+        profile(upgrades=True, cutoff="FLAC_16")
+        current = self._row(conn, sandbox_dirs, name="Mat Joe - Heart To Find.flac")
+        seen = self._capture(monkeypatch)
+        acquire.try_upgrade_track(Track("t1", "Heart To Find", "Mat Joe", "Alb", "pl_x"),
+                                  "pl_x", conn, str(current))
+        assert seen["better_quality_than"] is None
+        assert seen["max_version_tier"] == version_tier(current.name)
+
+    def test_quality_is_backfilled_from_the_file(self, conn, monkeypatch, sandbox_dirs, profile):
+        profile(upgrades=True)
+        current = self._row(conn, sandbox_dirs, quality=None)
+        monkeypatch.setattr(acquire, "quality_of_file", lambda p: "FLAC_16")
+        seen = self._capture(monkeypatch)
+        acquire.try_upgrade_track(Track("t1", "Heart To Find", "Mat Joe", "Alb", "pl_x"),
+                                  "pl_x", conn, str(current))
+        assert db.get_track(conn, "pl_x", "t1")["quality"] == "FLAC_16"
+        assert seen["better_quality_than"] == "FLAC_16"
+
+    def test_suspect_stays_on_the_lossless_path(self, conn, monkeypatch, sandbox_dirs, profile):
+        profile(upgrades=True)
+        current = self._row(conn, sandbox_dirs, quality="FLAC_24")
+        db.save_file_check(conn, "pl_x", "t1", path=str(current), size=1, mtime=1.0,
+                           rules_version=0, audio_check="suspect")
+        seen = self._capture(monkeypatch)
+        acquire.try_upgrade_track(Track("t1", "Heart To Find", "Mat Joe", "Alb", "pl_x"),
+                                  "pl_x", conn, str(current))
+        assert seen["lossless_only"] is True and seen["better_quality_than"] is None
+
+
+class TestBetterQualityCandidates:
+    def _eval(self, monkeypatch, *files, **kw):
+        from spotify_slsk.matching.candidates import evaluate_candidates
+        from spotify_slsk.matching.quality import make_profile
+
+        monkeypatch.setattr(config, "QUALITY_PROFILE",
+                            make_profile(["FLAC_24", "FLAC_16"], "FLAC_24", True)[0])
+        return evaluate_candidates(
+            [{"username": "u", "files": list(files)}], "Heart To Find", "Mat Joe", **kw)
+
+    def _flac(self, name, depth):
+        return {"filename": name, "size": 90_000_000 if depth == 24 else 33_000_000,
+                "length": 300, "bitDepth": depth, "sampleRate": 96000 if depth == 24 else 44100}
+
+    def test_same_tier_needs_strictly_better_quality(self, monkeypatch):
+        hi, cd = self._eval(
+            monkeypatch,
+            self._flac("Mat Joe - Heart To Find (Extended Mix).flac", 24),
+            self._flac("Mat Joe - Heart To Find (Extended Mix).flac", 16),
+            max_version_tier=0, better_quality_than="FLAC_16",
+        )
+        assert hi["accepted"] is True
+        assert cd["reason"] == "not a better version or quality than the current file"
+
+    def test_worse_version_is_never_a_quality_upgrade(self, monkeypatch):
+        (plain,) = self._eval(
+            monkeypatch, self._flac("Mat Joe - Heart To Find.flac", 24),
+            max_version_tier=1, better_quality_than="FLAC_16",
+        )
+        assert plain["accepted"] is False
+
+
+class TestVersionUpgradeNeverLowersQuality:
+    def _eval(self, monkeypatch, *files, **kw):
+        from spotify_slsk.matching.candidates import evaluate_candidates
+        from spotify_slsk.matching.quality import make_profile
+
+        monkeypatch.setattr(config, "QUALITY_PROFILE", make_profile(
+            ["FLAC_24", "FLAC_16", "MP3_320"], "MP3_320", False)[0])
+        return evaluate_candidates(
+            [{"username": "u", "files": list(files)}], "Heart To Find", "Mat Joe", **kw)
+
+    EXT_MP3 = {"filename": "Mat Joe - Heart To Find (Extended Mix).mp3",
+               "size": 12_000_000, "length": 300, "bitRate": 320}
+    EXT_FLAC = {"filename": "Mat Joe - Heart To Find (Extended Mix).flac",
+                "size": 33_000_000, "length": 300, "bitDepth": 16}
+
+    def test_better_tier_at_lower_quality_is_rejected(self, monkeypatch):
+        mp3, flac = self._eval(monkeypatch, self.EXT_MP3, self.EXT_FLAC,
+                               max_version_tier=2, current_quality="FLAC_16")
+        assert mp3["reason"] == "lower quality than the current file (FLAC 16-bit)"
+        assert flac["accepted"] is True
+
+    def test_unknown_current_quality_allows_as_before(self, monkeypatch):
+        (mp3,) = self._eval(monkeypatch, self.EXT_MP3, max_version_tier=2)
+        assert mp3["accepted"] is True
+
+    def _upgrade(self, conn, monkeypatch, sandbox_dirs, name, quality):
+        _, playlists = sandbox_dirs
+        current = playlists / name
+        current.write_bytes(b"x")
+        db.update_download_status(conn, "t1", "pl_x", success=True, file_path=str(current))
+        if quality:
+            db.set_track_quality(conn, "pl_x", "t1", quality)
+        else:
+            monkeypatch.setattr(acquire, "quality_of_file", lambda p: None)
+        seen = {}
+        monkeypatch.setattr(acquire, "search_and_download", lambda **k: seen.update(k))
+        acquire.try_upgrade_track(Track("t1", "Heart To Find", "Mat Joe", "Alb", "pl_x"),
+                                  "pl_x", conn, str(current))
+        return seen
+
+    def test_upgrade_pass_passes_the_current_quality(self, conn, monkeypatch, sandbox_dirs):
+        seen = self._upgrade(conn, monkeypatch, sandbox_dirs, "Mat Joe - Heart To Find.flac",
+                             "FLAC_16")
+        assert seen["current_quality"] == "FLAC_16" and seen["lossless_only"] is False
+
+    def test_unknown_quality_lossless_file_needs_lossless(self, conn, monkeypatch, sandbox_dirs):
+        seen = self._upgrade(conn, monkeypatch, sandbox_dirs, "Mat Joe - Heart To Find.flac", None)
+        assert seen["current_quality"] is None and seen["lossless_only"] is True
+
+    def test_unknown_quality_lossy_file_as_before(self, conn, monkeypatch, sandbox_dirs):
+        seen = self._upgrade(conn, monkeypatch, sandbox_dirs, "Mat Joe - Heart To Find.mp3", None)
+        assert seen["current_quality"] is None and seen["lossless_only"] is False

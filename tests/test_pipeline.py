@@ -634,6 +634,27 @@ class TestManualGrabs:
         daemon._process_manual_grabs(conn)
         assert old.exists(), "t1's file must survive a grab that imported as t2"
 
+    def test_manual_grab_moves_the_replaced_file_aside(self, conn, monkeypatch, sandbox_dirs):
+        from spotify_slsk import runtime_state
+        from spotify_slsk.slskd import transfers as slskd_transfers
+        downloads, playlists = sandbox_dirs
+        _seed(conn)
+        old = playlists / "pl_x" / "old.flac"
+        old.parent.mkdir(exist_ok=True)
+        old.write_bytes(b"old")
+        db.update_download_status(conn, "t1", "pl_x", success=True, file_path=str(old))
+        _stub_metadata(monkeypatch, "Heart To Find", "Mat Joe")
+        src = downloads / "Mat Joe - Heart To Find.flac"
+        src.write_bytes(b"audio")
+        monkeypatch.setattr(slskd_transfers, "grab_candidate", lambda *a, **k: str(src))
+        runtime_state.enqueue_manual_grab({
+            "playlist_id": "pid", "table_name": "pl_x", "track_id": "t1",
+            "candidate": {"user": "peer", "filename": "x.flac", "size": 5},
+        })
+        daemon._process_manual_grabs(conn)
+        assert not old.exists()
+        assert (playlists / ".quarantine" / "pl_x" / "replaced" / "old.flac").exists()
+
 
 class TestVerifiesTheRequestedTrackOnly:
     """A download is verified against the track it was requested for.
@@ -726,6 +747,32 @@ class TestUpgradeReplacesOnlyItsOwnFile:
         monkeypatch.setattr(acquire, "process_downloaded_file", _process)
         assert acquire.try_upgrade_track(track, "pl_x", conn, str(old)) is True
         assert not old.exists() and new.exists()
+        # Moved aside, never deleted (no recycle bin yet).
+        _, playlists = sandbox_dirs
+        kept = playlists / ".quarantine" / "pl_x" / "replaced" / old.name
+        assert kept.read_bytes() == b"old"
+        (event,) = db.list_history(conn, event="replaced_file")
+        assert event["data"]["replaced_path"] == str(kept)
+
+    def test_replaced_files_never_collide(self, conn, monkeypatch, sandbox_dirs):
+        from spotify_slsk.library import health
+        _, playlists = sandbox_dirs
+        _seed(conn)
+        dests = []
+        for content in (b"one", b"two"):
+            f = playlists / "pl_x" / "Song.flac"
+            f.parent.mkdir(exist_ok=True)
+            f.write_bytes(content)
+            dests.append(health.retire_replaced_file(conn, "pl_x", "t1", str(f), "test"))
+        assert [p.rsplit("/", 1)[1] for p in dests] == ["Song.flac", "Song (2).flac"]
+        assert open(dests[1], "rb").read() == b"two"
+
+    def test_file_outside_the_library_is_left_alone(self, conn, tmp_path, sandbox_dirs):
+        from spotify_slsk.library import health
+        outside = tmp_path / "elsewhere.flac"
+        outside.write_bytes(b"x")
+        assert health.retire_replaced_file(conn, "pl_x", "t1", str(outside), "test") is None
+        assert outside.exists()
 
     def test_same_path_is_never_deleted(self, conn, monkeypatch, sandbox_dirs):
         track, old, _ = self._setup(conn, monkeypatch, sandbox_dirs)

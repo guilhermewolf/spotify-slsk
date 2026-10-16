@@ -58,7 +58,7 @@
  "expected": [
   {"user": "lossless_peer", "basename": "08 - Daft Punk - Get Lucky.flac", "accepted": true},
   {"user": "lossless_peer", "basename": "cover.jpg", "accepted": false, "reason": "format not allowed: .jpg"},
-  {"user": "vbr_peer", "basename": "Daft Punk - Get Lucky (V0).mp3", "accepted": false, "reason": "bitrate 245 < 320"},
+  {"user": "vbr_peer", "basename": "Daft Punk - Get Lucky (V0).mp3", "accepted": false, "reason": "quality not allowed by profile: MP3 245 (V0)"},
   {"user": "cbr_peer", "basename": "Daft Punk feat. Pharrell Williams - Get Lucky.mp3", "accepted": true},
   {"user": "radio_edit_peer", "basename": "Daft Punk - Get Lucky (Radio Edit).flac", "accepted": false, "reason": "duration 4:08 vs 6:09"},
   {"user": "sparse_peer", "basename": "Daft Punk - Get Lucky.flac", "accepted": true},

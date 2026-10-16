@@ -2,7 +2,7 @@
 import logging
 import sqlite3
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
@@ -24,7 +24,7 @@ def _ensure_schema_version(conn: sqlite3.Connection) -> None:
     try:
         current = conn.execute("PRAGMA user_version").fetchone()[0]
         if current < SCHEMA_VERSION:
-            _migrate_track_columns(conn)
+            _migrate_track_columns(conn, resync=current < 6)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.commit()
             if current == 0:
@@ -41,15 +41,19 @@ def _ensure_schema_version(conn: sqlite3.Connection) -> None:
         logging.warning(f"Failed to read/set schema user_version: {e}")
 
 
-def _migrate_track_columns(conn: sqlite3.Connection) -> None:
-    """v5 and v6: per-playlist tables gain `duration_ms` (v5, Spotify track
-    length) and `isrc` (v6, Spotify external_ids.isrc).
+def _migrate_track_columns(conn: sqlite3.Connection, resync: bool = True) -> None:
+    """v5-v7: per-playlist tables gain `duration_ms` (v5, Spotify track
+    length), `isrc` (v6, Spotify external_ids.isrc) and `quality` (v7, the
+    file's matching.quality key; backfilled lazily from the file, '' when
+    unreadable).
 
     Every catalogued table is migrated here rather than lazily in
     create_table, because the webui reads tables of playlists the daemon
     hasn't synced since the upgrade (disabled ones, for instance). Stored
     snapshots are cleared so the next sync re-reads every track and
-    backfills the new columns; existing rows are NULL until then.
+    backfills the new columns; existing rows are NULL until then. `quality`
+    comes from the file, not Spotify, so a v6 -> v7 upgrade (`resync`
+    False) keeps the snapshots.
     """
     tables = [
         r[0]
@@ -61,11 +65,12 @@ def _migrate_track_columns(conn: sqlite3.Connection) -> None:
     with conn:
         for table_name in tables:
             _add_track_columns(conn, table_name)
-        conn.execute("UPDATE playlists_meta SET snapshot_id = NULL")
+        if resync:
+            conn.execute("UPDATE playlists_meta SET snapshot_id = NULL")
 
 
 # Columns added to per-playlist tables after their first release.
-_TRACK_COLUMNS = (("duration_ms", "INTEGER"), ("isrc", "TEXT"))
+_TRACK_COLUMNS = (("duration_ms", "INTEGER"), ("isrc", "TEXT"), ("quality", "TEXT"))
 
 
 def _add_track_columns(conn: sqlite3.Connection, table_name: str) -> None:
@@ -170,7 +175,7 @@ def _ensure_blocklist_table(conn: sqlite3.Connection) -> None:
 
 def _ensure_history_table(conn: sqlite3.Connection) -> None:
     """Persistent event log (schema v5): grabbed, imported, download_failed,
-    import_rejected, upgraded, retried, deleted_file. Pruned by age via
+    import_rejected, upgraded, retried, deleted_file, replaced_file... Pruned by age via
     prune_history."""
     try:
         with conn:

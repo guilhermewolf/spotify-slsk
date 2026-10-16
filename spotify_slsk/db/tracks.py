@@ -68,7 +68,7 @@ def list_tracks(conn: sqlite3.Connection, table_name: str) -> list[dict[str, Any
     try:
         rows = conn.execute(
             f'SELECT id, name, artists, album, downloaded, path, attempts, '
-            f'last_attempt, suspended_until, CURRENT_TIMESTAMP, duration_ms, isrc '
+            f'last_attempt, suspended_until, CURRENT_TIMESTAMP, duration_ms, isrc, quality '
             f'FROM "{table_name}" ORDER BY name COLLATE NOCASE'
         ).fetchall()
         result = []
@@ -85,6 +85,7 @@ def list_tracks(conn: sqlite3.Connection, table_name: str) -> list[dict[str, Any
                 "suspended_until": r[8],
                 "duration_ms": r[10],
                 "isrc": r[11],
+                "quality": r[12] or None,
             }
             d["status"] = _track_status(d["downloaded"], d["attempts"], r[8], r[9])
             result.append(d)
@@ -99,7 +100,7 @@ def get_track(conn: sqlite3.Connection, table_name: str, track_id: str) -> dict[
     try:
         r = conn.execute(
             f'SELECT id, name, artists, album, downloaded, path, attempts, '
-            f'last_attempt, suspended_until, CURRENT_TIMESTAMP, duration_ms, isrc '
+            f'last_attempt, suspended_until, CURRENT_TIMESTAMP, duration_ms, isrc, quality '
             f'FROM "{table_name}" WHERE id = ?',
             (track_id,),
         ).fetchone()
@@ -117,6 +118,7 @@ def get_track(conn: sqlite3.Connection, table_name: str, track_id: str) -> dict[
             "suspended_until": r[8],
             "duration_ms": r[10],
             "isrc": r[11],
+            "quality": r[12] or None,
         }
         d["status"] = _track_status(d["downloaded"], d["attempts"], r[8], r[9])
         return d
@@ -159,7 +161,8 @@ def create_table(conn: sqlite3.Connection, playlist_name: str) -> None:
                                         last_upgrade_check TIMESTAMP,
                                         tried_files TEXT DEFAULT '',
                                         duration_ms INTEGER,
-                                        isrc TEXT
+                                        isrc TEXT,
+                                        quality TEXT
                                     );"""
         cursor = conn.cursor()
         cursor.execute(sql_create_tracks_table)
@@ -239,7 +242,7 @@ def update_download_status(
             if success:
                 cursor.execute(
                     f'UPDATE "{table_name}" SET downloaded = 1, attempts = 0, '
-                    f'suspended_until = NULL, path = ?, last_attempt = CURRENT_TIMESTAMP '
+                    f'suspended_until = NULL, path = ?, quality = NULL, last_attempt = CURRENT_TIMESTAMP '
                     f'WHERE id = ?',
                     (file_path, track_id),
                 )
@@ -404,7 +407,7 @@ def reset_track_for_redownload(conn: sqlite3.Connection, table_name: str, track_
     try:
         with conn:
             conn.execute(
-                f'UPDATE "{table_name}" SET downloaded = 0, path = NULL, attempts = 0, '
+                f'UPDATE "{table_name}" SET downloaded = 0, path = NULL, quality = NULL, attempts = 0, '
                 f'suspended_until = NULL WHERE id = ?',
                 (track_id,),
             )
@@ -422,3 +425,33 @@ def mark_upgrade_due(conn: sqlite3.Connection, table_name: str, track_id: str) -
             )
     except sqlite3.Error as e:
         logging.error(f"Could not mark {track_id} in {table_name} for upgrade: {e}")
+
+
+def set_track_quality(
+    conn: sqlite3.Connection, table_name: str, track_id: str | None, quality: str | None
+) -> None:
+    """Record the file's quality key (matching.quality); None stores ''
+    ("unreadable, don't retry") so the lazy backfill moves on."""
+    try:
+        with conn:
+            conn.execute(
+                f'UPDATE "{table_name}" SET quality = ? WHERE id = ?',
+                (quality or "", track_id),
+            )
+    except sqlite3.Error as e:
+        logging.error(f"Could not set quality for {track_id} in {table_name}: {e}")
+
+
+def tracks_missing_quality(
+    conn: sqlite3.Connection, table_name: str, limit: int
+) -> list[tuple[str, str]]:
+    """(track_id, path) of downloaded rows whose quality was never read."""
+    try:
+        return conn.execute(
+            f'SELECT id, path FROM "{table_name}" WHERE downloaded = 1 '
+            f"AND path IS NOT NULL AND quality IS NULL LIMIT ?",
+            (limit,),
+        ).fetchall()
+    except sqlite3.Error as e:
+        logging.error(f"Could not list tracks missing quality in {table_name}: {e}")
+        return []

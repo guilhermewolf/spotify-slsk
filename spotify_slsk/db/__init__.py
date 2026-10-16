@@ -66,10 +66,14 @@ from .tracks import (
     playlist_stats,
     reset_track_for_redownload,
     retry_track,
+    set_track_quality,
+    tracks_missing_quality,
     update_download_status,
 )
 
 __all__ = [
+    "set_track_quality",
+    "tracks_missing_quality",
     "SCHEMA_VERSION",
     "create_connection",
     "get_playlist_meta",

@@ -1,13 +1,15 @@
 """Search-phase matching: judge every file in an slskd search response.
 
-`evaluate_candidates` applies the quality gates (format allowlist, 320 kbps
+`evaluate_candidates` applies the release terms (required/ignored, on the
+full peer path), the quality gates (quality profile, 320 kbps
 MP3 rule, effective-bitrate floor, duration, blocklist) and then the strict
 wrong-song rules in `filename_match`; `sort_candidates` orders the accepted
-ones (version tier > format > bitrate > peer upload speed).
+ones (version tier > profile quality > availability > size).
 """
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 from collections.abc import Iterable
@@ -29,6 +31,7 @@ from .normalize import (
     version_mismatch,
     version_tier,
 )
+from .quality import BY_KEY, candidate_quality, classify, describe, effective_quality
 
 
 def clean_filename(filename: str) -> str:
@@ -218,6 +221,8 @@ def evaluate_candidates(
     expected_duration_ms: int | None = None,
     is_blocked: IsBlocked | None = None,
     lossless_only: bool = False,
+    better_quality_than: str | None = None,
+    current_quality: str | None = None,
 ) -> list[Candidate]:
     """
     Judge every file in slskd search results against the expected track.
@@ -233,7 +238,12 @@ def evaluate_candidates(
     files whose reported length is more than config.MAX_DURATION_DIFF_SECONDS off.
     `is_blocked(username, filename)` (see db.load_blocklist) rejects
     blocklisted peer files and banned peers. `lossless_only` rejects every
-    lossy format (replacing a "suspect" lossless file). Title/artist/version
+    lossy format (replacing a "suspect" lossless file). `better_quality_than`
+    (a quality key; upgrade pass, file below the profile cutoff) also accepts
+    a file of the *same* version tier as `max_version_tier` when its quality
+    ranks strictly better in the profile. `current_quality` (upgrade pass)
+    makes a better version tier acceptable only at the same or a better
+    profile quality: a version upgrade never lowers quality. Title/artist/version
     use the strict rules in `filename_match`.
     """
     evaluated = []
@@ -269,6 +279,13 @@ def evaluate_candidates(
                 )
                 if ext == ".flac" else (None, None)
             )
+            quality = classify(
+                ext, effective_bitrate, file.bit_depth, file.is_variable_bit_rate,
+                _effective_mp3_kbps(size_bytes, length_sec),
+            )
+            if flac_note:
+                # Likely CD audio in a hi-res container: rank it as 16-bit.
+                quality = effective_quality(quality, "upsampled")
             entry: Candidate = {
                 "user": user,
                 "user_upload_speed": user_upload_speed,
@@ -283,6 +300,9 @@ def evaluate_candidates(
                 "length": length_sec,
                 "sample_rate": file.sample_rate,
                 "bit_depth": file.bit_depth,
+                "vbr": file.is_variable_bit_rate,
+                "quality": quality,
+                "quality_label": describe(quality, effective_bitrate),
                 "free_slot": result.has_free_upload_slot,
                 "queue_length": result.queue_length,
                 "title_coverage": None,
@@ -296,10 +316,20 @@ def evaluate_candidates(
 
             if is_blocked is not None and is_blocked(user, filename):
                 entry["reason"] = "blocklisted"
-            elif ext not in config.PREFERRED_FORMATS:
+            # Release terms see the full peer path (folders included).
+            elif ignored := config.first_term(config.IGNORED_TERMS, filename):
+                entry["reason"] = f"ignored term: {ignored}"
+            elif config.REQUIRED_TERMS and not config.first_term(config.REQUIRED_TERMS, filename):
+                entry["reason"] = (
+                    "missing required term (one of: "
+                    f"{', '.join(label for label, _ in config.REQUIRED_TERMS)})"
+                )
+            elif quality is None:
                 entry["reason"] = f"format not allowed: {ext or '(none)'}"
+            elif not config.QUALITY_PROFILE.allows(quality):
+                entry["reason"] = f"quality not allowed by profile: {entry['quality_label']}"
             elif lossless_only and ext not in config.LOSSLESS_EXTS:
-                entry["reason"] = "not lossless (replacing a suspect lossless file)"
+                entry["reason"] = "not lossless (replacing a lossless file)"
             # Reject MP3s whose reported/inferred bitrate is known-low.
             elif ext == ".mp3" and effective_bitrate is not None and effective_bitrate < 320:
                 entry["reason"] = f"bitrate {effective_bitrate} < 320"
@@ -338,8 +368,30 @@ def evaluate_candidates(
             entry["title_coverage"] = round(title_coverage, 2)
             if reason:
                 entry["reason"] = reason
+            elif (
+                max_version_tier is not None
+                and entry["version_tier"] < max_version_tier
+                and current_quality is not None
+                and config.QUALITY_PROFILE.rank(entry["quality"])
+                > config.QUALITY_PROFILE.rank(current_quality)
+            ):
+                entry["reason"] = (
+                    f"lower quality than the current file ({describe(current_quality)})"
+                )
             elif max_version_tier is not None and entry["version_tier"] >= max_version_tier:
-                entry["reason"] = "not a better version than the current file"
+                if not (
+                    better_quality_than is not None
+                    and entry["version_tier"] == max_version_tier
+                    and config.QUALITY_PROFILE.rank(entry["quality"])
+                    < config.QUALITY_PROFILE.rank(better_quality_than)
+                ):
+                    entry["reason"] = (
+                        "not a better version or quality than the current file"
+                        if better_quality_than is not None
+                        else "not a better version than the current file"
+                    )
+                else:
+                    entry["accepted"] = True
             else:
                 entry["accepted"] = True
             if entry["reason"]:
@@ -374,30 +426,46 @@ def summarize_evaluation(evaluated: list[Candidate], limit: int = 50) -> dict[st
     }
 
 
+_UNKNOWN_QUEUE = 1_000
+
+
+def _log_bucket(value) -> int:
+    """Factor-of-two bucket: 0, 1, 2-3, 4-7, ... -> 0, 1, 2, 3, ... so a
+    queue of 5 vs 6 (or 10.1 vs 10.4 MB/s) is a tie decided further down."""
+    return int(math.log2(value + 1)) if value and value > 0 else 0
+
+
+def _size_distance(c: Candidate) -> float:
+    """How far the file's bitrate is from its quality's preferred one;
+    unknown size or length sorts last within its bucket."""
+    q = BY_KEY.get(candidate_quality(c) or "")
+    if not q or not c.get("size") or not c.get("length"):
+        return float("inf")
+    return abs(c["size"] * 8 / c["length"] / 1000 - q.preferred_kbps)
+
+
 def sort_candidates(candidates: Iterable[Candidate]) -> list[Candidate]:
-    """
-    Sort by DJ-version tier (Extended Mix > Original Mix > other), then by
-    preferred extension, then demoted (likely-upsampled hi-res) last, then
-    bitrate desc (unknown last), then peer upload
-    speed desc.
-    """
-    def fmt_rank(ext: str) -> int:
-        return (
-            config.PREFERRED_FORMATS.index(ext)
-            if ext in config.PREFERRED_FORMATS
-            else len(config.PREFERRED_FORMATS)
-        )
+    """Best first. Lidarr's DownloadDecisionComparer, adapted:
 
-    def bitrate_rank(bps_k) -> int:
-        return bps_k or 0
-
+    1. version tier (Extended Mix > Original Mix > other) - the DJ
+       preference outranks quality;
+    2. quality: the index in the profile's allowed list;
+    3. Tier 3 demotion: a likely-upsampled hi-res file after its peers;
+    4. availability: a free upload slot first, then a shorter queue, then a
+       faster peer (queue and speed log2-bucketed so near-equal peers tie);
+    5. size closest to the quality's preferred bitrate.
+    """
+    profile = config.QUALITY_PROFILE
     return sorted(
         candidates,
         key=lambda c: (
             c.get("version_tier", 2),
-            fmt_rank(c["ext"]),
+            profile.rank(candidate_quality(c)),
             bool(c.get("note")),
-            -bitrate_rank(c.get("bitrate")),
-            -(c.get("user_upload_speed") or 0),
+            not c.get("free_slot"),
+            # Unknown queue: after every known one (a peer that didn't say).
+            _UNKNOWN_QUEUE if c.get("queue_length") is None else _log_bucket(c["queue_length"]),
+            -_log_bucket((c.get("user_upload_speed") or 0) / 1024),
+            _size_distance(c),
         ),
     )

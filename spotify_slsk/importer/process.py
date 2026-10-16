@@ -20,10 +20,12 @@ from ..db import (
     mark_upgrade_due,
     record_history,
     save_file_check,
+    set_track_quality,
     update_download_status,
 )
 from ..matching.candidates import _duration_off, filename_match
 from ..matching.normalize import version_mismatch, version_tier
+from ..matching.quality import quality_of_file
 from ..matching.tracks import find_closest_match, score_track_match
 from ..models import Candidate, Track
 from ..utils import fmt_duration
@@ -273,6 +275,7 @@ def process_downloaded_file(
 
     if final_path:
         update_download_status(conn, track_id, playlist_name, success=True, file_path=final_path)
+        set_track_quality(conn, playlist_name, track_id, quality_of_file(final_path))
         if not reconcile:
             record_history(
                 conn, "imported", table_name=playlist_name, track_id=track_id,

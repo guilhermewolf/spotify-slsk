@@ -4,7 +4,9 @@ from __future__ import annotations
 from flask import Blueprint, flash, g, redirect, render_template, request, url_for
 from flask.typing import ResponseReturnValue
 
-from .. import db
+from .. import config, db, runtime_state
+from ..importer.audio_check import SUSPECT
+from ..matching.quality import describe, effective_quality
 from .helpers import wake_daemon
 
 bp = Blueprint("wanted", __name__)
@@ -84,6 +86,78 @@ def wanted_search() -> ResponseReturnValue:
     else:
         flash("No tracks selected.", "error")
     return redirect(url_for("wanted.wanted_page"))
+
+
+# ---- cutoff unmet ---------------------------------------------------
+
+
+def _cutoff_unmet():
+    """Downloaded tracks (enabled playlists) whose effective quality is
+    below the profile cutoff, or whose lossless file is "suspect". Returns
+    (rows, unmeasured_count, profile)."""
+    profile = config.load_quality_profile(g.conn)
+    checks = {(c["table_name"], c["track_id"]): c for c in db.list_file_checks(g.conn)}
+    rows, unmeasured = [], 0
+    for pl in db.list_playlists(g.conn, only_enabled=True):
+        table = pl["table_name"]
+        for t in db.list_tracks(g.conn, table):
+            if not t["downloaded"]:
+                continue
+            check = checks.get((table, t["id"]))
+            verdict = check["audio_check"] if check and check["path"] == t["path"] else None
+            suspect = verdict == SUSPECT
+            if t["quality"] is None and not suspect:
+                unmeasured += 1
+                continue
+            effective = effective_quality(t["quality"], verdict)
+            if not suspect and not profile.below_cutoff(effective):
+                continue
+            t.update(
+                playlist_id=pl["playlist_id"], playlist_name=pl["name"], table_name=table,
+                quality_label=describe(t["quality"]), effective_label=describe(effective),
+                suspect=suspect,
+            )
+            rows.append(t)
+    return rows, unmeasured, profile
+
+
+@bp.route("/wanted/cutoff")
+def cutoff_page() -> ResponseReturnValue:
+    tracks, unmeasured, profile = _cutoff_unmet()
+    playlist_id = request.args.get("playlist") or None
+    shown = [t for t in tracks if not playlist_id or t["playlist_id"] == playlist_id]
+    return render_template(
+        "wanted_cutoff.html",
+        tracks=shown,
+        total=len(tracks),
+        unmeasured=unmeasured,
+        profile=profile,
+        cutoff_label=describe(profile.cutoff),
+        playlists=db.list_playlists(g.conn, only_enabled=True),
+        playlist_id=playlist_id,
+    )
+
+
+@bp.route("/wanted/cutoff/search", methods=["POST"])
+def cutoff_search() -> ResponseReturnValue:
+    """Queue upgrade checks for the daemon (it alone downloads and moves)."""
+    listed = {(t["playlist_id"], t["id"]): t["table_name"] for t in _cutoff_unmet()[0]}
+    if request.form.get("all") == "1":
+        targets = list(listed.items())
+    else:
+        targets = []
+        for value in request.form.getlist("tracks"):
+            pid, _, tid = value.partition(":")
+            if (pid, tid) in listed:
+                targets.append(((pid, tid), listed[(pid, tid)]))
+    for (_pid, tid), table_name in targets:
+        runtime_state.enqueue_upgrade_check(table_name, tid)
+    if targets:
+        wake_daemon()
+        flash(f"Queued {len(targets)} upgrade check(s). The daemon searches them now.", "success")
+    else:
+        flash("No tracks selected.", "error")
+    return redirect(url_for("wanted.cutoff_page"))
 
 
 # ---- history ------------------------------------------------------

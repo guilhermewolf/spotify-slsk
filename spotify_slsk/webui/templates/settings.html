@@ -18,8 +18,10 @@
    Keys are matched explicitly so a new setting must be placed deliberately. #}
 {% set groups = [
   ('Match quality', 'What counts as an acceptable file',
-   ['MIN_MATCH_SCORE', 'SLSKD_PREFERRED_FORMATS', 'SLSKD_MIN_EFFECTIVE_MP3_KBPS',
+   ['MIN_MATCH_SCORE', 'SLSKD_MIN_EFFECTIVE_MP3_KBPS',
     'SLSKD_MAX_DURATION_DIFF_SECONDS']),
+  ('Release terms', 'Words a peer path must or must not contain, checked before anything else',
+   ['REQUIRED_TERMS', 'IGNORED_TERMS']),
   ('Validation', 'Is the downloaded file really what it claims to be',
    ['LOSSLESS_CHECK_ENABLED', 'LOSSLESS_FAKE_CUTOFF_HZ', 'LOSSLESS_MIN_DROP_DB',
     'LIBRARY_SCAN_INTERVAL_HOURS']),
@@ -60,6 +62,68 @@
 
   <button type="submit" style="width:auto">Save settings</button>
 </form>
+
+<article id="quality">
+  <header>
+    <strong>Quality profile</strong>
+    <div class="subtle">Which qualities are acceptable, in order of preference (1 = best), and when to stop upgrading</div>
+  </header>
+  <p class="subtle">
+    Only ticked qualities are downloaded; their order is the ranking after the version tier
+    (Extended Mix &gt; Original Mix &gt; other). An MP3 whose bitrate is known and below 320 kbps is
+    always rejected, whatever is ticked here.
+  </p>
+  <form method="POST" action="{{ url_for('settings.save_quality_profile') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="table-wrap">
+      <table class="quality-table">
+        <thead>
+          <tr>
+            <th scope="col">Allowed</th>
+            <th scope="col">Quality</th>
+            <th scope="col" class="num">Order</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for q in quality_rows %}
+          {% set on = q.key in profile.allowed %}
+          <tr>
+            <td>
+              <input type="checkbox" id="allow_{{ q.key }}" name="allowed" value="{{ q.key }}"
+                     {% if on %}checked{% endif %}>
+            </td>
+            <td>
+              <label for="allow_{{ q.key }}">{{ q.label }}</label>
+              {% if q.key in floor_blocked %}<div class="subtle">always rejected by the 320 kbps floor</div>{% endif %}
+            </td>
+            <td class="num">
+              <input type="number" name="order_{{ q.key }}" min="1" step="1" class="order-input"
+                     aria-label="Order of {{ q.label }}"
+                     value="{{ profile.allowed.index(q.key) + 1 if on else '' }}">
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <label for="cutoff">Cutoff — files at or above this quality are not upgraded for quality</label>
+    <select id="cutoff" name="cutoff">
+      {% for q in quality_rows %}
+      <option value="{{ q.key }}" {% if q.key == profile.cutoff %}selected{% endif %}>{{ q.label }}</option>
+      {% endfor %}
+    </select>
+    <label>
+      <input type="checkbox" name="upgrades_allowed" value="1" {% if profile.upgrades_allowed %}checked{% endif %}>
+      Upgrade files below the cutoff to a better quality of the same version
+    </label>
+    <p class="subtle">
+      Off by default, so turning it on is a deliberate choice: check
+      <a href="{{ url_for('wanted.cutoff_page') }}">Wanted → Cutoff unmet</a> first to see what would be
+      re-downloaded. Replaced files are moved to <code>.quarantine/&lt;playlist&gt;/replaced/</code>.
+    </p>
+    <button type="submit" style="width:auto">Save quality profile</button>
+  </form>
+</article>
 
 <article>
   <header>

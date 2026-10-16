@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% set active_page = 'wanted' %}
+{% set wanted_tab = 'missing' %}
 {% block title %}Wanted · spotify-slsk{% endblock %}
 {% block content %}
 
@@ -20,6 +21,8 @@
   </form>
   {% endif %}
 </div>
+
+{% include "_wanted_tabs.html" %}
 
 <form class="filter-form" method="GET" role="search" action="{{ url_for('wanted.wanted_page') }}">
   <select name="playlist" aria-label="Playlist">

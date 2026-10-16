@@ -413,7 +413,7 @@ class TestSchemaMigrations:
         raw.close()
 
         conn = db.create_connection(path)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6 == db.SCHEMA_VERSION
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
         track = db.get_track(conn, "pl_v5", "t1")
         assert track["isrc"] is None
         assert (track["downloaded"], track["path"], track["duration_ms"]) == (True, "/p/s.flac", 200000)
@@ -422,6 +422,54 @@ class TestSchemaMigrations:
         db.save_file_check(conn, "pl_v5", "t1", path="/p/s.flac", size=1, mtime=2.0,
                            rules_version=1, audio_check="ok")
         assert db.get_file_check(conn, "pl_v5", "t1")["audio_check"] == "ok"
+        conn.close()
+
+    def test_v6_db_upgrades_to_v7(self, tmp_path):
+        """A real v6 DB: per-playlist table with isrc but no quality column,
+        file_checks present. v7 adds `quality` without forcing a resync."""
+        path = str(tmp_path / "v6.db")
+        raw = sqlite3.connect(path)
+        raw.execute(
+            "CREATE TABLE playlists_meta (playlist_id TEXT PRIMARY KEY, "
+            "table_name TEXT NOT NULL, name TEXT NOT NULL, snapshot_id TEXT, "
+            "last_synced TIMESTAMP, enabled INTEGER NOT NULL DEFAULT 1, "
+            "added_at TIMESTAMP)"
+        )
+        raw.execute("INSERT INTO playlists_meta VALUES ('pid','pl_v6','V6','snap',NULL,1,NULL)")
+        raw.execute(
+            'CREATE TABLE "pl_v6" (id TEXT PRIMARY KEY, name TEXT NOT NULL, '
+            "artists TEXT NOT NULL, album TEXT NOT NULL, downloaded INTEGER DEFAULT 0, "
+            "path TEXT, attempts INTEGER DEFAULT 0, last_attempt TIMESTAMP, "
+            "suspended_until TIMESTAMP, last_upgrade_check TIMESTAMP, "
+            "tried_files TEXT DEFAULT '', duration_ms INTEGER, isrc TEXT)"
+        )
+        raw.execute(
+            "INSERT INTO pl_v6 (id, name, artists, album, downloaded, path, duration_ms, isrc) "
+            "VALUES ('t1','S','A','Alb',1,'/p/s.flac',200000,'GBAYE0601498')"
+        )
+        raw.execute(
+            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMP)"
+        )
+        raw.execute("INSERT INTO settings VALUES ('SLSKD_PREFERRED_FORMATS','flac',NULL)")
+        raw.execute("PRAGMA user_version = 6")
+        raw.commit()
+        raw.close()
+
+        conn = db.create_connection(path)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7 == db.SCHEMA_VERSION
+        track = db.get_track(conn, "pl_v6", "t1")
+        assert track["quality"] is None  # backfilled lazily from the file
+        assert (track["path"], track["isrc"]) == ("/p/s.flac", "GBAYE0601498")
+        # No resync: quality comes from the file, not Spotify.
+        assert db.get_playlist_meta(conn, "pid")[0] == "snap"
+        assert db.tracks_missing_quality(conn, "pl_v6", 10) == [("t1", "/p/s.flac")]
+        db.set_track_quality(conn, "pl_v6", "t1", "FLAC_16")
+        assert db.get_track(conn, "pl_v6", "t1")["quality"] == "FLAC_16"
+        # A new file at that row resets it.
+        db.update_download_status(conn, "t1", "pl_v6", success=True, file_path="/p/n.flac")
+        assert db.get_track(conn, "pl_v6", "t1")["quality"] is None
+        db.set_track_quality(conn, "pl_v6", "t1", None)  # unreadable: '' = don't retry
+        assert db.tracks_missing_quality(conn, "pl_v6", 10) == []
         conn.close()
 
     def test_existing_rows_survive_reopening(self, tmp_path):
@@ -557,7 +605,7 @@ class TestHistory:
         conn = db.create_connection(str(tmp_path / "h.db"))
         monkeypatch.setenv("HISTORY_RETENTION_DAYS", "0")
         # reload() rebinds every tunable; snapshot them so they are restored.
-        for name in ("HISTORY_RETENTION_DAYS", "MIN_MATCH_SCORE", "PREFERRED_FORMATS",
+        for name in ("HISTORY_RETENTION_DAYS", "MIN_MATCH_SCORE", "QUALITY_PROFILE",
                      "MIN_PEER_UPLOAD_SPEED", "MIN_EFFECTIVE_MP3_KBPS",
                      "EARLY_STOP_RESPONSES", "EXTERNAL_PROCESS_WAIT_TIMEOUT",
                      "MAX_DURATION_DIFF_SECONDS"):

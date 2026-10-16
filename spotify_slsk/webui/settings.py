@@ -7,8 +7,9 @@ import requests
 from flask import Blueprint, flash, g, redirect, render_template, request, url_for
 from flask.typing import ResponseReturnValue
 
-from .. import db
+from .. import config, db
 from ..config import SETTINGS_SPEC, validate_setting
+from ..matching.quality import FLOOR_BLOCKED, LADDER, LADDER_INDEX, make_profile
 from .helpers import wake_daemon
 
 bp = Blueprint("settings", __name__)
@@ -61,12 +62,49 @@ def settings() -> ResponseReturnValue:
         key: db.get_setting(g.conn, key, default=default)
         for key, default, _help, _kind in SETTINGS_SPEC
     }
+    profile = config.load_quality_profile(g.conn)
+    # Allowed qualities in profile order, then the rest in ladder order.
+    quality_rows = sorted(LADDER, key=lambda q: profile.rank(q.key))
     return render_template(
         "settings.html",
         spec=SETTINGS_SPEC,
         overrides=overrides,
         effective=effective,
+        profile=profile,
+        quality_rows=quality_rows,
+        floor_blocked=FLOOR_BLOCKED,
     )
+
+
+# ---- quality profile ----------------------------------------------
+
+@bp.route("/settings/quality", methods=["POST"])
+def save_quality_profile() -> ResponseReturnValue:
+    """Plain form controls, no JS: a checkbox per quality, a numeric order
+    field (ties keep ladder order), a cutoff select and an upgrades box.
+    Validated as a whole (make_profile) before anything is written."""
+    allowed = request.form.getlist("allowed")
+    order: dict[str, int] = {}
+    for key in allowed:
+        raw = (request.form.get(f"order_{key}") or "").strip()
+        try:
+            order[key] = int(raw) if raw else 1000
+        except ValueError:
+            flash(f"Quality profile: the order of {key} must be a whole number", "error")
+            return redirect(url_for("settings.settings") + "#quality")
+    ordered = sorted(allowed, key=lambda k: (order.get(k, 1000), LADDER_INDEX.get(k, 99)))
+    profile, error = make_profile(
+        ordered,
+        request.form.get("cutoff") or "",
+        request.form.get("upgrades_allowed") == "1",
+    )
+    if profile is None:
+        flash(f"Quality profile: {error}", "error")
+        return redirect(url_for("settings.settings") + "#quality")
+    db.set_setting(g.conn, config.QUALITY_PROFILE_KEY, profile.to_json())
+    wake_daemon()
+    flash("Quality profile saved. Takes effect on the next cycle.", "success")
+    return redirect(url_for("settings.settings") + "#quality")
 
 
 # ---- ntfy probe ---------------------------------------------------

@@ -26,6 +26,7 @@ import requests
 from spotify_slsk import config, db
 from spotify_slsk.library import acquire
 from spotify_slsk.matching.candidates import evaluate_candidates
+from spotify_slsk.matching.quality import profile_from_formats
 from spotify_slsk.models import Track
 from spotify_slsk.slskd import client as slskd_client
 from spotify_slsk.slskd import search as slskd_search
@@ -69,7 +70,10 @@ ERRORS = {
 @pytest.fixture(autouse=True)
 def _default_tunables(monkeypatch):
     """The expectations below assume the shipped defaults."""
-    monkeypatch.setattr(config, "PREFERRED_FORMATS", [".flac", ".mp3", ".aiff", ".wav"])
+    monkeypatch.setattr(
+        config, "QUALITY_PROFILE",
+        profile_from_formats([".flac", ".mp3", ".aiff", ".wav"]),
+    )
     monkeypatch.setattr(config, "MIN_EFFECTIVE_MP3_KBPS", 280)
     monkeypatch.setattr(config, "MAX_DURATION_DIFF_SECONDS", 15)
     monkeypatch.setattr(config, "EARLY_STOP_RESPONSES", 20)

@@ -128,14 +128,14 @@ class TestSettings:
     def test_save_and_read_back(self, client):
         r = post(client,
             "/settings",
-            data={"MIN_MATCH_SCORE": "0.75", "SLSKD_PREFERRED_FORMATS": "flac"},
+            data={"MIN_MATCH_SCORE": "0.75", "SLSKD_WAIT_TIMEOUT": "45"},
             follow_redirects=True,
         )
         assert r.status_code == 200
 
         r = client.get("/settings")
         assert b'value="0.75"' in r.data
-        assert b'value="flac"' in r.data
+        assert b'value="45"' in r.data
 
     def test_blank_field_deletes_override(self, app_tmp, client):
         # set, then clear
@@ -412,18 +412,10 @@ class TestSettingsValidation:
         assert db.list_settings(conn).get("LOSSLESS_CHECK_ENABLED") == "0"
         conn.close()
 
-    def test_unknown_audio_format_is_rejected(self, client):
-        r = post(client, "/settings", data={"SLSKD_PREFERRED_FORMATS": "flac,exe"},
+    def test_bad_term_regex_is_rejected(self, client):
+        r = post(client, "/settings", data={"IGNORED_TERMS": "karaoke, /(oops/"},
                  follow_redirects=True)
-        assert b"unsupported format" in r.data
-
-    def test_formats_are_normalised(self, app_tmp, client):
-        post(client, "/settings",
-             data={"SLSKD_PREFERRED_FORMATS": " .FLAC , MP3 "},
-             follow_redirects=True)
-        conn = db.create_connection(app_tmp.config["DB_PATH"])
-        assert db.list_settings(conn)["SLSKD_PREFERRED_FORMATS"] == "flac,mp3"
-        conn.close()
+        assert b"IGNORED_TERMS: invalid regex /(oops/" in r.data
 
     def test_one_bad_field_does_not_half_apply_the_form(self, app_tmp, client):
         r = post(client, "/settings",
@@ -749,6 +741,16 @@ class TestInteractiveSearchUI:
         assert r.data.count(b'class="actions-col"') == 3
         assert b"Artist - Song.flac" in client.get("/track/pid1/t1").data
 
+    def test_quality_and_profile_reason_are_shown(self, app_tmp, client, monkeypatch):
+        bad = dict(self.CAND_BAD, ext=".mp3", quality="MP3_LOW", quality_label="MP3 256",
+                   reason="quality not allowed by profile: MP3 256")
+        monkeypatch.setattr(type(self), "CAND_BAD", bad)
+        monkeypatch.setattr(type(self), "CAND_OK", dict(self.CAND_OK, quality_label="FLAC 16-bit"))
+        self._search(app_tmp, client, monkeypatch)
+        page = client.get("/track/pid1/t1/search").data
+        assert b"<strong>FLAC 16-bit</strong>" in page
+        assert b"quality not allowed by profile: MP3 256" in page
+
     def test_plausibility_note_is_shown_for_accepted_results(self, app_tmp, client, monkeypatch):
         note = "likely upsampled: 900 kbps for 24-bit/96 kHz (< 1200); ranked lower"
         monkeypatch.setattr(type(self), "CAND_OK", dict(self.CAND_OK, note=note))
@@ -867,6 +869,8 @@ def test_url_map_is_unchanged_by_the_blueprint_split(app_tmp):
         ("/track/<playlist_id>/<track_id>/retag", "POST"),
         ("/wanted", "GET"),
         ("/wanted/search", "POST"),
+        ("/wanted/cutoff", "GET"),
+        ("/wanted/cutoff/search", "POST"),
         ("/history", "GET"),
         ("/blocklist", "GET"),
         ("/blocklist/<int:entry_id>/delete", "POST"),
@@ -878,6 +882,7 @@ def test_url_map_is_unchanged_by_the_blueprint_split(app_tmp):
         ("/settings", "GET"),
         ("/settings", "POST"),
         ("/settings/test-ntfy", "POST"),
+        ("/settings/quality", "POST"),
         ("/file", "GET"),
         ("/logs", "GET"),
         ("/logs.json", "GET"),
@@ -971,3 +976,126 @@ class TestLibraryHealthPage:
         self._seed(app_tmp, tmp_path)
         r = client.get("/track/pid1/t1")
         assert b"Lossless check" in r.data and b"16.2 kHz" in r.data
+
+
+class TestCutoffUnmet:
+    def _seed(self, app_tmp, upgrades=True):
+        from spotify_slsk.matching.quality import make_profile
+
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        db.set_setting(conn, "QUALITY_PROFILE",
+                       make_profile(["FLAC_24", "FLAC_16"], "FLAC_24", upgrades)[0].to_json())
+        db.upsert_playlist_meta(conn, "pid1", "pl_x", "Mix", "s")
+        db.create_table(conn, "pl_x")
+        rows = [("low", "Low Song", "FLAC_16"), ("top", "Top Song", "FLAC_24"),
+                ("sus", "Suspect Song", "FLAC_24"), ("new", "Unread Song", None),
+                ("missing", "Missing Song", "skip")]
+        for tid, name, quality in rows:
+            db.insert_track(conn, "pl_x", (tid, name, "Artist", "Album"))
+            if quality == "skip":
+                continue
+            db.update_download_status(conn, tid, "pl_x", success=True, file_path=f"/m/{tid}.flac")
+            if quality:
+                db.set_track_quality(conn, "pl_x", tid, quality)
+        db.save_file_check(conn, "pl_x", "sus", path="/m/sus.flac", size=1, mtime=1.0,
+                           rules_version=0, audio_check="suspect")
+        conn.close()
+
+    def test_lists_below_cutoff_and_suspect_only(self, app_tmp, client):
+        self._seed(app_tmp)
+        page = client.get("/wanted/cutoff").data
+        assert b"Low Song" in page and b"Suspect Song" in page
+        assert b"Top Song" not in page and b"Missing Song" not in page
+        assert b"Unread Song" not in page
+        assert b"1 downloaded track have no recorded quality yet" in page
+        assert b"counts as MP3 320" in page  # the suspect FLAC's effective quality
+        assert b"Quality upgrades are off" not in page
+
+    def test_warns_when_quality_upgrades_are_off(self, app_tmp, client):
+        self._seed(app_tmp, upgrades=False)
+        assert b"Quality upgrades are off" in client.get("/wanted/cutoff").data
+
+    def test_search_selected_queues_for_the_daemon(self, app_tmp, client, monkeypatch):
+        from spotify_slsk import runtime_state
+
+        self._seed(app_tmp)
+        runtime_state.pop_upgrade_checks()
+        woke = []
+        monkeypatch.setitem(app_tmp.config, "WAKE_DAEMON", lambda: woke.append(1))
+        r = post(client, "/wanted/cutoff/search",
+                 data={"tracks": ["pid1:low", "pid1:top", "pid1:nope"]})
+        assert r.status_code == 302
+        # Only listed tracks are queued: "top" meets the cutoff.
+        assert runtime_state.pop_upgrade_checks() == [("pl_x", "low")]
+        assert woke == [1]
+
+    def test_search_all(self, app_tmp, client):
+        from spotify_slsk import runtime_state
+
+        self._seed(app_tmp)
+        runtime_state.pop_upgrade_checks()
+        post(client, "/wanted/cutoff/search", data={"all": "1"})
+        assert sorted(runtime_state.pop_upgrade_checks()) == [("pl_x", "low"), ("pl_x", "sus")]
+
+    def test_wanted_pages_link_each_other(self, app_tmp, client):
+        assert b'href="/wanted/cutoff"' in client.get("/wanted").data
+        assert b'href="/wanted"' in client.get("/wanted/cutoff").data
+
+
+class TestQualityProfileForm:
+    def _stored(self, app_tmp):
+        from spotify_slsk.matching.quality import parse_profile
+
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        raw = db.list_settings(conn).get("QUALITY_PROFILE")
+        conn.close()
+        return parse_profile(raw)[0] if raw else None
+
+    def test_renders_every_quality_with_plain_controls(self, client):
+        from spotify_slsk.matching.quality import LADDER
+
+        page = client.get("/settings").data
+        assert b'id="quality"' in page
+        for q in LADDER:
+            assert f'name="order_{q.key}"'.encode() in page
+            assert f'value="{q.key}"'.encode() in page
+        assert b"always rejected by the 320 kbps floor" in page
+        assert b"<script>" not in page and b"onclick" not in page
+
+    def test_save_orders_by_number_then_ladder(self, app_tmp, client):
+        r = post(client, "/settings/quality", data={
+            "allowed": ["FLAC_16", "FLAC_24", "MP3_320"],
+            "order_FLAC_16": "1", "order_FLAC_24": "2", "order_MP3_320": "2",
+            "order_WAV": "1",  # not ticked: ignored
+            "cutoff": "FLAC_16", "upgrades_allowed": "1",
+        })
+        assert r.status_code == 302 and r.location.endswith("#quality")
+        p = self._stored(app_tmp)
+        assert p.allowed == ("FLAC_16", "FLAC_24", "MP3_320")
+        assert p.cutoff == "FLAC_16" and p.upgrades_allowed is True
+        page = client.get("/settings").data
+        assert b'value="1"' in page  # FLAC_16 shows order 1
+
+    @pytest.mark.parametrize("data,message", [
+        ({"cutoff": "FLAC_16"}, b"allow at least one quality"),
+        ({"allowed": ["FLAC_16"], "cutoff": "MP3_320"}, b"cutoff must be one of the allowed"),
+        ({"allowed": ["FLAC_16", "EXE"], "cutoff": "FLAC_16"}, b"unknown quality: EXE"),
+        ({"allowed": ["FLAC_16"], "order_FLAC_16": "x", "cutoff": "FLAC_16"},
+         b"must be a whole number"),
+    ])
+    def test_invalid_profiles_are_rejected_and_nothing_is_written(
+        self, app_tmp, client, data, message
+    ):
+        r = post(client, "/settings/quality", data=data, follow_redirects=True)
+        assert message in r.data
+        assert self._stored(app_tmp) is None
+
+    def test_main_settings_form_never_clears_the_profile(self, app_tmp, client):
+        post(client, "/settings/quality",
+             data={"allowed": ["FLAC_16"], "cutoff": "FLAC_16"})
+        post(client, "/settings", data={"MIN_MATCH_SCORE": "0.7"})
+        assert self._stored(app_tmp).allowed == ("FLAC_16",)
+
+    def test_requires_csrf(self, client):
+        assert client.post("/settings/quality", data={"allowed": ["FLAC_16"],
+                                                       "cutoff": "FLAC_16"}).status_code == 400

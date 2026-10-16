@@ -293,3 +293,29 @@ def test_missing_slskd_api_key_does_not_crash_the_wait(monkeypatch):
 
     monkeypatch.setattr(slskd_client, "get_client", _no_key)
     assert slskd_client.wait_for_slskd_healthy("h", None, timeout=0.05, check_interval=0.01) is False
+
+
+def test_requested_upgrade_checks_bypass_the_interval(tmp_path, monkeypatch):
+    from spotify_slsk import daemon, db, runtime_state
+
+    conn = db.create_connection(str(tmp_path / "u.db"))
+    db.set_setting(conn, "UPGRADE_CHECK_INTERVAL_HOURS", "0")  # pass disabled
+    db.create_table(conn, "pl_x")
+    db.insert_track(conn, "pl_x", ("t1", "Song", "Artist", "Alb"))
+    db.insert_track(conn, "pl_x", ("t2", "Other", "Artist", "Alb"))
+    db.update_download_status(conn, "t1", "pl_x", success=True, file_path="/m/t1.flac")
+    seen = []
+    monkeypatch.setattr(
+        daemon, "try_upgrade_track",
+        lambda track, table, c, path: seen.append((track.id, table, path)),
+    )
+    runtime_state.pop_upgrade_checks()
+    runtime_state.enqueue_upgrade_check("pl_x", "t1")
+    runtime_state.enqueue_upgrade_check("pl_x", "t1")  # de-duplicated
+    runtime_state.enqueue_upgrade_check("pl_x", "t2")  # not downloaded: skipped
+    daemon._process_upgrade_requests(conn)
+    assert seen == [("t1", "pl_x", "/m/t1.flac")]
+    stamped = conn.execute("SELECT last_upgrade_check FROM pl_x WHERE id = 't1'").fetchone()[0]
+    assert stamped is not None
+    assert runtime_state.pop_upgrade_checks() == []
+    conn.close()
