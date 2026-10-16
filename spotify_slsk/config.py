@@ -67,8 +67,22 @@ def parse_terms(value: str | None) -> tuple[Terms | None, str | None]:
 
 
 def first_term(terms: Terms, text: str) -> str | None:
-    """Label of the first term found in `text`, or None."""
-    return next((label for label, pattern in terms if pattern.search(text)), None)
+    """Label of the first term found in a peer path, or None. Matched
+    against the path with `\\` normalised to `/` (so "Artist/Album" works on
+    slskd's backslash paths); a /regex/ also sees the raw path."""
+    normalised = text.replace("\\", "/")
+    for label, pattern in terms:
+        if pattern.search(normalised) or (label.startswith("/") and pattern.search(text)):
+            return label
+    return None
+
+
+def _env_terms(key: str) -> Terms:
+    terms, error = parse_terms(os.getenv(key, ""))
+    if terms is None:
+        logging.error(f"Invalid {key} in the environment ({error}); ignoring it")
+        return []
+    return terms
 
 
 def normalize_ext_list(env_val: str) -> list[str]:
@@ -128,8 +142,8 @@ LOSSLESS_FAKE_CUTOFF_HZ = int(os.getenv("LOSSLESS_FAKE_CUTOFF_HZ", "19500"))
 LOSSLESS_MIN_DROP_DB = int(os.getenv("LOSSLESS_MIN_DROP_DB", "15"))
 # Release terms (matching.candidates), applied to the full peer path before
 # any scoring. Empty = no filtering.
-REQUIRED_TERMS: Terms = parse_terms(os.getenv("REQUIRED_TERMS", ""))[0] or []
-IGNORED_TERMS: Terms = parse_terms(os.getenv("IGNORED_TERMS", ""))[0] or []
+REQUIRED_TERMS: Terms = _env_terms("REQUIRED_TERMS")
+IGNORED_TERMS: Terms = _env_terms("IGNORED_TERMS")
 # Re-run the library health scan this often; 0 = only from the UI button.
 LIBRARY_SCAN_INTERVAL_HOURS = int(os.getenv("LIBRARY_SCAN_INTERVAL_HOURS", "0"))
 

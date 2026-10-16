@@ -478,3 +478,25 @@ def test_make_profile_never_raises_on_odd_types():
     for allowed, cutoff in ([["x"]], "x"), ([{}], "x"), (["FLAC_16"], ["FLAC_16"]), ("FLAC_16", "FLAC_16"):
         p, err = q.make_profile(allowed, cutoff, False)
         assert p is None and err
+
+
+class TestTermPaths:
+    def test_plain_term_with_a_slash_matches_backslash_paths(self):
+        from spotify_slsk.config import first_term, parse_terms
+
+        terms = parse_terms("karaoke hits/")[0]
+        assert first_term(terms, "Music\\Karaoke Hits\\Eminem - Lose Yourself.flac") == "karaoke hits/"
+
+    def test_regex_sees_both_forms(self):
+        from spotify_slsk.config import first_term, parse_terms
+
+        path = "Music\\Bootlegs\\Song.flac"
+        assert first_term(parse_terms("/bootlegs\\/song/")[0], path)  # normalised
+        assert first_term(parse_terms("/bootlegs\\\\song/")[0], path)  # raw backslash
+
+    def test_invalid_env_regex_is_logged(self, monkeypatch, caplog):
+        from spotify_slsk import config
+
+        monkeypatch.setenv("IGNORED_TERMS", "karaoke, /(oops/")
+        assert config._env_terms("IGNORED_TERMS") == []
+        assert "Invalid IGNORED_TERMS in the environment" in caplog.text

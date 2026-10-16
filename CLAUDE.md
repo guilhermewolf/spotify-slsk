@@ -422,7 +422,8 @@ threaded through the download call chain. The real per-track cap is
   header reads per cycle). **Terms** apply to the full peer path right after
   the blocklist: plain terms are case-insensitive substrings (Lidarr parity:
   `live` matches `Oliver`), `/regex/` a case-insensitive search; commas inside
-  a regex are kept.
+  a regex are kept. Paths are matched with `\` normalised to `/` (a regex
+  also sees the raw path); an invalid regex in the env logs an error at import.
 - **Image.** The Dockerfile `apk add`s `flac` and strips numpy's bundled test
   suite; numpy (+ its OpenBLAS) is most of the ~76 MB the image grew in Tier 3.
 - **Schema version is 7.** v7 adds `quality` to every catalogued per-playlist
