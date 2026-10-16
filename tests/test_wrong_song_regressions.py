@@ -273,6 +273,13 @@ RIGHT_ARTIST_TAGS = [
     ("Song", "Artist1 vs. Artist2", "Song", "Artist2"),
     ("Song", "Artist1 with Artist2", "Song", "Artist2"),
     ("Song", "Format B", "Song", "Format:B"),
+    # Production library scan: tag-site disambiguators on the file's artist.
+    ("Talk To Me (Extended Mix)", "HILLS (US)", "Talk To Me", "HILLS"),
+    ("Some Title", "Ajna (BE), Samm (BE)", "Some Title", "Ajna, Samm"),
+    ("Warlord [Soul Mass Transit System Remix]", "Dominus (UK)",
+     "Warlord - Soul Mass Transit System Remix",
+     "Daffy, Dominus, Riko Dan, Soul Mass Transit System"),
+    ("Song", "Dominus [2]", "Song", "Dominus"),
 ]
 
 
@@ -292,3 +299,11 @@ class TestArtistSplitting:
         assert _split_artists("AC/DC") == {"ac dc"}
         assert _split_artists("Lil Nas X") == {"lil nas x"}
         assert _split_artists("Daft Punk") == {"daft punk"}
+
+    def test_disambiguator_is_not_a_free_overlap(self):
+        # Stripping "(US)" must not let two different artists overlap.
+        score, _ = score_track_match("Talk To Me", "Other (US)", "Talk To Me", "HILLS")
+        assert score == 0.0
+
+    def test_filename_with_disambiguated_artist(self):
+        assert filename_match("HILLS (US) - Talk To Me.flac", "Talk To Me", "HILLS")[1] is None

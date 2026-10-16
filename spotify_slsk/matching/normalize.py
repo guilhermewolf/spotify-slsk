@@ -54,10 +54,18 @@ def expected_title_tokens(title: str | None) -> set[str]:
     return core or {t for t in folded if not t.isdigit()} or set(folded)
 
 
+# Disambiguators that tag sites and Discogs append to an artist name:
+# "HILLS (US)", "Ajna [BE]", "Dominus (2)". Only 2-3 letters or a small
+# number, so real bracketed credits ("(feat. X)", "(VIP)") are untouched.
+ARTIST_DISAMBIGUATOR_RE = re.compile(r"\s*[\(\[](?:[^\W\d_]{2,3}|\d{1,2})[\)\]]")
+
+
 def credited_names(artist_str: str | None) -> list[str]:
-    """The full credit plus each credited artist, folded, "The " dropped."""
+    """The full credit plus each credited artist, folded, "The " dropped
+    along with any "(US)"-style disambiguator."""
+    artist_str = ARTIST_DISAMBIGUATOR_RE.sub("", artist_str or "")
     names = []
-    for part in [artist_str or ""] + ARTIST_SPLIT_RE.split(artist_str or ""):
+    for part in [artist_str] + ARTIST_SPLIT_RE.split(artist_str):
         name = fold(part)
         if name.startswith("the "):
             name = name[4:]
