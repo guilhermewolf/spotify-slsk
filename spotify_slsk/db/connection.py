@@ -236,6 +236,18 @@ def _ensure_file_checks_table(conn: sqlite3.Connection) -> None:
         logging.error(f"Error ensuring file_checks: {e}")
 
 
+def _ensure_recycle_bin_table(conn: sqlite3.Connection) -> None:
+    """Retirement time per recycle-bin file (schema v8, db.recycle)."""
+    try:
+        with conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS recycle_bin ("
+                "path TEXT PRIMARY KEY, retired_at REAL NOT NULL)"
+            )
+    except sqlite3.Error as e:
+        logging.error(f"Error ensuring recycle_bin: {e}")
+
+
 def create_connection(db_file: str) -> sqlite3.Connection | None:
     try:
         conn = sqlite3.connect(db_file, timeout=30)
@@ -246,6 +258,7 @@ def create_connection(db_file: str) -> sqlite3.Connection | None:
         _ensure_blocklist_table(conn)
         _ensure_history_table(conn)
         _ensure_file_checks_table(conn)
+        _ensure_recycle_bin_table(conn)
         _ensure_schema_version(conn)
 
         # sqlite3.connect() succeeds on a corrupt or non-SQLite file — the

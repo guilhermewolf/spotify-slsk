@@ -303,13 +303,15 @@ unnormalised.
     lands on the track, the previous file moves to
     `<playlists_root>/.quarantine/<table>/replaced/` (collision-safe) and
     history records `replaced_file` (`library.health.retire_replaced_file`).
-    A file outside the playlists root is left in place. The moved file's mtime
-    is set to now (Lidarr's recycle bin does the same).
+    A file outside the playlists root is left in place. The retirement time
+    goes to the `recycle_bin` table (`db.recycle`), not the file's mtime.
 12. **Recycle bin vs quarantine.** `.quarantine/<table>/replaced/` is the
     recycle bin: with `RECYCLE_BIN_RETENTION_DAYS` > 0, `daemon._run_housekeeping`
-    (at most daily, `_recycle_bin_purged_at`) deletes files there older than N
-    days (`health.purge_recycle_bin`, history `recycle_purged`, symlinks not
-    followed). Files the operator quarantined (`.quarantine/<table>/` itself)
+    (at most daily, `_recycle_bin_purged_at`) deletes files there retired more
+    than N days ago (`health.purge_recycle_bin`, history `recycle_purged`,
+    symlinks not followed). Retention is read from `recycle_bin.retired_at`,
+    never mtime: a file with no record is registered as retired on first
+    sight, so a failed record can only delay a purge, never hasten it. Files the operator quarantined (`.quarantine/<table>/` itself)
     are **never** purged automatically. Default 0 keeps everything.
 13. **Naming.** `FILE_NAME_TEMPLATE` names *newly imported* files only
     (`process_downloaded_file`, `link_existing_copy`); existing files change

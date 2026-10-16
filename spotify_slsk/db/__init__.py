@@ -43,6 +43,11 @@ from .playlists import (
     set_playlist_enabled,
     upsert_playlist_meta,
 )
+from .recycle import (
+    forget_retired,
+    record_retired,
+    retired_times,
+)
 from .settings import (
     delete_setting,
     get_setting,
@@ -76,6 +81,9 @@ from .tracks import (
 )
 
 __all__ = [
+    "forget_retired",
+    "record_retired",
+    "retired_times",
     "set_track_path",
     "set_track_quality",
     "tracks_missing_quality",

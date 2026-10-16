@@ -31,6 +31,8 @@ def setup(tmp_path, sandbox_dirs):
         f.write_bytes(b"x")
         age = 1 * DAY if key == "new_replaced" else 40 * DAY
         os.utime(f, (now - age, now - age))
+        # Retirement time as retire_replaced_file records it.
+        db.record_retired(conn, str(f), now - age)
     yield conn, files, playlists
     conn.close()
 
@@ -68,11 +70,31 @@ class TestPurge:
         conn, _, playlists = setup
         f = playlists / "pl_a" / "ancient.flac"
         f.write_bytes(b"x")
-        os.utime(f, (0, 0))  # downloaded long ago
+        os.utime(f, (0, 0))  # downloaded long ago; mtime survives the move
         dest = health.retire_replaced_file(conn, "pl_a", "t1", str(f), "replaced by upgrade")
-        assert dest and time.time() - os.path.getmtime(dest) < 60
+        assert dest and os.path.getmtime(dest) == 0
         health.purge_recycle_bin(conn, 30)
         assert os.path.exists(dest)
+        health.purge_recycle_bin(conn, 30, now=time.time() + 31 * DAY)
+        assert not os.path.exists(dest)
+
+    def test_unrecorded_file_is_never_purged_early(self, setup):
+        conn, _, playlists = setup
+        f = playlists / ".quarantine" / "pl_a" / "replaced" / "unrecorded.flac"
+        f.write_bytes(b"x")
+        os.utime(f, (0, 0))  # e.g. the DB record failed after the move
+        health.purge_recycle_bin(conn, 30)
+        assert f.exists()  # first sight: registered as retired now
+        health.purge_recycle_bin(conn, 30, now=time.time() + 29 * DAY)
+        assert f.exists()
+        health.purge_recycle_bin(conn, 30, now=time.time() + 31 * DAY)
+        assert not f.exists()
+
+    def test_records_of_vanished_files_are_pruned(self, setup):
+        conn, files, _ = setup
+        files["new_replaced"].unlink()
+        health.purge_recycle_bin(conn, 30)
+        assert str(files["new_replaced"]) not in db.retired_times(conn)
 
 
 class TestHousekeeping:
@@ -87,7 +109,7 @@ class TestHousekeeping:
         assert not files["old_replaced"].exists()
 
         files["old_replaced"].write_bytes(b"x")
-        os.utime(files["old_replaced"], (0, 0))
+        db.record_retired(conn, str(files["old_replaced"]), 0)
         daemon._run_housekeeping(conn)  # same day: not again
         assert files["old_replaced"].exists()
         db.set_setting(conn, health.RECYCLE_PURGED_KEY, str(time.time() - DAY - 1))
