@@ -21,11 +21,16 @@ dashboard for adding playlists, watching progress and retrying what failed.
 - **Duration-aware matching** — candidates whose length differs from Spotify's
   by more than `SLSKD_MAX_DURATION_DIFF_SECONDS` are skipped, and an untagged
   download is accepted only if its filename and real duration both match.
+- **Validation** — see [Validation](#validation): fake-lossless detection
+  (FLAC/WAV that is really a lossy transcode is rejected and its peer file
+  blocklisted), ISRC checks against Spotify, implausibly small FLACs skipped
+  before download, and a library health scan with quarantine & re-download.
 - **Retry and back-off** — a track that fails twice is suspended for two days
   rather than retried forever; rejected filenames are remembered so the same bad
   file isn't downloaded again.
 - **Blocklist** — peer files that slskd reports as failed/rejected, or that
-  turn out broken after download (no tags, unreadable, truncated), are skipped
+  turn out broken after download (no tags, unreadable, truncated, fake
+  lossless), are skipped
   for every track; whole users can be banned from the UI. A file that is merely
   the wrong song for one track is only skipped for that track.
 - **History** — every grab, import, failure, upgrade and retry is kept for
@@ -81,7 +86,61 @@ overrides the environment variable and changes apply on the next cycle:
 `MIN_MATCH_SCORE`, `SLSKD_PREFERRED_FORMATS`, `SLSKD_MIN_PEER_UPLOAD_SPEED`,
 `SLSKD_MIN_EFFECTIVE_MP3_KBPS`, `SLSKD_EARLY_STOP_RESPONSES`,
 `SLSKD_MAX_DURATION_DIFF_SECONDS`, `SLSKD_WAIT_TIMEOUT`,
-`HISTORY_RETENTION_DAYS`, `UPGRADE_CHECK_INTERVAL_HOURS`.
+`HISTORY_RETENTION_DAYS`, `UPGRADE_CHECK_INTERVAL_HOURS`,
+`LOSSLESS_CHECK_ENABLED`, `LOSSLESS_FAKE_CUTOFF_HZ`, `LOSSLESS_MIN_DROP_DB`,
+`LIBRARY_SCAN_INTERVAL_HOURS`.
+
+## Validation
+
+**Fake lossless.** Every FLAC/WAV download is spectrum-checked before it is
+tagged and moved (~0.2-2 s: three 10 s windows from the middle of the track,
+decoded with the `flac` CLI that ships in the image). A lossy encoder cuts the
+top of the spectrum with a steep lowpass (128 kbps MP3 ~16 kHz, 192 ~19 kHz,
+320 ~20 kHz), and transcoding to FLAC keeps the hole. Verdicts:
+
+| Verdict | Rule | Effect |
+|---|---|---|
+| `fake` | drop ≥ `LOSSLESS_MIN_DROP_DB` (15 dB) below `LOSSLESS_FAKE_CUTOFF_HZ` (19500 Hz) | rejected, deleted, peer file blocklisted |
+| `upsampled` | > 48 kHz file with a ≥ 20 dB drop at ≤ 26 kHz | rejected (a CD master resampled to "hi-res") |
+| `padded_16` | 24-bit file whose low 8 bits are always zero | rejected |
+| `suspect` | the drop sits between the cutoff and 20.5 kHz | **kept**, flagged, and retried by the upgrade pass for a lossless copy |
+| `ok` / `unknown` | no cliff / could not decode | kept (`unknown` never rejects) |
+
+Limits, measured on real and synthetic files: margins between real masters and
+transcodes are only ~3-5 dB, so the thresholds are settings. MP3-320 is
+indistinguishable from a brickwalled master and is only `suspect`; a
+high-bitrate AAC (≥ 256 kbps) transcode keeps content to ~20 kHz and is **not
+detectable** this way. Lower `LOSSLESS_MIN_DROP_DB` to catch more, at the risk
+of flagging dark-sounding masters. The suspect retry needs
+`UPGRADE_CHECK_INTERVAL_HOURS` > 0. The check also applies to manual grabs.
+
+Before downloading, a 16-bit FLAC whose size/length works out below 400 kbps
+is rejected, and a 24-bit ≥ 88.2 kHz FLAC below 1200 kbps is ranked last as
+"likely upsampled" (both visible in the interactive search table).
+
+**ISRC.** Spotify's ISRC is stored per track. On import, a file whose ISRC tag
+differs is rejected as the wrong song (for that track only); a matching ISRC
+overrides a low title/artist tag score (other script or spelling) but never a
+version mismatch. Imports write the ISRC into the file's tags. Re-releases can
+carry a different ISRC for the same song; check History for "ISRC mismatch" if
+a track keeps failing.
+
+**Library health.** The **Library health** page lists files already in the
+library that fail the current rules: wrong song (title/artist, version, ISRC),
+duration off, fake or suspect lossless, missing file — with the evidence
+(expected vs file tags, durations, cutoff). Press **Scan library** (or set
+`LIBRARY_SCAN_INTERVAL_HOURS`); the daemon checks up to 200 files / 120 s per
+cycle and only re-checks files that changed. For each finding:
+
+- **Quarantine & re-download** (per row or for the selected rows) moves the
+  file to `<playlists>/.quarantine/<playlist>/` — never deleted — puts the
+  track back to pending and skips that filename next time. The next cycle
+  downloads it again.
+- **Ignore** marks a false positive; it is not flagged again unless the file
+  changes.
+
+Quarantined files are never purged automatically. Listen, then delete them by
+hand, e.g. `find playlists/.quarantine -type f -mtime +30 -delete`.
 
 ## Upgrading slskd to 0.26
 

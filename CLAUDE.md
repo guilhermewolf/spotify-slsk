@@ -39,7 +39,9 @@ and CI all agree; the Makefile defaults to `python3.12`). Individual targets:
   findings rather than adding ignores.
 - `make typecheck` — mypy over `spotify_slsk/` (`ignore_missing_imports`,
   `check_untyped_defs`). Every public function is annotated; keep it that way.
-- `make test` — 558 tests. Fast (~3s); no network, no external services.
+- `make test` — 630 tests. Fast (~5s); no network, no external services. The
+  real-FLAC decode tests need the `flac` CLI (CI apt-installs it) and skip with
+  a reason without it.
 - `make audit` — `pip-audit` against the pinned `requirements.txt`. Advisories
   fail CI, so dependency CVEs surface on a PR rather than in production.
 - CI also builds the image and asserts it runs as uid 1000 and that no
@@ -93,9 +95,10 @@ spotify_slsk/
   slskd/               models.py (typed JSON), client.py, search.py, transfers.py
   matching/            normalize.py (shared), candidates.py (search phase),
                        tracks.py (local phase)
-  importer/            tags.py (read/write tags, audio length), process.py (verify,
-                       tag, move, reject/delete/blocklist)
-  library/             acquire.py (download + upgrade a track), reconcile.py (startup_check)
+  importer/            tags.py (read/write tags + ISRC, audio length), process.py (verify,
+                       tag, move, reject/delete/blocklist), audio_check.py (fake lossless)
+  library/             acquire.py (download + upgrade a track), reconcile.py (startup_check),
+                       health.py (library health scan + quarantine)
   webui/               app factory + blueprints (templates/, static/)
 tests/                 pytest suite (conftest.py enforces isolation)
   fixtures/slskd/      slskd payloads in the real wire shape
@@ -151,12 +154,12 @@ Docker `HEALTHCHECK` compares `HEARTBEAT_FILE` mtime against `HEARTBEAT_STALE_SE
 - **`slskd/search.py`** — query waterfall (multi-query + CJK passthrough), `_run_one_search` (server-side `responseLimit` early stop; the search is **always deleted in `finally`**), `search_and_download` (falls through on no *usable* candidates; records per-query search history), `download_and_verify`, and `interactive_search` (read-only, collect-everything, own client).
 - **`slskd/transfers.py`** — `grab_candidate`, the single enqueue/wait/verify step shared by auto and manual grabs (tried + history on any failure; blocklist only on definitive peer faults; a raised API error records nothing permanent), `wait_for_completion`, completion grace, `last_download`.
 - **`matching/`** — see "Matchers" under Gotchas. `normalize.py` (folding, artist splitting, version keywords/tiers — shared), `candidates.py` (`evaluate_candidates`: blocklist + format allowlist + fixed 320 floor for MP3s with a known bitrate + effective-bitrate floor + duration vs Spotify + the strict name rules in `filename_match`; returns every file with `accepted` and a human `reason`; `sort_candidates`: version tier > format > bitrate > peer upload speed), `tracks.py` (`score_track_match`, `_looks_like_match`, difflib helpers).
-- **`importer/`** — `tags.py`: `write_tags` (raises; used by the UI re-tag), `tag_audio_file` (never raises; daemon), `extract_metadata_from_file`, `audio_length_seconds`. `process.py`: `process_downloaded_file` (verify against the requested track, untagged filename+duration fallback, tag, move, record) and `_reject_and_log` (the only place a downloaded file is deleted).
-- **`library/`** — `acquire.py`: `handle_track_download`, `try_upgrade_track`. `reconcile.py`: `startup_check` and its local file index (non-destructive).
+- **`importer/`** — `tags.py`: `write_tags` (raises; used by the UI re-tag), `tag_audio_file` (never raises; daemon), `extract_metadata_from_file`, `audio_length_seconds`, `read_isrc`/`normalize_isrc`. `process.py`: `process_downloaded_file` (verify against the requested track, ISRC check, untagged filename+duration fallback, lossless check, tag, move, record verdict) and `_reject_and_log` (the only place a downloaded file is deleted). `audio_check.py`: the fake-lossless detector (see Validation below).
+- **`library/`** — `acquire.py`: `handle_track_download`, `try_upgrade_track` (also replaces a *suspect* lossless file with a lossless copy). `reconcile.py`: `startup_check` and its local file index (non-destructive). `health.py`: `verify_file`/`scan_step` (the report-only library health scan) and `quarantine_track` (daemon only).
 - **`notify.py`** — ntfy; silent when unconfigured.
-- **`db/`** — SQLite persistence, split by table family and re-exported from `db/__init__.py`. WAL mode + `busy_timeout=5000` + `PRAGMA user_version` migrations (`db/connection.py`). Per-playlist dynamic tables (`pl_<sanitized_name>` + `pl_<…>_tried`) plus a global `playlists_meta` catalogue keyed by Spotify id, a global `settings` key-value bag, a global `blocklist` (peer files, or whole peers when `filename` is NULL) and a global `history` event log. `get_setting(conn, key, default)` prefers DB, falls back to env, then default — so any env var becomes a mutable setting for free.
+- **`db/`** — SQLite persistence, split by table family and re-exported from `db/__init__.py`. WAL mode + `busy_timeout=5000` + `PRAGMA user_version` migrations (`db/connection.py`). Per-playlist dynamic tables (`pl_<sanitized_name>` + `pl_<…>_tried`) plus a global `playlists_meta` catalogue keyed by Spotify id, a global `settings` key-value bag, a global `blocklist` (peer files, or whole peers when `filename` is NULL), a global `history` event log and a global `file_checks` table (validation verdicts, `db/checks.py`). `get_setting(conn, key, default)` prefers DB, falls back to env, then default — so any env var becomes a mutable setting for free.
 - **`spotify_slsk/webui/`** — Flask dashboard (see next section).
-- **`spotify_slsk/runtime_state.py`** — in-process observability: thread-safe current-activity dict, a bounded log ring buffer (fed by a handler installed in `log_config`), per-track slskd search history (with accepted/rejected counts and reasons), interactive-search results keyed by (playlist_id, track_id) with a 10-minute TTL, and the manual-grab queue the UI fills and the daemon drains. All of it is per-process and resets on restart — deliberately not persisted.
+- **`spotify_slsk/runtime_state.py`** — in-process observability: thread-safe current-activity dict, a bounded log ring buffer (fed by a handler installed in `log_config`), per-track slskd search history (with accepted/rejected counts and reasons), interactive-search results keyed by (playlist_id, track_id) with a 10-minute TTL, the manual-grab and quarantine queues the UI fills and the daemon drains, and `touch_heartbeat()` (shared by the daemon and the importer). All of it is per-process and resets on restart — deliberately not persisted.
 - **`spotify_slsk/utils.py`** — `sanitize_table_name`, `get_playlist_id`, `fmt_duration`.
 - **`spotify_slsk/log_config.py`** — timezone-aware logging; `LIB_LOGLEVEL` (default WARNING) silences noisy third-party loggers independently of app `LOGLEVEL`.
 
@@ -174,6 +177,7 @@ cookie flags, CSRF guard, security headers/CSP, per-request DB connection, the
 header health badge) and registers one blueprint per area: `playlists`
 (dashboard, playlist page, playlist mutations), `tracks` (track page,
 retry/re-tag, interactive search/grab), `wanted` (wanted, history, blocklist),
+`health` (library health report, scan/quarantine/ignore),
 `settings` (settings, ntfy probe), `system` (file, logs, activity, healthz).
 Endpoints are blueprint-qualified — templates use `url_for('playlists.dashboard')`,
 not `url_for('dashboard')`. URLs are pinned by
@@ -187,6 +191,7 @@ Routes:
 - `GET /wanted` · `POST /wanted/search` — missing tracks across enabled playlists; bulk re-queue (selected, or `all=1` behind a `<details>` confirm)
 - `GET /history?event=&playlist=&before_id=` — persistent events, 200 per page
 - `GET /blocklist` · `POST /blocklist/<id>/delete` · `POST /blocklist/ban-user`
+- `GET /library-health?problem=&playlist=&ignored=` · `POST /library-health/scan` · `POST /library-health/quarantine` (`only=pid:tid` or checked `tracks`) · `POST /library-health/ignore[?undo=1]` — scan findings with evidence; scan and quarantine are queued for the daemon
 - `GET /settings` — grouped, validated tunables
 - `GET /logs` · `GET /logs.json?since=&limit=` · `GET /activity.json` — live log tail and current daemon phase
 - `GET /file?rel=` — serves a downloaded file for the in-browser audio preview; `rel` is resolved against the playlists root and re-checked with `commonpath` after symlink normalisation
@@ -197,7 +202,10 @@ Routes:
 search runs on a UI background thread with its own slskd client (not the
 daemon's shared session) and a blocklist snapshot, and never writes. A grab is
 queued in `runtime_state`; the daemon drains the queue at the top of each cycle
-and after each playlist (`daemon._process_manual_grabs`).
+and after each playlist (`daemon._process_manual_grabs`). Quarantine requests
+work the same way (`daemon._process_quarantines`, top of each cycle), and
+"Scan library" only sets the `_library_scan_pending` settings flag that
+`daemon._run_library_scan` reads after the playlists.
 
 **Two constraints any new UI code must respect:**
 1. **Every POST needs `csrf_token()` in its form** — the app-level `before_request` guard (it covers every blueprint) rejects tokenless requests with 400.
@@ -237,7 +245,7 @@ unnormalised.
 
 ### State machine per track
 
-`downloaded`, `attempts`, `suspended_until`, `path`, `last_upgrade_check`, `duration_ms` (Spotify, v5).
+`downloaded`, `attempts`, `suspended_until`, `path`, `last_upgrade_check`, `duration_ms` (Spotify, v5), `isrc` (Spotify, v6).
 
 1. New Spotify track → row inserted with `downloaded=0`.
 2. `startup_check` (one-shot) matches against files already on disk.
@@ -250,10 +258,11 @@ unnormalised.
    global `blocklist` (which survives retries and success): slskd reporting the
    transfer failed/errored/rejected/aborted (`candidate["peer_fault"]`), or a
    post-download rejection of the file itself — no usable tags, unreadable
-   audio, or a real length far from what the peer advertised. Our wait timeout,
+   audio, a real length far from what the peer advertised, or a lossless file
+   failing the spectrum check (fake/upsampled/padded_16). Our wait timeout,
    "Queued, Remotely" stalls, slskd not listing the transfer yet, a file not
    found afterwards, a wrong-track mismatch ("no match"/"low score"/filename or
-   Spotify-duration miss), shutdown and reconcile never blocklist: the same file
+   Spotify-duration miss/ISRC mismatch), shutdown and reconcile never blocklist: the same file
    can be right for another track, and a global ban would hide it there.
 7. **Completion grace.** slskd can report "Completed, Succeeded" while the file
    is still under `/downloads/incomplete/`. `find_file_in_downloads` never
@@ -267,6 +276,14 @@ unnormalised.
    `SLSKD_MAX_DURATION_DIFF_SECONDS` of Spotify's. Unknown durations, or the
    setting at 0, mean reject.
 9. A manual grab that fails does not increment `attempts`.
+10. **Quarantine** (`library.health.quarantine_track`, daemon only, requested
+    from /library-health): the file moves to
+    `<playlists_root>/.quarantine/<table>/<basename>` (" (2)" etc. on a
+    collision; never deleted), the row goes back to `downloaded=0` with no path,
+    attempts or pause, its basename joins `_tried`, its `file_checks` row is
+    dropped and history records `quarantined`. The quarantine dir is outside
+    every `<root>/<table>` that `startup_check` indexes and the scan walks DB
+    rows, so nothing re-imports it. Purging is manual (README).
 
 Files enter via the shared `/downloads` volume, then move to `/playlists/<table>/` after tagging.
 
@@ -288,7 +305,12 @@ see `SETTINGS_SPEC` and `validate_setting` in `spotify_slsk/config.py`:
   `SLSKD_MIN_EFFECTIVE_MP3_KBPS` (280), `SLSKD_EARLY_STOP_RESPONSES` (20),
   `SLSKD_MAX_DURATION_DIFF_SECONDS` (15; 0 disables the duration filter and the
   untagged fallback), `SLSKD_WAIT_TIMEOUT` (60), `HISTORY_RETENTION_DAYS` (90,
-  pruned once per cycle), `UPGRADE_CHECK_INTERVAL_HOURS` (168)
+  pruned once per cycle), `UPGRADE_CHECK_INTERVAL_HOURS` (168),
+  `LOSSLESS_CHECK_ENABLED` (1, kind `bool`), `LOSSLESS_FAKE_CUTOFF_HZ` (19500),
+  `LOSSLESS_MIN_DROP_DB` (15), `LIBRARY_SCAN_INTERVAL_HOURS` (0 = manual only)
+
+Every `SETTINGS_SPEC` key must be placed in a group in `settings.html`: the
+form clears every key it doesn't send (`test_every_setting_is_rendered`).
 
 The MP3 floors are two rules: an MP3 whose reported (or filename-inferred)
 bitrate is known and below 320 is **always** rejected (hardcoded, by design);
@@ -316,4 +338,28 @@ threaded through the download call chain. The real per-track cap is
 - **slskd HTTP timeout.** `new_client` passes `timeout=SLSKD_HTTP_TIMEOUT` (default 30s) to `SlskdClient`; slskd-api's default is none, and a slskd that accepts but never answers would otherwise block the daemon thread until the healthcheck restarts the container. Every slskd call is a short request, so 30s is generous.
 - **SQLite WAL mode** means the DB file is always accompanied by `-wal` and `-shm` files. Backups must capture all three or run `PRAGMA wal_checkpoint(TRUNCATE)` first.
 - **Tracks removed from a Spotify playlist upstream are kept locally** — the library is append-only. `tests/test_pipeline.py` pins this so a change is deliberate.
-- **Schema version is 5.** v5 (`db/connection.py::_migrate_to_v5`, run from `_ensure_schema_version`) adds `duration_ms` to every catalogued per-playlist table at connect time — not lazily in `create_table`, because the UI reads tables of playlists the daemon hasn't synced since the upgrade — and clears every stored `snapshot_id` so the next sync re-reads Spotify and backfills durations (`db.backfill_durations`). `blocklist` and `history` are `CREATE TABLE IF NOT EXISTS`. `TestSchemaMigrations.test_v4_db_upgrades_to_v5` builds a real v4 DB. Upgrading from an older DB is automatic and tested (`TestSchemaMigrations`): the ALTER TABLE guards in `_ensure_playlists_meta_table` handle v2 DBs, `create_table` adds `last_upgrade_check` to older per-playlist tables, `CREATE TABLE IF NOT EXISTS` handles settings, and v4 added `cycle_history` (one row per completed cycle, capped to ~200 rows by `db.record_cycle`). The `tried_files` column on per-playlist tables is dead — nothing reads it; it is retained only so existing DBs need no migration.
+- **Validation (Tier 3).** `importer/audio_check.py` decodes 3 x 10 s windows
+  (middle 80%) with the `flac` CLI (WAV via stdlib), Welch-averages Hann frames
+  (4096, silent frames dropped), smooths to ~170 Hz and finds the steepest drop
+  above 11 kHz (mean 0.2-1 kHz below f minus 0.2-1 kHz above). fake / upsampled
+  / padded_16 reject; suspect (19.5-20.5 kHz, MP3-320 vs brickwalled masters)
+  and unknown never do. Margins are ~3-5 dB, so thresholds are settings; AAC-256
+  transcodes are undetectable. Before download, `evaluate_candidates` rejects a
+  16-bit FLAC under 400 kbps and demotes (`note`, sorted last within its format)
+  a 24-bit >= 88.2 kHz FLAC under 1200 kbps. ISRC: different -> per-track
+  rejection; equal -> overrides a low tag score, never a version mismatch.
+  Verdicts live in `file_checks` (one global table keyed by
+  `(table_name, track_id)`, not columns on every pl_ table: one query for the
+  health page, scan bookkeeping out of the track rows). Imports store theirs with
+  `rules_version` 0; the scan (`health.RULES_VERSION`, bump it when the identity
+  rules change) re-verifies identity and reuses an unchanged file's spectrum
+  verdict. The scan is resumable without a cursor: a check matching path, size,
+  mtime and RULES_VERSION is skipped. An `ignored` mark survives only while the
+  file is the same. AcoustID fingerprinting is not implemented (follow-up).
+- **Image.** The Dockerfile `apk add`s `flac` and strips numpy's bundled test
+  suite; numpy (+ its OpenBLAS) is most of the ~76 MB the image grew in Tier 3.
+- **Schema version is 6.** v6 adds `isrc` to every catalogued per-playlist
+  table at connect time and clears snapshots so the next sync backfills it
+  (same mechanism as v5, `_migrate_track_columns`; `backfill_durations` fills
+  both with COALESCE), plus `file_checks` (`CREATE TABLE IF NOT EXISTS`).
+  `TestSchemaMigrations.test_v5_db_upgrades_to_v6` builds a real v5 DB. v5 (`db/connection.py::_migrate_track_columns`, run from `_ensure_schema_version`) adds `duration_ms` to every catalogued per-playlist table at connect time — not lazily in `create_table`, because the UI reads tables of playlists the daemon hasn't synced since the upgrade — and clears every stored `snapshot_id` so the next sync re-reads Spotify and backfills durations (`db.backfill_durations`). `blocklist` and `history` are `CREATE TABLE IF NOT EXISTS`. `TestSchemaMigrations.test_v4_db_upgrades_to_v5` builds a real v4 DB. Upgrading from an older DB is automatic and tested (`TestSchemaMigrations`): the ALTER TABLE guards in `_ensure_playlists_meta_table` handle v2 DBs, `create_table` adds `last_upgrade_check` to older per-playlist tables, `CREATE TABLE IF NOT EXISTS` handles settings, and v4 added `cycle_history` (one row per completed cycle, capped to ~200 rows by `db.record_cycle`). The `tried_files` column on per-playlist tables is dead — nothing reads it; it is retained only so existing DBs need no migration.
