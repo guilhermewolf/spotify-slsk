@@ -258,9 +258,9 @@ class TestIsrcTags:
         f = tmp_path / "a.flac"
         _write_flac(f, _to_int(_noise(44100, 1), 16), 44100, 16)
         assert read_isrc(str(f)) is None
-        write_tags(str(f), "T", "A", "Alb", isrc="GBAYE0601498")
+        write_tags(str(f), {"title": ["T"], "isrc": ["GBAYE0601498"]})
         assert read_isrc(str(f)) == "GBAYE0601498"
-        write_tags(str(f), "T", "A", "Alb")  # no ISRC known: keep the file's
+        write_tags(str(f), {"title": ["T"]})  # no ISRC known: keep the file's
         assert read_isrc(str(f)) == "GBAYE0601498"
 
 
@@ -268,7 +268,7 @@ class TestIsrcOnImport:
     def _run(self, conn, monkeypatch, downloads, title, artist, isrc):
         monkeypatch.setattr(importer_process, "extract_metadata_from_file", lambda p: (title, artist, "Alb"))
         tagged = []
-        monkeypatch.setattr(importer_process, "tag_audio_file", lambda *a, **k: tagged.append(k) or True)
+        monkeypatch.setattr(importer_process, "tag_audio_file", lambda path, tags, cover=None: tagged.append(tags) or True)
         monkeypatch.setattr(importer_process, "read_isrc", lambda p: isrc)
         monkeypatch.setattr(config, "LOSSLESS_CHECK_ENABLED", False)
         f = _download(downloads, "x.mp3")
@@ -283,7 +283,7 @@ class TestIsrcOnImport:
         assert ok is True
         event = db.list_history(conn, event="imported")[0]["data"]
         assert event["isrc_mismatch"] == "ISRC mismatch (file USUM71703861, expected GBAYE0601498)"
-        assert tagged[0]["isrc"] is None  # the file's own ISRC is kept
+        assert "isrc" not in tagged[0]  # the file's own ISRC is kept
 
     def test_different_isrc_plus_duration_off_rejects(self, conn, monkeypatch, sandbox_dirs):
         downloads, _ = sandbox_dirs
@@ -310,7 +310,7 @@ class TestIsrcOnImport:
         ok, _, tagged = self._run(conn, monkeypatch, downloads, "ハート", "マット", "GBAYE0601498")
         assert ok is True
         assert db.list_history(conn, event="imported")[0]["data"]["match"] == "isrc"
-        assert tagged[0]["isrc"] == "GBAYE0601498"
+        assert tagged[0]["isrc"] == ["GBAYE0601498"]
 
     def test_equal_isrc_never_overrides_a_version_mismatch(self, conn, monkeypatch, sandbox_dirs):
         downloads, _ = sandbox_dirs
@@ -320,7 +320,7 @@ class TestIsrcOnImport:
     def test_no_file_isrc_falls_back_to_tags_and_writes_spotifys(self, conn, monkeypatch, sandbox_dirs):
         downloads, _ = sandbox_dirs
         ok, _, tagged = self._run(conn, monkeypatch, downloads, "Heart To Find", "Mat Joe", None)
-        assert ok is True and tagged[0]["isrc"] == "GBAYE0601498"
+        assert ok is True and tagged[0]["isrc"] == ["GBAYE0601498"]
 
 
 class TestQualityUpgrade:

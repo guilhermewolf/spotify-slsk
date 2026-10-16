@@ -29,6 +29,7 @@ from ..matching.quality import quality_of_file
 from ..matching.tracks import find_closest_match, score_track_match
 from ..models import Candidate, Track
 from ..utils import fmt_duration
+from . import artwork
 from .audio_check import (
     BLOCKLIST_VERDICTS,
     CHECKABLE_EXTS,
@@ -42,6 +43,7 @@ from .tags import (
     extract_metadata_from_file,
     normalize_isrc,
     read_isrc,
+    spotify_tags,
     tag_audio_file,
 )
 
@@ -249,13 +251,16 @@ def process_downloaded_file(
         )
         return False, None
 
-    # Fall back to the Spotify-known album when the downloaded file has no
-    # album tag (observed during Phase B testing: downloaded MP3 had no TALB).
-    effective_album = album or db_album
-    # On a conflict the file's own ISRC is kept (write_tags leaves it alone).
+    # Tag from Spotify (the verified row), not from the peer's tags. On an
+    # ISRC conflict the file's own ISRC is kept ("" = leave it alone).
+    assert track_id is not None  # set by the match above
+    row = get_track(conn, playlist_name, track_id) or {
+        "id": track_id, "name": title, "artists": artist, "album": album or db_album,
+    }
     tag_audio_file(
-        file_path, title, artist, effective_album,
-        isrc=None if isrc_conflict else (expected_isrc or file_isrc),
+        file_path,
+        spotify_tags(row, isrc="" if isrc_conflict else (expected_isrc or file_isrc)),
+        cover=artwork.album_cover(row) if config.EMBED_COVER_ART else None,
     )
 
     # If the file is already inside the playlists dir, don't move it.

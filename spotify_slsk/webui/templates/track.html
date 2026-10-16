@@ -81,12 +81,32 @@
 {% endif %}
 
 {% if track.downloaded and track.path %}
+{% if tag_preview %}
+<details id="tags">
+  <summary>Tags: {{ tag_preview.changed }} field(s) would change on re-tag</summary>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Tag</th><th>In the file</th><th>Re-tag writes</th></tr></thead>
+      <tbody>
+      {% for row in tag_preview.rows %}
+        <tr{% if row.changed %} class="tag-changed"{% endif %}>
+          <td>{{ row.label }}</td>
+          <td>{{ row.current or '—' }}</td>
+          <td>{% if row.changed %}<strong>{{ row.new or '—' }}</strong>{% else %}<span class="subtle">unchanged</span>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
+{% endif %}
 <form method="POST"
       action="{{ url_for('tracks.retag_track', playlist_id=playlist_id, track_id=track.id) }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-  <button type="submit" class="secondary outline" style="width:auto">Re-tag from DB</button>
+  <button type="submit" class="secondary outline" style="width:auto">Re-tag from Spotify</button>
   <small class="subtle">
-    Rewrites title/artist/album from the Spotify metadata. No re-download.
+    Rewrites the tags above (title, artists, album, album artist, track/disc number,
+    release date, ISRC, Spotify id) and the cover art from the Spotify metadata. No re-download.
   </small>
 </form>
 {% endif %}

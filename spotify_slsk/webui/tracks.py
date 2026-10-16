@@ -18,7 +18,8 @@ from flask import (
 from flask.typing import ResponseReturnValue
 
 from .. import db, runtime_state
-from ..importer.tags import write_tags
+from ..importer import artwork
+from ..importer.tags import read_tags, spotify_tags, tag_diff, write_tags
 from ..slskd import search as slskd_search
 from .helpers import relative_to_playlists_root, wake_daemon
 
@@ -47,7 +48,27 @@ def track_detail(playlist_id: str, track_id: str) -> ResponseReturnValue:
         history=db.list_history(g.conn, track_id=track_id, limit=50),
         check=db.get_file_check(g.conn, table_name, track_id),
         search=runtime_state.get_interactive_search((playlist_id, track_id)),
+        tag_preview=_tag_preview(track),
     )
+
+
+def _embed_cover() -> bool:
+    return db.get_setting(g.conn, "EMBED_COVER_ART", "1") == "1"
+
+
+def _tag_preview(track: dict) -> dict | None:
+    """Current tags vs what Re-tag would write (no network: the cover row
+    only says whether one would be embedded)."""
+    if not track.get("downloaded") or not track.get("path") or not os.path.isfile(track["path"]):
+        return None
+    current, has_cover = read_tags(track["path"])
+    rows = tag_diff(current, spotify_tags(track))
+    embeds = bool(track.get("cover_url")) and _embed_cover()
+    rows.append({
+        "label": "Cover art", "current": "embedded" if has_cover else "",
+        "new": "Spotify album cover" if embeds else "", "changed": embeds,
+    })
+    return {"rows": rows, "changed": sum(1 for r in rows if r["changed"])}
 
 
 # ---- track mutations ----------------------------------------------
@@ -184,11 +205,13 @@ def retag_track(playlist_id: str, track_id: str) -> ResponseReturnValue:
         flash(f"File missing: {track['path']}", "error")
     else:
         try:
-            write_tags(
-                track["path"], track["name"], track["artists"], track["album"],
-                isrc=track.get("isrc"),
+            cover = artwork.album_cover(track) if _embed_cover() else None
+            write_tags(track["path"], spotify_tags(track), cover)
+            flash(
+                "Re-tagged from Spotify metadata"
+                + (" with cover art." if cover else "."),
+                "success",
             )
-            flash("Re-tagged from DB metadata.", "success")
         except Exception as e:
             flash(f"Re-tag failed: {e}", "error")
     return redirect(

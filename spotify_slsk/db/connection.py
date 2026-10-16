@@ -2,7 +2,7 @@
 import logging
 import sqlite3
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
@@ -24,7 +24,7 @@ def _ensure_schema_version(conn: sqlite3.Connection) -> None:
     try:
         current = conn.execute("PRAGMA user_version").fetchone()[0]
         if current < SCHEMA_VERSION:
-            _migrate_track_columns(conn, resync=current < 6)
+            _migrate_track_columns(conn, resync=current < 8)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.commit()
             if current == 0:
@@ -42,18 +42,20 @@ def _ensure_schema_version(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_track_columns(conn: sqlite3.Connection, resync: bool = True) -> None:
-    """v5-v7: per-playlist tables gain `duration_ms` (v5, Spotify track
-    length), `isrc` (v6, Spotify external_ids.isrc) and `quality` (v7, the
+    """v5-v8: per-playlist tables gain `duration_ms` (v5, Spotify track
+    length), `isrc` (v6, Spotify external_ids.isrc), `quality` (v7, the
     file's matching.quality key; backfilled lazily from the file, '' when
-    unreadable).
+    unreadable) and the tagging fields of v8 (album artist, artist list,
+    track/disc number, release date, album id, cover URL, playlist
+    position).
 
     Every catalogued table is migrated here rather than lazily in
     create_table, because the webui reads tables of playlists the daemon
     hasn't synced since the upgrade (disabled ones, for instance). Stored
     snapshots are cleared so the next sync re-reads every track and
     backfills the new columns; existing rows are NULL until then. `quality`
-    comes from the file, not Spotify, so a v6 -> v7 upgrade (`resync`
-    False) keeps the snapshots.
+    comes from the file, not Spotify; every other column (v8 included) is
+    filled by that resync.
     """
     tables = [
         r[0]
@@ -70,7 +72,16 @@ def _migrate_track_columns(conn: sqlite3.Connection, resync: bool = True) -> Non
 
 
 # Columns added to per-playlist tables after their first release.
-_TRACK_COLUMNS = (("duration_ms", "INTEGER"), ("isrc", "TEXT"), ("quality", "TEXT"))
+_TRACK_COLUMNS = (
+    ("duration_ms", "INTEGER"), ("isrc", "TEXT"), ("quality", "TEXT"),
+    # v8: Spotify fields for tagging, naming and playlist files.
+    ("album_artist", "TEXT"), ("artist_names", "TEXT"),  # artist_names: JSON list
+    ("track_number", "INTEGER"), ("track_total", "INTEGER"),
+    ("disc_number", "INTEGER"), ("release_date", "TEXT"),
+    ("album_id", "TEXT"), ("cover_url", "TEXT"), ("position", "INTEGER"),
+)
+# The v8 columns the Spotify sync fills (all but `quality`, which is the file's).
+SPOTIFY_COLUMNS = tuple(name for name, _ in _TRACK_COLUMNS if name != "quality")
 
 
 def _add_track_columns(conn: sqlite3.Connection, table_name: str) -> None:

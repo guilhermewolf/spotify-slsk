@@ -19,6 +19,7 @@ from .checks import (
 )
 from .connection import (
     SCHEMA_VERSION,
+    SPOTIFY_COLUMNS,
     create_connection,
 )
 from .cycles import (
@@ -50,7 +51,7 @@ from .settings import (
 from .tracks import (
     MAX_ATTEMPTS_BEFORE_SUSPEND,
     add_tried_file,
-    backfill_durations,
+    backfill_spotify_fields,
     clear_tried_entries,
     create_table,
     create_tried_table,
@@ -75,6 +76,7 @@ __all__ = [
     "set_track_quality",
     "tracks_missing_quality",
     "SCHEMA_VERSION",
+    "SPOTIFY_COLUMNS",
     "create_connection",
     "get_playlist_meta",
     "upsert_playlist_meta",
@@ -94,7 +96,7 @@ __all__ = [
     "retry_track",
     "create_table",
     "insert_track",
-    "backfill_durations",
+    "backfill_spotify_fields",
     "fetch_all_tracks",
     "MAX_ATTEMPTS_BEFORE_SUSPEND",
     "update_download_status",

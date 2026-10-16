@@ -1,7 +1,10 @@
 """Reading and writing audio tags, and reading the real audio length.
 
-One tag writer (`write_tags`) serves both the daemon (via the non-raising
-`tag_audio_file`) and the web UI's re-tag action.
+One tagger serves the daemon (the non-raising `tag_audio_file`), the web
+UI's re-tag action (`write_tags`) and its preview (`read_tags` vs
+`spotify_tags`). Tags are a format-neutral dict of lists: `spotify_tags`
+builds it from a DB row, `write_tags` maps it onto Vorbis comments (FLAC),
+ID3v2.4 (MP3, AIFF) or MP4 atoms (M4A), `read_tags` maps a file back.
 """
 from __future__ import annotations
 
@@ -12,9 +15,10 @@ from typing import Any
 
 from mutagen import File as MutagenFile
 from mutagen.aiff import AIFF
-from mutagen.flac import FLAC
-from mutagen.id3 import ID3, TALB, TIT2, TPE1, TSRC
+from mutagen.flac import FLAC, Picture
+from mutagen.id3 import APIC, ID3, TALB, TDRC, TIT2, TPE1, TPE2, TPOS, TRCK, TSRC, TXXX
 from mutagen.mp3 import MP3
+from mutagen.mp4 import MP4, MP4Cover, MP4FreeForm
 
 
 def audio_length_seconds(file_path: str) -> float | None:
@@ -101,70 +105,207 @@ def extract_metadata_from_file(file_path: str) -> tuple[str | None, str | None, 
         return None, None, None
 
 
-def write_tags(
-    path: str, title: str | None, artist: str | None, album: str | None,
-    isrc: str | None = None,
-) -> None:
-    """Write title/artist/album (and the ISRC when known; an existing one is
-    left alone otherwise). Supports mp3, flac and aiff.
+# The neutral tag keys, in display order. "track" is "n/total", "disc" "n".
+TAG_KEYS = (
+    "title", "artist", "album", "album_artist", "track", "disc", "date",
+    "isrc", "spotify_track_id",
+)
+TAG_LABELS = {
+    "title": "Title", "artist": "Artist(s)", "album": "Album",
+    "album_artist": "Album artist", "track": "Track", "disc": "Disc",
+    "date": "Release date", "isrc": "ISRC", "spotify_track_id": "Spotify track id",
+}
+TAGGABLE_EXTS = (".mp3", ".flac", ".aiff", ".m4a")
 
-    Raises ValueError for any other extension and lets mutagen errors
+Tags = dict[str, list[str]]
+
+_VORBIS = {
+    "title": "title", "artist": "artist", "album": "album",
+    "album_artist": "albumartist", "disc": "discnumber", "date": "date",
+    "isrc": "isrc", "spotify_track_id": "spotify_track_id",
+}
+_ID3 = {
+    "title": TIT2, "artist": TPE1, "album": TALB, "album_artist": TPE2,
+    "track": TRCK, "disc": TPOS, "date": TDRC, "isrc": TSRC,
+}
+_MP4 = {"title": "\xa9nam", "artist": "\xa9ART", "album": "\xa9alb", "album_artist": "aART", "date": "\xa9day"}
+_MP4_FREEFORM = {"isrc": "----:com.apple.iTunes:ISRC", "spotify_track_id": "----:com.apple.iTunes:SPOTIFY_TRACK_ID"}
+_SPOTIFY_ID_TXXX = "SPOTIFY_TRACK_ID"
+
+
+def spotify_tags(row: dict[str, Any], isrc: str | None = None) -> Tags:
+    """What the library file of a DB track row should carry. Unknown fields
+    are left out, so writing never blanks a tag Spotify didn't supply.
+    `isrc` overrides the row's (None: the row's; "" : leave the file's)."""
+    artists = row.get("artist_list") or ([row["artists"]] if row.get("artists") else [])
+    number, total = row.get("track_number"), row.get("track_total")
+    track = f"{number}/{total}" if number and total else (str(number) if number else "")
+    values = {
+        "title": [row.get("name") or ""],
+        "artist": artists,
+        "album": [row.get("album") or ""],
+        "album_artist": [row.get("album_artist") or ""],
+        "track": [track],
+        "disc": [str(row["disc_number"]) if row.get("disc_number") else ""],
+        "date": [row.get("release_date") or ""],
+        "isrc": [normalize_isrc(row.get("isrc") if isrc is None else isrc) or ""],
+        "spotify_track_id": [row.get("id") or ""],
+    }
+    return {k: v for k, v in values.items() if any(v)}
+
+
+def _id3_write(tags_obj: Any, tags: Tags) -> None:
+    for key, frame in _ID3.items():
+        if key in tags:
+            tags_obj.delall(frame.__name__)
+            tags_obj.add(frame(encoding=3, text=tags[key]))
+    if "spotify_track_id" in tags:
+        tags_obj.delall(f"TXXX:{_SPOTIFY_ID_TXXX}")
+        tags_obj.add(TXXX(encoding=3, desc=_SPOTIFY_ID_TXXX, text=tags["spotify_track_id"]))
+
+
+def _image_mime(data: bytes) -> str:
+    return "image/png" if data.startswith(b"\x89PNG") else "image/jpeg"
+
+
+def write_tags(path: str, tags: Tags, cover: bytes | None = None) -> None:
+    """Write `tags` (see spotify_tags) and, when given, `cover` as the
+    front-cover picture (replacing any existing one). Keys absent from
+    `tags` are left as the file has them.
+
+    Raises ValueError for an unsupported extension and lets mutagen errors
     propagate - the web UI's re-tag action reports them to the operator.
     The daemon goes through `tag_audio_file`, which logs instead.
     """
-    title = title or ""
-    artist = artist or ""
-    album = album or ""
     ext = os.path.splitext(path)[1].lower()
     audio: Any
-
-    if ext == ".mp3":
-        audio = MP3(path, ID3=ID3)
+    if ext in (".mp3", ".aiff"):
+        audio = MP3(path, ID3=ID3) if ext == ".mp3" else AIFF(path)
         if audio.tags is None:
             audio.add_tags()
-        audio.tags.add(TIT2(encoding=3, text=title))
-        audio.tags.add(TPE1(encoding=3, text=artist))
-        audio.tags.add(TALB(encoding=3, text=album))
-        if isrc:
-            audio.tags.add(TSRC(encoding=3, text=isrc))
-        audio.save()
+        _id3_write(audio.tags, tags)
+        if cover:
+            audio.tags.delall("APIC")
+            audio.tags.add(APIC(encoding=3, mime=_image_mime(cover), type=3, desc="Cover", data=cover))
+        audio.save(v2_version=4)
     elif ext == ".flac":
         audio = FLAC(path)
-        audio["title"] = title
-        audio["artist"] = artist
-        audio["album"] = album
-        if isrc:
-            audio["isrc"] = isrc
+        for key, name in _VORBIS.items():
+            if key in tags:
+                audio[name] = tags[key]
+        if "track" in tags:
+            number, _, total = tags["track"][0].partition("/")
+            audio["tracknumber"] = number
+            if total:
+                audio["tracktotal"] = total
+        if cover:
+            pic = Picture()
+            pic.type, pic.mime, pic.desc, pic.data = 3, _image_mime(cover), "Cover", cover
+            audio.clear_pictures()
+            audio.add_picture(pic)
         audio.save()
-    elif ext == ".aiff":
-        audio = AIFF(path)
+    elif ext == ".m4a":
+        audio = MP4(path)
         if audio.tags is None:
             audio.add_tags()
-        audio.tags.add(TIT2(encoding=3, text=title))
-        audio.tags.add(TPE1(encoding=3, text=artist))
-        audio.tags.add(TALB(encoding=3, text=album))
-        if isrc:
-            audio.tags.add(TSRC(encoding=3, text=isrc))
+        for key, atom in _MP4.items():
+            if key in tags:
+                audio.tags[atom] = tags[key]
+        for key, atom in _MP4_FREEFORM.items():
+            if key in tags:
+                audio.tags[atom] = [MP4FreeForm(v.encode()) for v in tags[key]]
+        if "track" in tags:
+            number, _, total = tags["track"][0].partition("/")
+            audio.tags["trkn"] = [(int(number), int(total or 0))]
+        if "disc" in tags:
+            audio.tags["disk"] = [(int(tags["disc"][0]), 0)]
+        if cover:
+            fmt = MP4Cover.FORMAT_PNG if cover.startswith(b"\x89PNG") else MP4Cover.FORMAT_JPEG
+            audio.tags["covr"] = [MP4Cover(cover, imageformat=fmt)]
         audio.save()
     else:
         raise ValueError(f"Unsupported extension for retag: {ext}")
 
 
-def tag_audio_file(
-    file_path: str, title: str | None, artist: str | None, album: str | None,
-    isrc: str | None = None,
-) -> bool:
+def _text(values: Any) -> list[str]:
+    out = []
+    for v in values or []:
+        v = v.decode("utf-8", "ignore") if isinstance(v, bytes) else str(v)
+        if v:
+            out.append(v)
+    return out
+
+
+def read_tags(path: str) -> tuple[Tags, bool]:
+    """(tags in spotify_tags' shape, has an embedded cover). Never raises:
+    an unreadable file reads as untagged."""
+    tags: Tags = {}
+    has_cover = False
+    try:
+        audio: Any = MutagenFile(path)
+        t = audio.tags if audio is not None else None
+    except Exception as e:
+        logging.debug(f"Could not read tags from {path}: {e}")
+        return tags, False
+    if t is None:
+        return tags, bool(getattr(audio, "pictures", None))
+    if hasattr(t, "getall"):  # ID3
+        for key, frame in _ID3.items():
+            frames = t.getall(frame.__name__)
+            if frames:
+                tags[key] = _text(frames[0].text)
+        txxx = t.getall(f"TXXX:{_SPOTIFY_ID_TXXX}")
+        if txxx:
+            tags["spotify_track_id"] = _text(txxx[0].text)
+        has_cover = bool(t.getall("APIC"))
+    elif isinstance(audio, MP4):
+        for key, atom in {**_MP4, **_MP4_FREEFORM}.items():
+            if atom in t:
+                tags[key] = _text(t[atom])
+        if t.get("trkn"):
+            n, total = t["trkn"][0]
+            tags["track"] = [f"{n}/{total}" if total else str(n)]
+        if t.get("disk"):
+            tags["disc"] = [str(t["disk"][0][0])]
+        has_cover = bool(t.get("covr"))
+    else:  # Vorbis comments
+        for key, name in _VORBIS.items():
+            if t.get(name):
+                tags[key] = _text(t[name])
+        if t.get("tracknumber"):
+            n, total = t["tracknumber"][0], (t.get("tracktotal") or [""])[0]
+            tags["track"] = [f"{n}/{total}" if total and "/" not in n else n]
+        has_cover = bool(getattr(audio, "pictures", None))
+    return {k: v for k, v in tags.items() if v}, has_cover
+
+
+def tag_diff(current: Tags, wanted: Tags) -> list[dict[str, Any]]:
+    """Rows for the track page's preview: every key either side has."""
+    rows = []
+    for key in TAG_KEYS:
+        if key not in current and key not in wanted:
+            continue
+        old, new = current.get(key, []), wanted.get(key)
+        rows.append({
+            "key": key, "label": TAG_LABELS[key], "current": "; ".join(old),
+            "new": "; ".join(new) if new is not None else "; ".join(old),
+            "changed": new is not None and new != old,
+        })
+    return rows
+
+
+def tag_audio_file(file_path: str, tags: Tags, cover: bytes | None = None) -> bool:
     """Daemon-side tagging: never raises. WAV is skipped (counts as done),
     other unsupported formats and mutagen errors log and return False."""
     ext = os.path.splitext(file_path)[1].lower()
     try:
         if ext == '.wav':
             logging.warning("WAV tagging is not fully supported; skipping tags.")
-        elif ext not in ('.mp3', '.flac', '.aiff'):
+        elif ext not in TAGGABLE_EXTS:
             logging.warning(f"Unsupported format for tagging: {ext}")
             return False
         else:
-            write_tags(file_path, title, artist, album, isrc)
+            write_tags(file_path, tags, cover)
 
         logging.info(f"Tagged {file_path} successfully.")
         return True

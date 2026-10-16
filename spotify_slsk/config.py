@@ -146,6 +146,8 @@ REQUIRED_TERMS: Terms = _env_terms("REQUIRED_TERMS")
 IGNORED_TERMS: Terms = _env_terms("IGNORED_TERMS")
 # Re-run the library health scan this often; 0 = only from the UI button.
 LIBRARY_SCAN_INTERVAL_HOURS = int(os.getenv("LIBRARY_SCAN_INTERVAL_HOURS", "0"))
+# Embed the Spotify album cover when tagging (importer.tags).
+EMBED_COVER_ART = os.getenv("EMBED_COVER_ART", "1") == "1"
 
 
 def reload(conn: sqlite3.Connection) -> None:
@@ -161,6 +163,7 @@ def reload(conn: sqlite3.Connection) -> None:
     global MAX_DURATION_DIFF_SECONDS
     global LOSSLESS_CHECK_ENABLED, LOSSLESS_FAKE_CUTOFF_HZ, LOSSLESS_MIN_DROP_DB
     global LIBRARY_SCAN_INTERVAL_HOURS, REQUIRED_TERMS, IGNORED_TERMS
+    global EMBED_COVER_ART
     try:
         MIN_MATCH_SCORE = float(get_setting(conn, "MIN_MATCH_SCORE", "0.62"))
     except (TypeError, ValueError) as e:
@@ -198,6 +201,7 @@ def reload(conn: sqlite3.Connection) -> None:
     except (TypeError, ValueError) as e:
         logging.warning(f"Bad numeric setting during refresh; using previous values: {e}")
     LOSSLESS_CHECK_ENABLED = get_setting(conn, "LOSSLESS_CHECK_ENABLED", "1") == "1"
+    EMBED_COVER_ART = get_setting(conn, "EMBED_COVER_ART", "1") == "1"
     try:
         LOSSLESS_FAKE_CUTOFF_HZ = int(get_setting(conn, "LOSSLESS_FAKE_CUTOFF_HZ", "19500"))
         LOSSLESS_MIN_DROP_DB = int(get_setting(conn, "LOSSLESS_MIN_DROP_DB", "15"))
@@ -273,6 +277,7 @@ SETTINGS_SPEC = [
     ("LOSSLESS_MIN_DROP_DB", "15", "How steep (dB over ~1 kHz) that drop must be. Lower catches more fakes but risks flagging dark-sounding real masters; measured margins are ~3-5 dB", "int1"),
     ("REQUIRED_TERMS", "", "A file's full peer path must contain at least one of these (comma-separated, case-insensitive; /regex/ allowed). Empty = no requirement", "terms"),
     ("IGNORED_TERMS", "", "Reject a file whose full peer path contains any of these, even when the title matches (comma-separated, case-insensitive; /regex/ allowed). Common: karaoke, instrumental, nightcore, sped up, 8d audio, /\\bcover\\b/. Plain terms match inside words ('live' matches 'Oliver'): use a /\\b...\\b/ regex for whole words", "terms"),
+    ("EMBED_COVER_ART", "1", "Embed the Spotify album cover (largest size, cached under data/artwork) when tagging imported or re-tagged files (1 = on, 0 = off). A failed fetch never fails the import", "bool"),
     ("LIBRARY_SCAN_INTERVAL_HOURS", "0", "Re-verify every library file (tags, duration, ISRC, lossless check) this often; report-only, a few hundred files per cycle. 0 = only when you press Scan library", "int0"),
 ]
 

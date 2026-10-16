@@ -46,6 +46,7 @@ _ISOLATED_DIR_KEYS = (
     "SLSKD_PLAYLISTS_DIR",
     "HEARTBEAT_FILE",
     "SPOTIPY_CACHE_PATH",
+    "ARTWORK_CACHE_DIR",
 )
 
 
@@ -64,6 +65,7 @@ def _isolate_environment(tmp_path_factory):
     os.environ["SLSKD_PLAYLISTS_DIR"] = str(sandbox / "playlists")
     os.environ["HEARTBEAT_FILE"] = str(sandbox / "heartbeat")
     os.environ["SPOTIPY_CACHE_PATH"] = str(sandbox / "spotipy-cache")
+    os.environ["ARTWORK_CACHE_DIR"] = str(sandbox / "artwork")
     os.makedirs(os.environ["SLSKD_DOWNLOADS_DIR"], exist_ok=True)
     os.makedirs(os.environ["SLSKD_PLAYLISTS_DIR"], exist_ok=True)
 
