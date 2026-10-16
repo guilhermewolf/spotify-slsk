@@ -31,10 +31,19 @@ _ISOLATED_ENV = {
     "SPOTIPY_CLIENT_ID": "test-client-id-not-real",
     "SPOTIPY_CLIENT_SECRET": "test-client-secret-not-real",
     "SPOTIFY_PLAYLIST_URLS": "",
-    # Empty so send_ntfy_notification short-circuits instead of posting.
+    # Empty so ntfy is "not configured" and nothing is posted.
     "NTFY_URL": "",
     "NTFY_TOPIC": "",
     "UI_SECRET_KEY": "test-secret-key-not-real",
+    # Empty so a sourced .env cannot switch on the UI login (every page
+    # would redirect) or point notifications at a real server.
+    "UI_AUTH_USERNAME": "",
+    "UI_AUTH_PASSWORD": "",
+    "WEBHOOK_URL": "",
+    "WEBHOOK_HEADER_VALUE": "",
+    "SUBSONIC_URL": "",
+    "SUBSONIC_USERNAME": "",
+    "SUBSONIC_PASSWORD": "",
     "LOGLEVEL": "CRITICAL",
     "LIB_LOGLEVEL": "CRITICAL",
 }

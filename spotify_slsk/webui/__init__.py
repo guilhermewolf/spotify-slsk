@@ -7,6 +7,7 @@ against the same DB file the daemon writes to (WAL mode makes this safe).
 flags, CSRF, security headers/CSP, the per-request DB connection, the
 header health badge - and registers one blueprint per area:
 
+* ``auth``      - optional login / logout
 * ``playlists`` - dashboard, playlist page, playlist mutations
 * ``tracks``    - track page, retry/re-tag, interactive search and grab
 * ``wanted``    - wanted, history, blocklist
@@ -27,7 +28,7 @@ from flask import Flask, abort, g, request, session
 
 from .. import db
 from ..utils import fmt_duration
-from . import health, library, playlists, queue, settings, system, tracks, wanted
+from . import auth, health, library, playlists, queue, settings, system, tracks, wanted
 from .helpers import fmt_age, fmt_interval, fmt_ts, health_snapshot, human_bytes
 
 # Reserved settings key holding the generated Flask secret. It is not in
@@ -159,6 +160,11 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
         if g.conn is None:
             abort(503, "database unavailable")
 
+    # Optional login (webui.auth): a no-op unless credentials are set.
+    # After _open_conn, because the credentials live in the settings table.
+    app.config["AUTH_ENV_HASH"] = auth.env_password_hash()
+    app.before_request(auth.require_login)
+
     @app.teardown_appcontext
     def _close_conn(_exc):
         conn = g.pop("conn", None)
@@ -169,7 +175,8 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
                 logging.debug("Error closing webui conn", exc_info=True)
 
     for blueprint in (
-        playlists.bp, tracks.bp, wanted.bp, health.bp, library.bp, queue.bp, settings.bp, system.bp,
+        auth.bp, playlists.bp, tracks.bp, wanted.bp, health.bp, library.bp, queue.bp,
+        settings.bp, system.bp,
     ):
         app.register_blueprint(blueprint)
 
@@ -177,7 +184,7 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
     def _inject_health():
         # Every page shows the daemon's status in the header, so it must not
         # depend on a single route remembering to pass it.
-        return {"health": health_snapshot()}
+        return {"health": health_snapshot(), "auth_user": auth.current_user()}
 
     return app
 

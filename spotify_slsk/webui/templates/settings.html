@@ -34,8 +34,8 @@
    ['NTFY_URL', 'NTFY_TOPIC', 'NTFY_EVENTS',
     'WEBHOOK_URL', 'WEBHOOK_HEADER_NAME', 'WEBHOOK_HEADER_VALUE', 'WEBHOOK_EVENTS',
     'SUBSONIC_URL', 'SUBSONIC_USERNAME', 'SUBSONIC_PASSWORD']),
-  ('System', 'Health checks, backups and housekeeping',
-   ['MIN_FREE_SPACE_GB', 'BACKUP_RETENTION'])
+  ('System', 'Web UI login, health checks and backups',
+   ['UI_AUTH_USERNAME', 'UI_AUTH_PASSWORD', 'MIN_FREE_SPACE_GB', 'BACKUP_RETENTION'])
 ] %}
 
 <form method="POST">
@@ -53,7 +53,7 @@
       <div class="setting">
         <label for="{{ key }}">{{ key }}</label>
         <span class="help" id="{{ key }}_help">{{ help_text }}</span>
-        {% if kind == 'secret' %}
+        {% if kind in ('secret', 'password') %}
         {# Never rendered back: blank keeps the stored value. #}
         <input type="password" id="{{ key }}" name="{{ key }}" value="" autocomplete="new-password"
                placeholder="{{ effective[key] + ' (set) - leave blank to keep' if effective[key] else 'not set' }}"

@@ -590,3 +590,5 @@ details.confirm[open] { max-width: 22rem; }
 .badge-check-ok    { background: var(--ss-ok-bg); color: var(--ss-ok); }
 .badge-check-warn  { background: var(--ss-retry-bg); color: var(--ss-retry); }
 .badge-check-error { background: var(--ss-suspended-bg); color: var(--ss-suspended); }
+
+.login-card { max-width: 24rem; margin: 3rem auto; }

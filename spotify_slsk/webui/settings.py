@@ -17,6 +17,7 @@ from .. import config, db, notifications
 from ..config import SETTINGS_SPEC, validate_setting
 from ..library import naming
 from ..matching.quality import FLOOR_BLOCKED, LADDER, LADDER_INDEX, make_profile
+from .auth import hash_password
 from .helpers import wake_daemon
 
 bp = Blueprint("settings", __name__)
@@ -35,6 +36,15 @@ def settings() -> ResponseReturnValue:
         errors: list[str] = []
         for key, _default, _help, kind in SETTINGS_SPEC:
             val = (request.form.get(key) or "").strip()
+            if kind == "password":
+                # Hashed; the plain value is never stored. Blank keeps it.
+                # Not stripped: the login form does not strip either.
+                raw = request.form.get(key) or ""
+                if request.form.get(f"clear_{key}") == "1":
+                    cleaned[config.UI_AUTH_HASH_KEY] = None
+                if raw:
+                    cleaned[config.UI_AUTH_HASH_KEY] = hash_password(raw)
+                continue
             if kind == "secret":
                 # Never rendered back, so an empty field means "keep".
                 if request.form.get(f"clear_{key}") == "1":
@@ -78,10 +88,17 @@ def settings() -> ResponseReturnValue:
         for key, default, _help, _kind in SETTINGS_SPEC
     }
     # Secrets never reach the page: only whether one is set.
+    stored = db.list_settings(g.conn)
     for key, _default, _help, kind in SETTINGS_SPEC:
         if kind == "secret":
             effective[key] = MASK if effective[key] else ""
             if key in overrides:
+                overrides[key] = MASK
+        elif kind == "password":
+            in_db = bool(stored.get(config.UI_AUTH_HASH_KEY))
+            effective[key] = MASK if in_db or effective[key] else ""
+            overrides.pop(key, None)
+            if in_db:
                 overrides[key] = MASK
     profile = config.load_quality_profile(g.conn)
     # Allowed qualities in profile order, then the rest in ladder order.

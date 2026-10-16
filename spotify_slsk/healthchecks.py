@@ -114,6 +114,28 @@ def _integrity_check(conn: sqlite3.Connection) -> Check | None:
     return _check("db_integrity", ERROR, row.get("last_result") or "failed")
 
 
+LOOPBACK_ADDRS = ("127.0.0.1", "::1", "localhost")
+
+
+def _ui_exposure_check(conn: sqlite3.Connection) -> Check | None:
+    """The UI listening beyond loopback with no login. Inside a container
+    0.0.0.0 is normal (the port mapping decides who can reach it), so this
+    is a warning to check the mapping, not an error."""
+    if os.getenv("UI_ENABLED", "1") != "1":
+        return None
+    bind = os.getenv("UI_BIND_ADDR", "0.0.0.0")
+    if config.ui_auth_configured(conn):
+        return _check("ui_auth", OK, "web UI login is enabled")
+    if bind in LOOPBACK_ADDRS:
+        return _check("ui_auth", OK, f"web UI bound to {bind} only")
+    return _check(
+        "ui_auth", WARN,
+        f"web UI listens on {bind} without a login: anyone who can reach the port can "
+        "change settings and delete playlists. Fine if the port is published on "
+        "127.0.0.1 only; otherwise set UI_AUTH_USERNAME / UI_AUTH_PASSWORD",
+    )
+
+
 def local_checks(conn: sqlite3.Connection, now: float | None = None) -> list[Check]:
     now = now if now is not None else time.time()
     playlists = os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists")
@@ -125,6 +147,7 @@ def local_checks(conn: sqlite3.Connection, now: float | None = None) -> list[Che
         _cycle_check(conn, now),
         _flac_check(),
         _integrity_check(conn),
+        _ui_exposure_check(conn),
     ]
     return [c for c in checks if c is not None]
 

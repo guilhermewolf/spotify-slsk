@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Log in · spotify-slsk{% endblock %}
+{% block content %}
+<article class="login-card">
+  <header><strong>Log in</strong></header>
+  <form method="POST" action="{{ url_for('auth.login') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="next" value="{{ next }}">
+    <label for="username">Username</label>
+    <input type="text" id="username" name="username" autocomplete="username" required autofocus>
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" autocomplete="current-password" required>
+    <button type="submit">Log in</button>
+  </form>
+</article>
+{% endblock %}

@@ -893,6 +893,9 @@ def test_url_map_is_unchanged_by_the_blueprint_split(app_tmp):
         ("/system/tasks", "GET"),
         ("/queue", "GET"),
         ("/queue/cancel", "POST"),
+        ("/login", "GET"),
+        ("/login", "POST"),
+        ("/logout", "POST"),
         ("/system/status", "GET"),
         ("/system/tasks/<name>/run", "POST"),
     }

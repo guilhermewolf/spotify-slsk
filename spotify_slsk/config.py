@@ -112,6 +112,18 @@ NOTIFICATION_EVENTS = (
     "quarantined", "health_issue", "health_restored", "playlist_synced", "cycle_summary",
 )
 
+# The UI login's password hash (webui.auth). Underscore: never rendered.
+UI_AUTH_HASH_KEY = "_ui_auth_password_hash"
+
+
+def ui_auth_configured(conn: sqlite3.Connection) -> bool:
+    """Both a username and a password (stored hash or env) are set."""
+    return bool(
+        get_setting(conn, "UI_AUTH_USERNAME", "")
+        and (list_settings(conn).get(UI_AUTH_HASH_KEY) or os.getenv("UI_AUTH_PASSWORD"))
+    )
+
+
 # ---- deploy-time (env only) -------------------------------------------------
 
 DOWNLOAD_DIR = os.getenv("SLSKD_DOWNLOADS_DIR", "/downloads")
@@ -322,6 +334,8 @@ SETTINGS_SPEC = [
     ("WRITE_M3U", "1", "Keep a '<playlist name>.m3u8' in each playlist folder: the downloaded tracks in Spotify playlist order, relative paths, UTF-8 (1 = on, 0 = off). Rewritten after each sync when it changed", "bool"),
     ("WRITE_PLAYLIST_COVER", "1", "Keep a cover.jpg (cover.png for PNG images) in each playlist folder from the Spotify playlist image, cached under data/artwork. A cover you put there yourself is never replaced (1 = on, 0 = off)", "bool"),
     ("RECYCLE_BIN_RETENTION_DAYS", "0", "Files replaced by an upgrade or a manual grab go to the recycle bin, .quarantine/<playlist>/replaced/. When this is above 0, a daily step deletes those older than this many days (counted from when they were replaced). 0 = keep them forever. Files you quarantined yourself (.quarantine/<playlist>/) are never deleted automatically", "int0"),
+    ("UI_AUTH_USERNAME", "", "Web UI login: with this and UI_AUTH_PASSWORD set, every page except /healthz asks for a login. Empty = no login (fine on loopback; put an authenticating proxy or this in front of anything wider)", "text"),
+    ("UI_AUTH_PASSWORD", "", "Web UI password. Stored only as a salted hash; never shown or logged. Changing it logs every session out", "password"),
     ("BACKUP_RETENTION", "7", "Back the database up daily to data/backups/playlist_tracks-YYYYMMDD-HHMMSS.db (online backup, integrity-checked) and keep this many. 0 = no automatic backups (Backup now on System -> Status still works, and nothing is deleted)", "int0"),
     ("MIN_FREE_SPACE_GB", "5", "Health check: warn when the playlists volume has less free space than this many GB. 0 disables the check", "int0"),
     ("NTFY_URL", "", "ntfy server, e.g. https://ntfy.sh. Notifications are sent when this and NTFY_TOPIC are set", "url"),
