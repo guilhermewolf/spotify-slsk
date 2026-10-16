@@ -251,7 +251,9 @@ folder instead of being downloaded again. `LINK_MODE=hardlink` (default) uses
 no extra space and falls back to a copy when the folders are on different
 filesystems; `copy` makes an independent file; `off` downloads every time.
 Each playlist's file is independent: quarantining, replacing or renaming one
-never affects the other.
+never affects the other. Tags are the exception — a hardlink shares its
+data, so re-tagging one playlist's copy updates both (they are the same
+track, so the tags are identical anyway).
 
 **Recycle bin.** Files replaced by an upgrade or a manual grab go to
 `.quarantine/<playlist>/replaced/`. They are kept forever by default; set

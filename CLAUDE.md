@@ -39,7 +39,7 @@ and CI all agree; the Makefile defaults to `python3.12`). Individual targets:
   findings rather than adding ignores.
 - `make typecheck` — mypy over `spotify_slsk/` (`ignore_missing_imports`,
   `check_untyped_defs`). Every public function is annotated; keep it that way.
-- `make test` — 847 tests. Fast (~5s); no network, no external services. The
+- `make test` — 869 tests. Fast (~5s); no network, no external services. The
   real-FLAC decode tests need the `flac` CLI (CI apt-installs it) and skip with
   a reason without it.
 - `make audit` — `pip-audit` against the pinned `requirements.txt`. Advisories
@@ -334,6 +334,11 @@ unnormalised.
     quality, history `linked`. A hardlink is an independent name: quarantine,
     replace, rename and the scan all act on the row's own path, so one
     playlist's copy never affects another's (`tests/test_link.py`).
+    **Exception: tags.** A hardlink shares its data, so Re-tag (or any tag
+    write) on one playlist's name changes every playlist's copy. That is
+    benign — linked rows are the same track (Spotify id or ISRC), so the tags
+    are identical — and it is why `link_existing_copy` doesn't re-tag. With
+    `LINK_MODE=copy` each copy is tagged independently.
 15. **Playlist files.** After each playlist pass `<root>/<table>/<playlist
     name>.m3u8` (UTF-8 `#EXTM3U`, `#EXTINF:<s>,Artist - Title`, relative paths,
     Spotify order from the v8 `position` column, downloaded rows only) and
