@@ -864,6 +864,8 @@ def test_url_map_is_unchanged_by_the_blueprint_split(app_tmp):
         ("/track/<playlist_id>/<track_id>/retag", "POST"),
         ("/wanted", "GET"),
         ("/wanted/search", "POST"),
+        ("/wanted/cutoff", "GET"),
+        ("/wanted/cutoff/search", "POST"),
         ("/history", "GET"),
         ("/blocklist", "GET"),
         ("/blocklist/<int:entry_id>/delete", "POST"),
@@ -968,3 +970,67 @@ class TestLibraryHealthPage:
         self._seed(app_tmp, tmp_path)
         r = client.get("/track/pid1/t1")
         assert b"Lossless check" in r.data and b"16.2 kHz" in r.data
+
+
+class TestCutoffUnmet:
+    def _seed(self, app_tmp, upgrades=True):
+        from spotify_slsk.matching.quality import make_profile
+
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        db.set_setting(conn, "QUALITY_PROFILE",
+                       make_profile(["FLAC_24", "FLAC_16"], "FLAC_24", upgrades)[0].to_json())
+        db.upsert_playlist_meta(conn, "pid1", "pl_x", "Mix", "s")
+        db.create_table(conn, "pl_x")
+        rows = [("low", "Low Song", "FLAC_16"), ("top", "Top Song", "FLAC_24"),
+                ("sus", "Suspect Song", "FLAC_24"), ("new", "Unread Song", None),
+                ("missing", "Missing Song", "skip")]
+        for tid, name, quality in rows:
+            db.insert_track(conn, "pl_x", (tid, name, "Artist", "Album"))
+            if quality == "skip":
+                continue
+            db.update_download_status(conn, tid, "pl_x", success=True, file_path=f"/m/{tid}.flac")
+            if quality:
+                db.set_track_quality(conn, "pl_x", tid, quality)
+        db.save_file_check(conn, "pl_x", "sus", path="/m/sus.flac", size=1, mtime=1.0,
+                           rules_version=0, audio_check="suspect")
+        conn.close()
+
+    def test_lists_below_cutoff_and_suspect_only(self, app_tmp, client):
+        self._seed(app_tmp)
+        page = client.get("/wanted/cutoff").data
+        assert b"Low Song" in page and b"Suspect Song" in page
+        assert b"Top Song" not in page and b"Missing Song" not in page
+        assert b"Unread Song" not in page
+        assert b"1 downloaded track have no recorded quality yet" in page
+        assert b"counts as MP3 320" in page  # the suspect FLAC's effective quality
+        assert b"Quality upgrades are off" not in page
+
+    def test_warns_when_quality_upgrades_are_off(self, app_tmp, client):
+        self._seed(app_tmp, upgrades=False)
+        assert b"Quality upgrades are off" in client.get("/wanted/cutoff").data
+
+    def test_search_selected_queues_for_the_daemon(self, app_tmp, client, monkeypatch):
+        from spotify_slsk import runtime_state
+
+        self._seed(app_tmp)
+        runtime_state.pop_upgrade_checks()
+        woke = []
+        monkeypatch.setitem(app_tmp.config, "WAKE_DAEMON", lambda: woke.append(1))
+        r = post(client, "/wanted/cutoff/search",
+                 data={"tracks": ["pid1:low", "pid1:top", "pid1:nope"]})
+        assert r.status_code == 302
+        # Only listed tracks are queued: "top" meets the cutoff.
+        assert runtime_state.pop_upgrade_checks() == [("pl_x", "low")]
+        assert woke == [1]
+
+    def test_search_all(self, app_tmp, client):
+        from spotify_slsk import runtime_state
+
+        self._seed(app_tmp)
+        runtime_state.pop_upgrade_checks()
+        post(client, "/wanted/cutoff/search", data={"all": "1"})
+        assert sorted(runtime_state.pop_upgrade_checks()) == [("pl_x", "low"), ("pl_x", "sus")]
+
+    def test_wanted_pages_link_each_other(self, app_tmp, client):
+        assert b'href="/wanted/cutoff"' in client.get("/wanted").data
+        assert b'href="/wanted"' in client.get("/wanted/cutoff").data

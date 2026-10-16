@@ -313,3 +313,26 @@ def pop_quarantines() -> list:
         items = list(_quarantine_queue)
         _quarantine_queue.clear()
     return items
+
+
+# --- upgrade-check requests: web UI -> daemon thread ------------------------
+#
+# "Cutoff unmet" -> Search: the UI queues (table_name, track_id); the daemon
+# runs library.acquire.try_upgrade_track for each at the top of the next
+# cycle, whatever UPGRADE_CHECK_INTERVAL_HOURS says.
+
+_upgrade_lock = threading.Lock()
+_upgrade_queue: deque = deque(maxlen=5000)
+
+
+def enqueue_upgrade_check(table_name: str, track_id: str) -> None:
+    with _upgrade_lock:
+        if (table_name, track_id) not in _upgrade_queue:
+            _upgrade_queue.append((table_name, track_id))
+
+
+def pop_upgrade_checks() -> list:
+    with _upgrade_lock:
+        items = list(_upgrade_queue)
+        _upgrade_queue.clear()
+    return items

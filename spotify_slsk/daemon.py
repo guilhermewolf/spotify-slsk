@@ -275,6 +275,37 @@ def _process_manual_grabs(conn):
             logging.exception(f"Manual grab failed for {track.id} in {table_name}")
 
 
+def _process_upgrade_requests(conn: sqlite3.Connection) -> None:
+    """Upgrade checks queued from Wanted -> Cutoff unmet. They bypass the
+    UPGRADE_CHECK_INTERVAL_HOURS throttle (and run even when it is 0) but
+    stamp it like the regular pass."""
+    for table_name, track_id in runtime_state.pop_upgrade_checks():
+        if _shutdown.is_set():
+            return
+        row = get_track(conn, table_name, track_id)
+        if not row or not row["downloaded"]:
+            continue
+        track = Track(
+            row["id"], row["name"], row["artists"], row["album"], table_name,
+            duration_ms=row["duration_ms"], isrc=row["isrc"],
+        )
+        _touch_heartbeat()
+        runtime_state.set_activity(
+            "upgrading",
+            detail=f"Requested upgrade check: {track.name} — {track.artist}",
+            table_name=table_name,
+            track_id=track.id,
+            track_name=track.name,
+            track_artist=track.artist,
+        )
+        try:
+            try_upgrade_track(track, table_name, conn, row["path"])
+        except Exception:
+            logging.exception(f"[upgrade] Requested check failed for {track_id} in {table_name}")
+        finally:
+            mark_upgrade_checked(conn, table_name, track_id)
+
+
 def _process_quarantines(conn: sqlite3.Connection) -> None:
     """Quarantine library files the operator flagged on /library-health.
     Runs before the playlists so the reset rows re-download this cycle."""
@@ -426,6 +457,7 @@ def main() -> None:
             try:
                 _process_quarantines(conn)
                 _process_manual_grabs(conn)
+                _process_upgrade_requests(conn)
                 for pl in playlists:
                     if _shutdown.is_set():
                         break

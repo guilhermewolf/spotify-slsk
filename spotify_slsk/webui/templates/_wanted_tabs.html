@@ -1,0 +1,8 @@
+<nav aria-label="Wanted lists">
+  <ul class="filters">
+    <li><a href="{{ url_for('wanted.wanted_page') }}"
+           aria-current="{{ 'true' if wanted_tab == 'missing' else 'false' }}">Missing</a></li>
+    <li><a href="{{ url_for('wanted.cutoff_page') }}"
+           aria-current="{{ 'true' if wanted_tab == 'cutoff' else 'false' }}">Cutoff unmet</a></li>
+  </ul>
+</nav>

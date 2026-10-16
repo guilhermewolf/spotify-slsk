@@ -293,6 +293,7 @@ button.danger:focus {
 .badge-event-imported, .badge-event-upgraded { background: var(--ss-ok-bg); color: var(--ss-ok); }
 .badge-event-grabbed, .badge-event-retried { background: var(--ss-pending-bg); color: var(--ss-pending); }
 .badge-event-download_failed, .badge-event-import_rejected { background: var(--ss-suspended-bg); color: var(--ss-suspended); }
+.badge-event-replaced_file,
 .badge-event-deleted_file { background: var(--ss-retry-bg); color: var(--ss-retry); }
 
 /* ---- filters -------------------------------------------------------- */
