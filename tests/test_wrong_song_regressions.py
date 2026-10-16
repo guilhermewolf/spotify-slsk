@@ -345,3 +345,37 @@ class TestWebsiteNoise:
     def test_filename_coverage_not_diluted(self, path):
         assert filename_match(path, "Get Down", "Owen Andrews") == (1.0, None)
 
+
+
+# A whole content word swapped or added is a different song; the fuzzy
+# fallback used to floor at 0.15 + 0.85*sim, so "Get Up" passed for "Get Down".
+class TestContentWordGate:
+    @pytest.mark.parametrize("ft,dt", [
+        ("Get Up", "Get Down"),
+        ("Get Up www.electronicfresh.com", "Get Down"),
+        ("Get Up Now Baby", "Get Down Now Baby"),
+        ("Song (Alpha Remix)", "Song - Bravo Remix"),
+        ("Pt. 3", "Pt. 2"),
+        # Regional spelling: rejected on purpose. Spotify and the tag usually
+        # come from the same release, so a differing word is far likelier a
+        # different song than "Colour"/"Color"; a miss only costs a retry.
+        ("Colour", "Color"),
+    ])
+    def test_rejected(self, ft, dt):
+        score, reason = score_track_match(ft, "Artist", dt, "Artist")
+        assert score < MIN_MATCH, reason
+
+    @pytest.mark.parametrize("ft,dt", [
+        ("Don't Stop", "Dont Stop"),
+        ("Rock 'n' Roll", "Rock n Roll"),
+        ("Mañana", "Manana"),
+        ("Don’t Stop (feat. Someone)", "Don't Stop"),
+        ("Here Comes The Sun - Remastered 2019", "Here Comes The Sun"),
+    ])
+    def test_spelling_variants_pass(self, ft, dt):
+        score, reason = score_track_match(ft, "Artist", dt, "Artist")
+        assert score >= MIN_MATCH, reason
+
+    def test_candidate_side_rejects_swapped_word(self):
+        assert filename_match("Artist - Get Up.flac", "Get Down", "Artist")[1] is not None
+        assert filename_match("Get Up - Artist.flac", "Get Down", "Artist")[1] is not None
