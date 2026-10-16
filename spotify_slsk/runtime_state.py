@@ -19,6 +19,19 @@ import threading
 import time
 from collections import deque
 
+from . import config
+
+
+def touch_heartbeat() -> None:
+    """Update config.HEARTBEAT_FILE so the Docker HEALTHCHECK can tell a
+    busy daemon from a wedged one. Never raises."""
+    try:
+        with open(config.HEARTBEAT_FILE, "w") as f:
+            f.write(str(time.time()))
+    except Exception:
+        logging.debug("Could not write heartbeat file", exc_info=True)
+
+
 _lock = threading.Lock()
 _activity: dict = {
     "phase": "starting",
@@ -276,4 +289,27 @@ def pop_manual_grabs() -> list:
     with _grab_lock:
         items = list(_grab_queue)
         _grab_queue.clear()
+    return items
+
+
+# --- quarantine requests: web UI -> daemon thread --------------------------
+#
+# Like grabs: the UI only queues (table_name, track_id, flagged_path); the
+# daemon moves the file and resets the row (library.health.quarantine_track),
+# and skips the request if the row no longer points at flagged_path.
+
+_quarantine_lock = threading.Lock()
+_quarantine_queue: deque = deque(maxlen=5000)
+
+
+def enqueue_quarantine(table_name: str, track_id: str, path: str | None) -> None:
+    with _quarantine_lock:
+        if not any(q[:2] == (table_name, track_id) for q in _quarantine_queue):
+            _quarantine_queue.append((table_name, track_id, path))
+
+
+def pop_quarantines() -> list:
+    with _quarantine_lock:
+        items = list(_quarantine_queue)
+        _quarantine_queue.clear()
     return items

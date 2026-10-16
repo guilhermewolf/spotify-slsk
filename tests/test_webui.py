@@ -394,6 +394,24 @@ class TestSettingsValidation:
                  follow_redirects=True)
         assert b"must be" in r.data
 
+    def test_every_setting_is_rendered(self, client):
+        # The form clears every key it does not send, so an unrendered key
+        # had its override silently deleted on the next save.
+        from spotify_slsk.config import SETTINGS_SPEC
+
+        r = client.get("/settings")
+        for key, *_ in SETTINGS_SPEC:
+            assert f'name="{key}"'.encode() in r.data, key
+
+    def test_bool_setting_is_normalised(self, app_tmp, client):
+        post(client, "/settings", data={"LOSSLESS_CHECK_ENABLED": "off"})
+        r = post(client, "/settings", data={"LOSSLESS_CHECK_ENABLED": "maybe"},
+                 follow_redirects=True)
+        assert b"must be 1 (on) or 0 (off)" in r.data
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        assert db.list_settings(conn).get("LOSSLESS_CHECK_ENABLED") == "0"
+        conn.close()
+
     def test_unknown_audio_format_is_rejected(self, client):
         r = post(client, "/settings", data={"SLSKD_PREFERRED_FORMATS": "flac,exe"},
                  follow_redirects=True)
@@ -731,6 +749,12 @@ class TestInteractiveSearchUI:
         assert r.data.count(b'class="actions-col"') == 3
         assert b"Artist - Song.flac" in client.get("/track/pid1/t1").data
 
+    def test_plausibility_note_is_shown_for_accepted_results(self, app_tmp, client, monkeypatch):
+        note = "likely upsampled: 900 kbps for 24-bit/96 kHz (< 1200); ranked lower"
+        monkeypatch.setattr(type(self), "CAND_OK", dict(self.CAND_OK, note=note))
+        self._search(app_tmp, client, monkeypatch)
+        assert b"likely upsampled: 900 kbps for 24-bit/96 kHz" in client.get("/track/pid1/t1/search").data
+
     def test_grab_accepted_queues_for_daemon_and_wakes(self, app_tmp, client, monkeypatch):
         from spotify_slsk import runtime_state
         self._search(app_tmp, client, monkeypatch)
@@ -847,6 +871,10 @@ def test_url_map_is_unchanged_by_the_blueprint_split(app_tmp):
         ("/blocklist", "GET"),
         ("/blocklist/<int:entry_id>/delete", "POST"),
         ("/blocklist/ban-user", "POST"),
+        ("/library-health", "GET"),
+        ("/library-health/scan", "POST"),
+        ("/library-health/quarantine", "POST"),
+        ("/library-health/ignore", "POST"),
         ("/settings", "GET"),
         ("/settings", "POST"),
         ("/settings/test-ntfy", "POST"),
@@ -856,3 +884,90 @@ def test_url_map_is_unchanged_by_the_blueprint_split(app_tmp):
         ("/activity.json", "GET"),
         ("/healthz", "GET"),
     }
+
+
+class TestLibraryHealthPage:
+    def _seed(self, app_tmp, tmp_path, problems=("fake_lossless",), path_matches=True):
+        f = tmp_path / "x.flac"
+        f.write_bytes(b"a")
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        db.upsert_playlist_meta(conn, "pid1", "pl_x", "Mix", "s")
+        db.create_table(conn, "pl_x")
+        db.insert_track(conn, "pl_x", ("t1", "Song", "Artist", "Album", 200_000))
+        db.update_download_status(conn, "t1", "pl_x", success=True, file_path=str(f))
+        db.save_file_check(
+            conn, "pl_x", "t1", path=str(f) if path_matches else "/old.flac",
+            size=1, mtime=1.0, rules_version=1, audio_check="fake",
+            audio_cutoff_hz=16200, audio_drop_db=30.0, problems=list(problems),
+            evidence={"expected_title": "Song", "expected_artist": "Artist",
+                      "file_title": "Song", "file_artist": "Artist",
+                      "reasons": {"fake_lossless": "fake: steepest drop 30 dB at 16.2 kHz"}},
+        )
+        conn.close()
+
+    def test_lists_flagged_files_with_evidence(self, app_tmp, client, tmp_path):
+        self._seed(app_tmp, tmp_path)
+        r = client.get("/library-health")
+        assert r.status_code == 200
+        assert b"fake: steepest drop 30 dB at 16.2 kHz" in r.data
+        assert b"cutoff 16.2 kHz" in r.data
+        assert b'href="/library-health"' in client.get("/").data  # nav link
+        # CSP: no inline scripts or handlers on the new page.
+        assert b"onclick" not in r.data and b"<script>" not in r.data
+        assert b'name="csrf_token"' in r.data
+        assert b"Song" in client.get("/library-health?problem=fake_lossless").data
+        assert b"Nothing flagged" in client.get("/library-health?problem=duration_off").data
+
+    def test_stale_checks_are_hidden(self, app_tmp, client, tmp_path):
+        self._seed(app_tmp, tmp_path, path_matches=False)
+        assert b"Nothing flagged" in client.get("/library-health").data
+
+    def test_scan_button_queues_for_the_daemon(self, app_tmp, client):
+        woke = []
+        app_tmp.config["WAKE_DAEMON"] = lambda: woke.append(1)
+        assert client.post("/library-health/scan").status_code == 400  # CSRF
+        post(client, "/library-health/scan")
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        assert db.get_setting(conn, "_library_scan_pending", "0") == "1"
+        conn.close()
+        assert woke == [1]
+        assert b"A scan is in progress" in client.get("/library-health").data
+
+    def test_quarantine_is_queued_not_done_by_the_ui(self, app_tmp, client, tmp_path):
+        from spotify_slsk import runtime_state
+
+        self._seed(app_tmp, tmp_path)
+        runtime_state.pop_quarantines()
+        post(client, "/library-health/quarantine", {"only": "pid1:t1"})
+        flagged = str(tmp_path / "x.flac")
+        assert runtime_state.pop_quarantines() == [("pl_x", "t1", flagged)]
+        assert (tmp_path / "x.flac").exists()
+        post(client, "/library-health/quarantine", {"tracks": ["pid1:t1", "bogus:t9"]})
+        assert runtime_state.pop_quarantines() == [("pl_x", "t1", flagged)]
+        r = post(client, "/library-health/quarantine", {}, follow_redirects=True)
+        assert b"No tracks selected" in r.data
+
+    def test_ignore_hides_the_row_until_undone(self, app_tmp, client, tmp_path):
+        self._seed(app_tmp, tmp_path)
+        post(client, "/library-health/ignore", {"only": "pid1:t1"})
+        assert b"Nothing flagged" in client.get("/library-health").data
+        assert b"Un-ignore" in client.get("/library-health?ignored=1").data
+        post(client, "/library-health/ignore?undo=1", {"only": "pid1:t1"})
+        assert b"fake: steepest drop" in client.get("/library-health").data
+
+    def test_isrc_note_alone_is_info_not_a_problem(self, app_tmp, client, tmp_path):
+        self._seed(app_tmp, tmp_path, problems=())
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        check = db.get_file_check(conn, "pl_x", "t1")
+        db.save_file_check(conn, "pl_x", "t1", path=check["path"], size=1, mtime=1.0,
+                           rules_version=1, evidence={"isrc_note": "ISRC differs: file A, expected B"})
+        conn.close()
+        assert b"Nothing flagged" in client.get("/library-health").data
+        r = client.get("/library-health?problem=isrc_note")
+        assert b"ISRC differs: file A, expected B" in r.data
+        assert b'name="tracks"' not in r.data  # never in a bulk quarantine
+
+    def test_track_page_shows_the_verdict(self, app_tmp, client, tmp_path):
+        self._seed(app_tmp, tmp_path)
+        r = client.get("/track/pid1/t1")
+        assert b"Lossless check" in r.data and b"16.2 kHz" in r.data

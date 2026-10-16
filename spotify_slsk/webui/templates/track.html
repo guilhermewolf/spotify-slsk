@@ -44,6 +44,23 @@
   {% endif %}
   <dt>Duration</dt>
   <dd>{{ track.duration_ms|duration_ms }}</dd>
+  {% if track.isrc %}
+  <dt>ISRC</dt>
+  <dd><code>{{ track.isrc }}</code></dd>
+  {% endif %}
+  {% if check and check.path == track.path %}
+  <dt>Lossless check</dt>
+  <dd>
+    {% if check.audio_check %}
+      <span class="badge badge-{{ 'downloaded' if check.audio_check == 'ok' else ('suspended' if check.audio_check in ('fake', 'upsampled', 'padded_16') else 'retrying') }}">{{ check.audio_check }}</span>
+      {% if check.audio_cutoff_hz %}<span class="subtle">steepest drop at {{ (check.audio_cutoff_hz / 1000)|round(1) }} kHz ({{ check.audio_drop_db }} dB)</span>{% endif %}
+    {% else %}<span class="subtle">not a lossless file</span>{% endif %}
+    {% if check.problems %}
+      <div class="subtle">Library health: {{ check.problems|join(', ')|replace('_', ' ') }}{% if check.ignored %} (ignored){% endif %}</div>
+    {% endif %}
+    <div class="subtle">checked {{ check.checked_at }}</div>
+  </dd>
+  {% endif %}
   <dt>Attempts</dt>
   <dd>{{ track.attempts }}</dd>
   <dt>Last attempt</dt>

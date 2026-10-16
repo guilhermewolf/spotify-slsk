@@ -183,6 +183,7 @@ def search_and_download(
     max_version_tier: int | None = None,
     timeout: int = 60,
     duration_ms: int | None = None,
+    lossless_only: bool = False,
 ) -> str | None:
     """Run the full query waterfall, attempting download from each.
 
@@ -207,6 +208,7 @@ def search_and_download(
                 max_version_tier=max_version_tier,
                 expected_duration_ms=duration_ms,
                 is_blocked=is_blocked,
+                lossless_only=lossless_only,
             )
             if results
             else []

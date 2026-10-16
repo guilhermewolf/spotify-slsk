@@ -80,6 +80,32 @@ def _duration_off(diff_seconds, longer_ok=False) -> bool:
     return abs(diff_seconds) > config.MAX_DURATION_DIFF_SECONDS
 
 
+# A 16-bit/44.1 kHz stereo FLAC compresses to roughly 600-1100 kbps; below
+# this it is almost certainly a lossy file re-encoded (and padded with
+# nothing). Mono recordings can legitimately sit near it - a known edge.
+MIN_FLAC_KBPS = 400
+# 24-bit >= 88.2 kHz FLAC of real hi-res content is usually 2000+ kbps; a
+# CD master upsampled into that container compresses far better.
+MIN_HIRES_FLAC_KBPS = 1200
+
+
+def _flac_plausibility(kbps, bit_depth, sample_rate) -> tuple[str | None, str | None]:
+    """(reject_reason, demote_note) for a FLAC from its size-derived bitrate."""
+    if kbps is None:
+        return None, None
+    if (bit_depth or 16) <= 16 and (sample_rate or 44100) <= 48000 and kbps < MIN_FLAC_KBPS:
+        return (
+            f"FLAC at {kbps} kbps is implausibly low for 16-bit/44.1 kHz "
+            f"(< {MIN_FLAC_KBPS}; likely a lossy transcode)"
+        ), None
+    if (bit_depth or 0) >= 24 and (sample_rate or 0) >= 88200 and kbps < MIN_HIRES_FLAC_KBPS:
+        return None, (
+            f"likely upsampled: {kbps} kbps for {bit_depth}-bit/"
+            f"{sample_rate / 1000:g} kHz (< {MIN_HIRES_FLAC_KBPS}); ranked lower"
+        )
+    return None, None
+
+
 def _effective_mp3_kbps(size_bytes, length_sec):
     if not size_bytes or not length_sec or length_sec <= 0:
         return None
@@ -191,6 +217,7 @@ def evaluate_candidates(
     max_version_tier: int | None = None,
     expected_duration_ms: int | None = None,
     is_blocked: IsBlocked | None = None,
+    lossless_only: bool = False,
 ) -> list[Candidate]:
     """
     Judge every file in slskd search results against the expected track.
@@ -205,8 +232,9 @@ def evaluate_candidates(
     (used by the upgrade pass). `expected_duration_ms` (Spotify) rejects
     files whose reported length is more than config.MAX_DURATION_DIFF_SECONDS off.
     `is_blocked(username, filename)` (see db.load_blocklist) rejects
-    blocklisted peer files and banned peers. Title/artist/version use the
-    strict rules in `filename_match`.
+    blocklisted peer files and banned peers. `lossless_only` rejects every
+    lossy format (replacing a "suspect" lossless file). Title/artist/version
+    use the strict rules in `filename_match`.
     """
     evaluated = []
 
@@ -234,6 +262,13 @@ def evaluate_candidates(
             effective_mp3 = (
                 _effective_mp3_kbps(size_bytes, length_sec) if ext == ".mp3" else None
             )
+            flac_reject, flac_note = (
+                _flac_plausibility(
+                    _effective_mp3_kbps(size_bytes, length_sec),
+                    file.bit_depth, file.sample_rate,
+                )
+                if ext == ".flac" else (None, None)
+            )
             entry: Candidate = {
                 "user": user,
                 "user_upload_speed": user_upload_speed,
@@ -254,6 +289,8 @@ def evaluate_candidates(
                 "version_tier": version_tier(base),
                 "accepted": False,
                 "reason": None,
+                # Accepted but ranked below its peers (shown in the UI).
+                "note": flac_note,
             }
             evaluated.append(entry)
 
@@ -261,6 +298,8 @@ def evaluate_candidates(
                 entry["reason"] = "blocklisted"
             elif ext not in config.PREFERRED_FORMATS:
                 entry["reason"] = f"format not allowed: {ext or '(none)'}"
+            elif lossless_only and ext not in config.LOSSLESS_EXTS:
+                entry["reason"] = "not lossless (replacing a suspect lossless file)"
             # Reject MP3s whose reported/inferred bitrate is known-low.
             elif ext == ".mp3" and effective_bitrate is not None and effective_bitrate < 320:
                 entry["reason"] = f"bitrate {effective_bitrate} < 320"
@@ -274,6 +313,8 @@ def evaluate_candidates(
                 entry["reason"] = (
                     f"effective bitrate {effective_mp3} < {config.MIN_EFFECTIVE_MP3_KBPS}"
                 )
+            elif flac_reject:
+                entry["reason"] = flac_reject
             elif (
                 config.MAX_DURATION_DIFF_SECONDS > 0
                 and expected_duration_ms
@@ -336,7 +377,8 @@ def summarize_evaluation(evaluated: list[Candidate], limit: int = 50) -> dict[st
 def sort_candidates(candidates: Iterable[Candidate]) -> list[Candidate]:
     """
     Sort by DJ-version tier (Extended Mix > Original Mix > other), then by
-    preferred extension, then bitrate desc (unknown last), then peer upload
+    preferred extension, then demoted (likely-upsampled hi-res) last, then
+    bitrate desc (unknown last), then peer upload
     speed desc.
     """
     def fmt_rank(ext: str) -> int:
@@ -354,6 +396,7 @@ def sort_candidates(candidates: Iterable[Candidate]) -> list[Candidate]:
         key=lambda c: (
             c.get("version_tier", 2),
             fmt_rank(c["ext"]),
+            bool(c.get("note")),
             -bitrate_rank(c.get("bitrate")),
             -(c.get("user_upload_speed") or 0),
         ),

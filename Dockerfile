@@ -9,10 +9,16 @@ ENV HEARTBEAT_STALE_SECONDS=900
 
 WORKDIR /app
 
+# flac decodes the sampled window for the fake-lossless check
+# (importer/audio_check.py); without it every FLAC is judged "unknown".
+RUN apk add --no-cache flac
+
 # Dependencies first: this layer is cached unless requirements.txt changes,
 # so an application-code edit rebuilds in seconds.
 COPY requirements.txt /app/
-RUN pip install --no-cache-dir -r requirements.txt
+# numpy ships ~20 MB of its own test suite; nothing imports it at runtime.
+RUN pip install --no-cache-dir -r requirements.txt \
+    && find /usr/local/lib/python3.12/site-packages/numpy -type d -name tests -prune -exec rm -rf {} +
 
 COPY . /app/
 

@@ -7,7 +7,15 @@ import logging
 import os
 import sqlite3
 
-from ..db import clear_tried_entries, get_track, record_history, update_download_status
+from ..db import (
+    add_tried_file,
+    clear_tried_entries,
+    get_file_check,
+    get_track,
+    record_history,
+    update_download_status,
+)
+from ..importer.audio_check import SUSPECT
 from ..importer.process import process_downloaded_file
 from ..matching.normalize import version_tier
 from ..models import Track
@@ -45,6 +53,11 @@ def try_upgrade_track(
 ) -> bool:
     """If slskd has a *strictly better* version_tier, swap the file in place.
 
+    A file the lossless check called "suspect" (cliff in the MP3-320 band)
+    may instead be replaced by any lossless copy of the same or a better
+    version; the current file's name goes to `_tried` so it is not grabbed
+    again, and the new download is spectrum-checked like any other.
+
     Failure semantics differ from a fresh download: we never call
     update_download_status(success=False) here because the track is already
     downloaded — incrementing attempts would eventually suspend a row that
@@ -52,7 +65,15 @@ def try_upgrade_track(
     """
     current_basename = os.path.basename(current_path) if current_path else ""
     current_tier = version_tier(current_basename)
-    if current_tier == 0:
+    check = get_file_check(conn, playlist_name, track.id)
+    suspect = bool(
+        check and check["audio_check"] == SUSPECT and check["path"] == current_path
+    )
+    max_tier = current_tier
+    if suspect:
+        max_tier = current_tier + 1  # same version is fine, if truly lossless
+        add_tried_file(conn, playlist_name, track.id, current_basename)
+    elif current_tier == 0:
         logging.info(
             f"[upgrade] '{track.name}' already at top tier (Extended Mix); skipping"
         )
@@ -60,7 +81,8 @@ def try_upgrade_track(
 
     logging.info(
         f"[upgrade] Checking '{track.name}' by '{track.artist}' "
-        f"(current tier={current_tier}, file={current_basename or '∅'})"
+        f"(current tier={current_tier}, file={current_basename or '∅'}"
+        f"{', suspect lossless' if suspect else ''})"
     )
 
     new_file = search_and_download(
@@ -70,8 +92,9 @@ def try_upgrade_track(
         playlist_name=playlist_name,
         track_id=track.id,
         album=track.album,
-        max_version_tier=current_tier,
+        max_version_tier=max_tier,
         duration_ms=track.duration_ms,
+        lossless_only=suspect,
     )
     if not new_file:
         logging.info(f"[upgrade] No better-tier candidate for '{track.name}'")

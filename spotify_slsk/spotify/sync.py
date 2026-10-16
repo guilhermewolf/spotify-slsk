@@ -80,9 +80,10 @@ def fetch_and_compare_tracks(
             continue
         artists_str = extract_artists_string(track)
         duration_ms = track.get("duration_ms")
+        isrc = (track.get("external_ids") or {}).get("isrc")
 
         if track["id"] in db_tracks:
-            known_durations.append((track["id"], duration_ms))
+            known_durations.append((track["id"], duration_ms, isrc))
         else:
             track_data = (
                 track["id"],
@@ -90,6 +91,7 @@ def fetch_and_compare_tracks(
                 artists_str,
                 track["album"]["name"],
                 duration_ms,
+                isrc,
             )
             insert_track(conn, table_name, track_data)
             logging.info(
@@ -104,10 +106,11 @@ def fetch_and_compare_tracks(
                     track["album"]["name"],
                     playlist_id,
                     duration_ms=duration_ms,
+                    isrc=isrc,
                 )
             )
 
-    # Rows inserted before schema v5 have no duration; fill them in.
+    # Rows inserted before schema v5/v6 have no duration/ISRC; fill them in.
     if known_durations:
         backfill_durations(conn, table_name, known_durations)
 

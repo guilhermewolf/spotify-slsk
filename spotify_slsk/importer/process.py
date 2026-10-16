@@ -12,19 +12,36 @@ import os
 import shutil
 import sqlite3
 
-from .. import config
+from .. import config, runtime_state
 from ..db import (
     add_blocklist,
     add_tried_file,
     get_track,
+    mark_upgrade_due,
     record_history,
+    save_file_check,
     update_download_status,
 )
-from ..matching.candidates import filename_match
+from ..matching.candidates import _duration_off, filename_match
+from ..matching.normalize import version_mismatch, version_tier
 from ..matching.tracks import find_closest_match, score_track_match
 from ..models import Candidate, Track
 from ..utils import fmt_duration
-from .tags import audio_length_seconds, extract_metadata_from_file, tag_audio_file
+from .audio_check import (
+    BLOCKLIST_VERDICTS,
+    CHECKABLE_EXTS,
+    SUSPECT,
+    AudioCheck,
+    check_file,
+    rules_key,
+)
+from .tags import (
+    audio_length_seconds,
+    extract_metadata_from_file,
+    normalize_isrc,
+    read_isrc,
+    tag_audio_file,
+)
 
 
 def _fallback_match_untagged(file_path, expected_track, source=None):
@@ -110,8 +127,11 @@ def process_downloaded_file(
 
     `source` is the slskd candidate the file came from. A rejection only
     blocklists that peer file when the fault is the file's own, whatever
-    track it is for: no usable tags, unreadable audio, or a real length
-    far from what the peer advertised (truncated/corrupt). A mismatch
+    track it is for: no usable tags, unreadable audio, a real length
+    far from what the peer advertised (truncated/corrupt), or a 24-bit file
+    that is padded 16-bit audio. A fake/upsampled verdict (see
+    importer.audio_check) rejects for this track only; "suspect" and
+    "unknown" are accepted. A mismatch
     against the *requested* track ("no match", "low score", a filename or
     Spotify-duration miss) is recorded in the track's _tried list and
     history only — the same file can be exactly right for another track,
@@ -137,6 +157,28 @@ def process_downloaded_file(
 
     title, artist, album = extract_metadata_from_file(file_path)
 
+    # ISRC. Equal -> strong accept evidence: it may override a low
+    # title/artist score below, never a version mismatch. Different -> NOT a
+    # rejection on its own: singles, albums, remasters and compilations carry
+    # different ISRCs for the same song. It is logged and recorded, and only
+    # rejects together with another failure (low score, version mismatch, or
+    # a real duration off from Spotify's).
+    expected_isrc = file_isrc = isrc_conflict = None
+    expected_ms = None
+    expected_name = ""
+    if not reconcile and track_id is not None:
+        row = get_track(conn, playlist_name, track_id) or {}
+        expected_isrc, expected_ms = normalize_isrc(row.get("isrc")), row.get("duration_ms")
+        expected_name = row.get("name") or ""
+        file_isrc = read_isrc(file_path)
+        if expected_isrc and file_isrc and expected_isrc != file_isrc:
+            isrc_conflict = f"ISRC mismatch (file {file_isrc}, expected {expected_isrc})"
+            logging.warning(f"{isrc_conflict} for {file_path}; checking other evidence")
+    isrc_match = bool(expected_isrc and file_isrc == expected_isrc)
+
+    def _with_isrc(reason: str) -> str:
+        return f"{reason} + {isrc_conflict}" if isrc_conflict else reason
+
     if not title or not artist:
         ok, reason = (
             _fallback_match_untagged(file_path, expected_track, source)
@@ -144,10 +186,11 @@ def process_downloaded_file(
             else (False, "invalid metadata")
         )
         if not ok:
+            assert reason is not None
             logging.warning(f"❌ Rejecting {file_path}: {reason}")
             _reject_and_log(
                 file_path, playlist_name, conn, track_id=track_id,
-                reason=reason, destructive=not reconcile, source=source,
+                reason=_with_isrc(reason), destructive=not reconcile, source=source,
                 peer_fault=reason in _PEER_FAULT_REASONS,
             )
             return False, None
@@ -169,15 +212,49 @@ def process_downloaded_file(
             return False, None
 
         track_id, db_title, db_artist, db_album = match
-        if score < config.MIN_MATCH_SCORE:
+        if isrc_match and score < config.MIN_MATCH_SCORE and not version_mismatch(db_title, title, db_artist):
+            logging.info(
+                f"Low tag score ({score:.2f}) for '{title}' by '{artist}' overridden "
+                f"by matching ISRC {file_isrc}"
+            )
+            match_method = "isrc"
+        elif score < config.MIN_MATCH_SCORE:
             logging.warning(f"⚠️ Low match score ({score:.2f}) for {title} by {artist}. Skipping update.")
-            _reject_and_log(file_path, playlist_name, conn, track_id=track_id, reason="low score", destructive=not reconcile, source=source)
+            _reject_and_log(file_path, playlist_name, conn, track_id=track_id, reason=_with_isrc("low score"), destructive=not reconcile, source=source)
             return False, None
+
+    if isrc_conflict and expected_ms and config.MAX_DURATION_DIFF_SECONDS > 0:
+        length = audio_length_seconds(file_path)
+        longer_ok = version_tier(os.path.basename(file_path)) < version_tier(expected_name)
+        if length is not None and _duration_off(length - expected_ms / 1000, longer_ok=longer_ok):
+            reason = _with_isrc(
+                f"duration {fmt_duration(length)} vs {fmt_duration(expected_ms / 1000)}"
+            )
+            logging.warning(f"❌ Rejecting {file_path}: {reason}")
+            _reject_and_log(file_path, playlist_name, conn, track_id=track_id, reason=reason, source=source)
+            return False, None
+
+    audio = None if reconcile else _lossless_check(file_path)
+    if audio is not None and audio.rejected:
+        # Deleted and tried for this track. Only an exact verdict (padded_16)
+        # blocklists the peer file globally: fake/upsampled rest on thin dB
+        # margins, and a false positive must not ban a good file everywhere.
+        reason = audio.describe()
+        logging.warning(f"❌ Rejecting {file_path}: {reason}")
+        _reject_and_log(
+            file_path, playlist_name, conn, track_id=track_id, reason=reason,
+            source=source, peer_fault=audio.verdict in BLOCKLIST_VERDICTS,
+        )
+        return False, None
 
     # Fall back to the Spotify-known album when the downloaded file has no
     # album tag (observed during Phase B testing: downloaded MP3 had no TALB).
     effective_album = album or db_album
-    tag_audio_file(file_path, title, artist, effective_album)
+    # On a conflict the file's own ISRC is kept (write_tags leaves it alone).
+    tag_audio_file(
+        file_path, title, artist, effective_album,
+        isrc=None if isrc_conflict else (expected_isrc or file_isrc),
+    )
 
     # If the file is already inside the playlists dir, don't move it.
     playlists_root = os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists")
@@ -201,13 +278,63 @@ def process_downloaded_file(
                 conn, "imported", table_name=playlist_name, track_id=track_id,
                 path=final_path,
                 match=match_method,
+                isrc=file_isrc if isrc_match else None,
+                isrc_mismatch=isrc_conflict,
+                audio=audio.describe() if audio else None,
                 username=(source or {}).get("user"),
                 filename=(source or {}).get("filename"),
             )
+            _record_import_check(conn, playlist_name, track_id, final_path, audio)
         return True, final_path
 
     logging.error(f"❌ Failed to move {file_path} to playlist folder.")
     return False, None
+
+
+def _lossless_check(file_path: str) -> AudioCheck | None:
+    """Spectrum-check a lossless download (None when not applicable).
+    ~1-2 s on a low-power NAS; the heartbeat is touched around it."""
+    if (
+        not config.LOSSLESS_CHECK_ENABLED
+        or os.path.splitext(file_path)[1].lower() not in CHECKABLE_EXTS
+    ):
+        return None
+    runtime_state.touch_heartbeat()
+    try:
+        audio = check_file(file_path)
+    finally:
+        runtime_state.touch_heartbeat()
+    logging.info(f"Lossless check {file_path}: {audio.describe()}")
+    return audio
+
+
+def _record_import_check(conn, table_name, track_id, path, audio):
+    """Persist the import's verdict for the track page and the health scan.
+
+    rules_version 0: the scan still re-verifies identity with its own rules,
+    but reuses this audio verdict while the file is unchanged. A suspect
+    file is made due for the upgrade pass, which then looks for a lossless
+    replacement (library.acquire.try_upgrade_track).
+    """
+    size: int | None = None
+    mtime: float | None = None
+    try:
+        st = os.stat(path)
+        size, mtime = st.st_size, st.st_mtime
+    except OSError:
+        pass
+    suspect = audio is not None and audio.verdict == SUSPECT
+    save_file_check(
+        conn, table_name, track_id, path=path, size=size, mtime=mtime,
+        rules_version=0,
+        audio_check=audio.verdict if audio else None,
+        audio_cutoff_hz=audio.cutoff_hz if audio else None,
+        audio_drop_db=audio.drop_db if audio else None,
+        problems=["suspect_lossless"] if suspect else [],
+        evidence={"lossless_rules": rules_key()},
+    )
+    if suspect:
+        mark_upgrade_due(conn, table_name, track_id)
 
 
 # Rejections that condemn the peer file for every track (see

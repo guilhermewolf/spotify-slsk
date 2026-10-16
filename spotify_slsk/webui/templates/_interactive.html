@@ -51,6 +51,7 @@
             </td>
             <td>
               {% if c.accepted %}<span class="badge badge-downloaded">accepted</span>
+              {% if c.note %}<div class="subtle">{{ c.note }}</div>{% endif %}
               {% else %}<span class="badge badge-suspended">rejected</span>
               <div class="subtle">{{ c.reason }}</div>{% endif %}
             </td>

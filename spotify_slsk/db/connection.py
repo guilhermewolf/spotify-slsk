@@ -2,7 +2,7 @@
 import logging
 import sqlite3
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
@@ -23,9 +23,8 @@ def _ensure_schema_version(conn: sqlite3.Connection) -> None:
     """Bootstrap PRAGMA user_version so future migrations can diff cleanly."""
     try:
         current = conn.execute("PRAGMA user_version").fetchone()[0]
-        if current < 5:
-            _migrate_to_v5(conn)
         if current < SCHEMA_VERSION:
+            _migrate_track_columns(conn)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.commit()
             if current == 0:
@@ -42,14 +41,15 @@ def _ensure_schema_version(conn: sqlite3.Connection) -> None:
         logging.warning(f"Failed to read/set schema user_version: {e}")
 
 
-def _migrate_to_v5(conn: sqlite3.Connection) -> None:
-    """v5: per-playlist tables gain `duration_ms` (Spotify track length).
+def _migrate_track_columns(conn: sqlite3.Connection) -> None:
+    """v5 and v6: per-playlist tables gain `duration_ms` (v5, Spotify track
+    length) and `isrc` (v6, Spotify external_ids.isrc).
 
     Every catalogued table is migrated here rather than lazily in
     create_table, because the webui reads tables of playlists the daemon
     hasn't synced since the upgrade (disabled ones, for instance). Stored
     snapshots are cleared so the next sync re-reads every track and
-    backfills the new column; existing rows are NULL until then.
+    backfills the new columns; existing rows are NULL until then.
     """
     tables = [
         r[0]
@@ -60,15 +60,20 @@ def _migrate_to_v5(conn: sqlite3.Connection) -> None:
     ]
     with conn:
         for table_name in tables:
-            _add_duration_column(conn, table_name)
+            _add_track_columns(conn, table_name)
         conn.execute("UPDATE playlists_meta SET snapshot_id = NULL")
 
 
-def _add_duration_column(conn: sqlite3.Connection, table_name: str) -> None:
+# Columns added to per-playlist tables after their first release.
+_TRACK_COLUMNS = (("duration_ms", "INTEGER"), ("isrc", "TEXT"))
+
+
+def _add_track_columns(conn: sqlite3.Connection, table_name: str) -> None:
     cols = {row[1] for row in conn.execute(f'PRAGMA table_info("{table_name}")')}
-    if "duration_ms" not in cols:
-        conn.execute(f'ALTER TABLE "{table_name}" ADD COLUMN duration_ms INTEGER')
-        logging.info(f"Migrated {table_name}: added duration_ms column")
+    for name, sql_type in _TRACK_COLUMNS:
+        if name not in cols:
+            conn.execute(f'ALTER TABLE "{table_name}" ADD COLUMN {name} {sql_type}')
+            logging.info(f"Migrated {table_name}: added {name} column")
 
 
 def _ensure_playlists_meta_table(conn: sqlite3.Connection) -> None:
@@ -184,6 +189,35 @@ def _ensure_history_table(conn: sqlite3.Connection) -> None:
         logging.error(f"Error ensuring history: {e}")
 
 
+def _ensure_file_checks_table(conn: sqlite3.Connection) -> None:
+    """Validation verdicts per library file (schema v6), keyed like the
+    per-playlist rows they describe. Written by the importer (lossless
+    verdict) and the library health scan; `ignored` is the operator's
+    "false positive" mark. `size`/`mtime`/`rules_version` decide whether
+    the scan must look at a file again."""
+    try:
+        with conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS file_checks ("
+                "table_name TEXT NOT NULL, "
+                "track_id TEXT NOT NULL, "
+                "path TEXT, "
+                "size INTEGER, "
+                "mtime REAL, "
+                "rules_version INTEGER NOT NULL DEFAULT 0, "
+                "audio_check TEXT, "
+                "audio_cutoff_hz INTEGER, "
+                "audio_drop_db REAL, "
+                "problems TEXT NOT NULL DEFAULT '', "
+                "evidence_json TEXT, "
+                "ignored INTEGER NOT NULL DEFAULT 0, "
+                "checked_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+                "PRIMARY KEY (table_name, track_id))"
+            )
+    except sqlite3.Error as e:
+        logging.error(f"Error ensuring file_checks: {e}")
+
+
 def create_connection(db_file: str) -> sqlite3.Connection | None:
     try:
         conn = sqlite3.connect(db_file, timeout=30)
@@ -193,6 +227,7 @@ def create_connection(db_file: str) -> sqlite3.Connection | None:
         _ensure_cycle_history_table(conn)
         _ensure_blocklist_table(conn)
         _ensure_history_table(conn)
+        _ensure_file_checks_table(conn)
         _ensure_schema_version(conn)
 
         # sqlite3.connect() succeeds on a corrupt or non-SQLite file — the

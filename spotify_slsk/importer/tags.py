@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any
 
 from mutagen import File as MutagenFile
 from mutagen.aiff import AIFF
 from mutagen.flac import FLAC
-from mutagen.id3 import ID3, TALB, TIT2, TPE1
+from mutagen.id3 import ID3, TALB, TIT2, TPE1, TSRC
 from mutagen.mp3 import MP3
 
 
@@ -25,6 +26,35 @@ def audio_length_seconds(file_path: str) -> float | None:
     except Exception as e:
         logging.debug(f"Could not read duration of {file_path}: {e}")
     return None
+
+
+def normalize_isrc(value: Any) -> str | None:
+    """Canonical 12-character ISRC ("GB-AYE-06-01498" -> "GBAYE0601498"),
+    or None when the value is not one."""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "ignore")
+    if not isinstance(value, str):
+        return None
+    cleaned = re.sub(r"[^A-Za-z0-9]", "", value).upper()
+    return cleaned if re.fullmatch(r"[A-Z]{2}[A-Z0-9]{3}\d{7}", cleaned) else None
+
+
+def read_isrc(file_path: str) -> str | None:
+    """The file's ISRC tag (ID3 TSRC, Vorbis ISRC, MP4 iTunes ISRC), or None.
+    Never raises."""
+    try:
+        tags = MutagenFile(file_path).tags
+    except Exception as e:
+        logging.debug(f"Could not read ISRC from {file_path}: {e}")
+        return None
+    if tags is None:
+        return None
+    if hasattr(tags, "getall"):  # ID3 (mp3, aiff, wav)
+        frames = tags.getall("TSRC")
+        values = frames[0].text if frames else []
+    else:  # Vorbis comments (case-insensitive) or MP4 freeform
+        values = tags.get("isrc") or tags.get("----:com.apple.iTunes:ISRC") or []
+    return normalize_isrc(values[0]) if values else None
 
 
 def extract_metadata_from_file(file_path: str) -> tuple[str | None, str | None, str | None]:
@@ -71,8 +101,12 @@ def extract_metadata_from_file(file_path: str) -> tuple[str | None, str | None, 
         return None, None, None
 
 
-def write_tags(path: str, title: str | None, artist: str | None, album: str | None) -> None:
-    """Write title/artist/album tags. Supports mp3, flac and aiff.
+def write_tags(
+    path: str, title: str | None, artist: str | None, album: str | None,
+    isrc: str | None = None,
+) -> None:
+    """Write title/artist/album (and the ISRC when known; an existing one is
+    left alone otherwise). Supports mp3, flac and aiff.
 
     Raises ValueError for any other extension and lets mutagen errors
     propagate - the web UI's re-tag action reports them to the operator.
@@ -91,12 +125,16 @@ def write_tags(path: str, title: str | None, artist: str | None, album: str | No
         audio.tags.add(TIT2(encoding=3, text=title))
         audio.tags.add(TPE1(encoding=3, text=artist))
         audio.tags.add(TALB(encoding=3, text=album))
+        if isrc:
+            audio.tags.add(TSRC(encoding=3, text=isrc))
         audio.save()
     elif ext == ".flac":
         audio = FLAC(path)
         audio["title"] = title
         audio["artist"] = artist
         audio["album"] = album
+        if isrc:
+            audio["isrc"] = isrc
         audio.save()
     elif ext == ".aiff":
         audio = AIFF(path)
@@ -105,12 +143,17 @@ def write_tags(path: str, title: str | None, artist: str | None, album: str | No
         audio.tags.add(TIT2(encoding=3, text=title))
         audio.tags.add(TPE1(encoding=3, text=artist))
         audio.tags.add(TALB(encoding=3, text=album))
+        if isrc:
+            audio.tags.add(TSRC(encoding=3, text=isrc))
         audio.save()
     else:
         raise ValueError(f"Unsupported extension for retag: {ext}")
 
 
-def tag_audio_file(file_path: str, title: str | None, artist: str | None, album: str | None) -> bool:
+def tag_audio_file(
+    file_path: str, title: str | None, artist: str | None, album: str | None,
+    isrc: str | None = None,
+) -> bool:
     """Daemon-side tagging: never raises. WAV is skipped (counts as done),
     other unsupported formats and mutagen errors log and return False."""
     ext = os.path.splitext(file_path)[1].lower()
@@ -121,7 +164,7 @@ def tag_audio_file(file_path: str, title: str | None, artist: str | None, album:
             logging.warning(f"Unsupported format for tagging: {ext}")
             return False
         else:
-            write_tags(file_path, title, artist, album)
+            write_tags(file_path, title, artist, album, isrc)
 
         logging.info(f"Tagged {file_path} successfully.")
         return True
