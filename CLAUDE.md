@@ -39,7 +39,7 @@ and CI all agree; the Makefile defaults to `python3.12`). Individual targets:
   findings rather than adding ignores.
 - `make typecheck` — mypy over `spotify_slsk/` (`ignore_missing_imports`,
   `check_untyped_defs`). Every public function is annotated; keep it that way.
-- `make test` — 936 tests. Fast (~10s); no network, no external services. The
+- `make test` — 954 tests. Fast (~10s); no network, no external services. The
   real-FLAC decode tests need the `flac` CLI (CI apt-installs it) and skip with
   a reason without it.
 - `make audit` — `pip-audit` against the pinned `requirements.txt`. Advisories
