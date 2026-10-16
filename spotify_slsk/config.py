@@ -149,6 +149,9 @@ IGNORED_TERMS: Terms = _env_terms("IGNORED_TERMS")
 LIBRARY_SCAN_INTERVAL_HOURS = int(os.getenv("LIBRARY_SCAN_INTERVAL_HOURS", "0"))
 # Embed the Spotify album cover when tagging (importer.tags).
 EMBED_COVER_ART = os.getenv("EMBED_COVER_ART", "1") == "1"
+# A track already downloaded in another playlist: hardlink | copy | off.
+LINK_MODES = ("hardlink", "copy", "off")
+LINK_MODE = os.getenv("LINK_MODE", "hardlink")
 # Basename template for newly imported files (library.naming).
 FILE_NAME_TEMPLATE = os.getenv("FILE_NAME_TEMPLATE", naming.DEFAULT_TEMPLATE)
 
@@ -166,7 +169,7 @@ def reload(conn: sqlite3.Connection) -> None:
     global MAX_DURATION_DIFF_SECONDS
     global LOSSLESS_CHECK_ENABLED, LOSSLESS_FAKE_CUTOFF_HZ, LOSSLESS_MIN_DROP_DB
     global LIBRARY_SCAN_INTERVAL_HOURS, REQUIRED_TERMS, IGNORED_TERMS
-    global EMBED_COVER_ART, FILE_NAME_TEMPLATE
+    global EMBED_COVER_ART, FILE_NAME_TEMPLATE, LINK_MODE
     try:
         MIN_MATCH_SCORE = float(get_setting(conn, "MIN_MATCH_SCORE", "0.62"))
     except (TypeError, ValueError) as e:
@@ -205,6 +208,11 @@ def reload(conn: sqlite3.Connection) -> None:
         logging.warning(f"Bad numeric setting during refresh; using previous values: {e}")
     LOSSLESS_CHECK_ENABLED = get_setting(conn, "LOSSLESS_CHECK_ENABLED", "1") == "1"
     EMBED_COVER_ART = get_setting(conn, "EMBED_COVER_ART", "1") == "1"
+    link_mode = get_setting(conn, "LINK_MODE", "hardlink")
+    if link_mode in LINK_MODES:
+        LINK_MODE = link_mode
+    else:
+        logging.warning(f"Bad LINK_MODE in DB ({link_mode!r}); keeping previous")
     template = get_setting(conn, "FILE_NAME_TEMPLATE", naming.DEFAULT_TEMPLATE) or naming.DEFAULT_TEMPLATE
     error = naming.validate_template(template)
     if error:
@@ -288,6 +296,7 @@ SETTINGS_SPEC = [
     ("IGNORED_TERMS", "", "Reject a file whose full peer path contains any of these, even when the title matches (comma-separated, case-insensitive; /regex/ allowed). Common: karaoke, instrumental, nightcore, sped up, 8d audio, /\\bcover\\b/. Plain terms match inside words ('live' matches 'Oliver'): use a /\\b...\\b/ regex for whole words", "terms"),
     ("EMBED_COVER_ART", "1", "Embed the Spotify album cover (largest size, cached under data/artwork) when tagging imported or re-tagged files (1 = on, 0 = off). A failed fetch never fails the import", "bool"),
     ("FILE_NAME_TEMPLATE", naming.DEFAULT_TEMPLATE, "Name for newly imported files (existing files keep their names until you apply a rename on Library -> Rename). Tokens: " + " ".join(f"{{{t}}}" for t in naming.TOKENS) + "; numbers take a zero-pad width, e.g. {track:02} {playlist_index:03}. The extension is the file's own. {original_filename} (the default) keeps the peer's file name. Unsafe characters are replaced, Windows-reserved names avoided and names capped at 200 bytes; an existing file is never overwritten (' (2)' is added)", "template"),
+    ("LINK_MODE", "hardlink", "A track already downloaded in another playlist (same Spotify id or ISRC) is linked into this playlist's folder instead of being searched and downloaded again. hardlink: no extra disk space, falls back to a copy across filesystems; copy: an independent file; off: always download. Removing one playlist's copy never affects the other", "choice:hardlink|copy|off"),
     ("LIBRARY_SCAN_INTERVAL_HOURS", "0", "Re-verify every library file (tags, duration, ISRC, lossless check) this often; report-only, a few hundred files per cycle. 0 = only when you press Scan library", "int0"),
 ]
 
@@ -320,6 +329,11 @@ def validate_setting(kind: str, value: str) -> tuple[str | None, str | None]:
         if lowered in ("0", "false", "no", "off"):
             return "0", None
         return None, "must be 1 (on) or 0 (off)"
+
+    if kind.startswith("choice:"):
+        choices = kind[len("choice:"):].split("|")
+        lowered = value.strip().lower()
+        return (lowered, None) if lowered in choices else (None, f"must be one of {', '.join(choices)}")
 
     if kind == "template":
         error = naming.validate_template(value)

@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import sqlite3
 
 from .. import config
 from ..db import (
     add_tried_file,
     clear_tried_entries,
+    find_downloaded_copies,
     get_file_check,
     get_track,
     record_history,
@@ -24,11 +26,65 @@ from ..matching.quality import describe, effective_quality, quality_of_file
 from ..models import Track
 from ..slskd import transfers
 from ..slskd.search import search_and_download
-from .health import retire_replaced_file
+from ..utils import free_path
+from .health import _inside, retire_replaced_file
+from .naming import file_name
+
+
+def link_existing_copy(track: Track, playlist_name: str, conn: sqlite3.Connection) -> bool:
+    """Cross-playlist dedupe: when the same recording (Spotify id, else
+    ISRC) is already downloaded in another playlist, put it in this
+    playlist's folder per LINK_MODE instead of downloading it again.
+
+    A hardlink is a second, independent name for the same data: quarantining,
+    replacing, renaming or deleting one playlist's name leaves the other's
+    intact. It falls back to a copy across filesystems (EXDEV) or where
+    links are unsupported. The new name follows FILE_NAME_TEMPLATE and never
+    overwrites. Returns True when the row was marked downloaded."""
+    mode = config.LINK_MODE
+    if mode not in ("hardlink", "copy"):
+        return False
+    root = os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists")
+    for source_table, source in find_downloaded_copies(conn, track.id, track.isrc, playlist_name):
+        src = source["path"]
+        if not os.path.isfile(src) or not _inside(src, root):
+            continue
+        row = get_track(conn, playlist_name, track.id) or {}
+        dest_dir = os.path.join(root, playlist_name)
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+            dest = free_path(
+                dest_dir, file_name(config.FILE_NAME_TEMPLATE, row, os.path.basename(src), source["quality"])
+            )
+            used = mode
+            if mode == "hardlink":
+                try:
+                    os.link(src, dest)
+                except OSError as e:
+                    logging.info(f"[link] Hardlink not possible ({e}); copying instead")
+                    used = "copy"
+            if used == "copy":
+                shutil.copy2(src, dest)
+        except OSError as e:
+            logging.warning(f"[link] Could not {mode} {src} into {playlist_name}: {e}")
+            continue
+        update_download_status(conn, track.id, playlist_name, success=True, file_path=dest)
+        set_track_quality(conn, playlist_name, track.id, source["quality"])
+        record_history(
+            conn, "linked", table_name=playlist_name, track_id=track.id,
+            path=dest, source_path=src, source_table=source_table, mode=used,
+            match="spotify id" if source["id"] == track.id else "isrc",
+        )
+        logging.info(f"[link] {track.name} already in {source_table}: {used} {src} -> {dest}")
+        return True
+    return False
 
 
 def handle_track_download(track: Track, playlist_name: str, conn: sqlite3.Connection) -> bool:
-    """Search slskd (with query fall-through) and download the best match."""
+    """Link an existing copy from another playlist (LINK_MODE), else search
+    slskd (with query fall-through) and download the best match."""
+    if link_existing_copy(track, playlist_name, conn):
+        return True
     file_path = search_and_download(
         artist=track.artist,
         title=track.name,

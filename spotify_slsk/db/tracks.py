@@ -456,3 +456,33 @@ def set_track_path(conn: sqlite3.Connection, table_name: str, track_id: str, pat
             )
     except sqlite3.Error as e:
         logging.error(f"Could not set path for {track_id} in {table_name}: {e}")
+
+
+def find_downloaded_copies(
+    conn: sqlite3.Connection, track_id: str, isrc: str | None, exclude_table: str
+) -> list[tuple[str, dict[str, Any]]]:
+    """(table, row) of downloaded rows in *other* catalogued playlists that
+    are the same recording: the same Spotify track id, or the same ISRC."""
+    tables = [
+        r[0] for r in conn.execute(
+            "SELECT DISTINCT m.table_name FROM playlists_meta m "
+            "JOIN sqlite_master s ON s.type = 'table' AND s.name = m.table_name "
+            "WHERE m.table_name != ?", (exclude_table,),
+        )
+    ]
+    isrc = (isrc or "").upper() or None
+    out: list[tuple[str, dict[str, Any]]] = []
+    for table in tables:
+        try:
+            rows = conn.execute(
+                f'{_TRACK_SELECT} FROM "{table}" WHERE downloaded = 1 AND path IS NOT NULL '
+                f"AND (id = ? OR (? IS NOT NULL AND UPPER(isrc) = ?))",
+                (track_id, isrc, isrc),
+            ).fetchall()
+        except sqlite3.Error as e:
+            logging.error(f"Could not look for copies in {table}: {e}")
+            continue
+        out.extend((table, _track_dict(r)) for r in rows)
+    # Same Spotify id first: an ISRC can be shared by different track ids.
+    out.sort(key=lambda tr: tr[1]["id"] != track_id)
+    return out

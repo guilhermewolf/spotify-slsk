@@ -20,6 +20,7 @@ HISTORY_EVENTS = (
     "quarantined",
     "quarantine_skipped",
     "renamed",
+    "linked",
 )
 FAILURE_EVENTS = ("download_failed", "import_rejected")
 
