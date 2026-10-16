@@ -48,10 +48,14 @@ from ..utils import fmt_duration
 # Bump when the identity rules below change: every file is re-verified once.
 RULES_VERSION = 1
 
+# A differing ISRC alone is not a problem (singles, albums, remasters and
+# compilations carry different ISRCs for the same song): it is stored as
+# evidence["isrc_note"] and listed separately on the page, never counted.
+ISRC_NOTE = "isrc_note"
+
 # Problem codes, in display priority order.
 PROBLEMS = (
     "missing_file",
-    "isrc_mismatch",
     "version_mismatch",
     "title_artist_mismatch",
     "duration_off",
@@ -60,7 +64,6 @@ PROBLEMS = (
 )
 PROBLEM_LABELS = {
     "missing_file": "Missing file",
-    "isrc_mismatch": "Wrong song: ISRC mismatch",
     "version_mismatch": "Wrong song: version mismatch",
     "title_artist_mismatch": "Wrong song: title/artist mismatch",
     "duration_off": "Duration off",
@@ -134,7 +137,7 @@ def verify_file(row: dict[str, Any], previous: dict[str, Any] | None = None) -> 
 
     isrc_equal = bool(expected_isrc and file_isrc == expected_isrc)
     if expected_isrc and file_isrc and not isrc_equal:
-        reasons["isrc_mismatch"] = f"file {file_isrc}, expected {expected_isrc}"
+        evidence[ISRC_NOTE] = f"ISRC differs: file {file_isrc}, expected {expected_isrc}"
     if title and artist:
         if version_mismatch(row["name"], title, row["artists"]):
             reasons["version_mismatch"] = f"tags say '{title}'"

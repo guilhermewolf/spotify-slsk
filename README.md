@@ -118,15 +118,16 @@ Before downloading, a 16-bit FLAC whose size/length works out below 400 kbps
 is rejected, and a 24-bit ≥ 88.2 kHz FLAC below 1200 kbps is ranked last as
 "likely upsampled" (both visible in the interactive search table).
 
-**ISRC.** Spotify's ISRC is stored per track. On import, a file whose ISRC tag
-differs is rejected as the wrong song (for that track only); a matching ISRC
-overrides a low title/artist tag score (other script or spelling) but never a
-version mismatch. Imports write the ISRC into the file's tags. Re-releases can
-carry a different ISRC for the same song; check History for "ISRC mismatch" if
-a track keeps failing.
+**ISRC.** Spotify's ISRC is stored per track and written into the file's tags
+on import. A matching ISRC overrides a low title/artist tag score (other script
+or spelling) but never a version mismatch. A *different* ISRC never rejects on
+its own — singles, albums, remasters and compilations carry different ISRCs
+for the same song — it is recorded in History and only adds to a rejection
+that already has another cause (wrong title/artist, wrong version, duration
+off). On the Library health page it is an info-only "ISRC differs" note.
 
 **Library health.** The **Library health** page lists files already in the
-library that fail the current rules: wrong song (title/artist, version, ISRC),
+library that fail the current rules: wrong song (title/artist, version),
 duration off, fake or suspect lossless, missing file — with the evidence
 (expected vs file tags, durations, cutoff). Press **Scan library** (or set
 `LIBRARY_SCAN_INTERVAL_HOURS`); the daemon checks up to 200 files / 120 s per

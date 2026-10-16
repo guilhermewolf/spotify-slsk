@@ -265,7 +265,7 @@ unnormalised.
    a re-search, not ban a good file for every track. Our wait timeout,
    "Queued, Remotely" stalls, slskd not listing the transfer yet, a file not
    found afterwards, a wrong-track mismatch ("no match"/"low score"/filename or
-   Spotify-duration miss/ISRC mismatch), shutdown and reconcile never blocklist: the same file
+   Spotify-duration miss), shutdown and reconcile never blocklist: the same file
    can be right for another track, and a global ban would hide it there.
 7. **Completion grace.** slskd can report "Completed, Succeeded" while the file
    is still under `/downloads/incomplete/`. `find_file_in_downloads` never
@@ -351,8 +351,13 @@ threaded through the download call chain. The real per-track cap is
   and unknown never do. Margins are ~3-5 dB, so thresholds are settings; AAC-256
   transcodes are undetectable. Before download, `evaluate_candidates` rejects a
   16-bit FLAC under 400 kbps and demotes (`note`, sorted last within its format)
-  a 24-bit >= 88.2 kHz FLAC under 1200 kbps. ISRC: different -> per-track
-  rejection; equal -> overrides a low tag score, never a version mismatch.
+  a 24-bit >= 88.2 kHz FLAC under 1200 kbps. ISRC: equal -> overrides a low
+  tag score, never a version mismatch; different -> **never rejects on its
+  own** (singles/albums/remasters/compilations differ), only logged + recorded
+  (`isrc_mismatch` on the `imported` event), and appended to the reason when
+  another failure rejects (low score, version mismatch, real duration off via
+  `_duration_off`). In the scan it is `evidence["isrc_note"]`: info only, not a
+  problem, never in a bulk quarantine.
   Verdicts live in `file_checks` (one global table keyed by
   `(table_name, track_id)`, not columns on every pl_ table: one query for the
   health page, scan bookkeeping out of the track rows). Imports store theirs with

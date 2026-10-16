@@ -14,6 +14,7 @@ from flask.typing import ResponseReturnValue
 
 from .. import db, runtime_state
 from ..library.health import (
+    ISRC_NOTE,
     PROBLEM_LABELS,
     PROBLEMS,
     QUARANTINE_DIR,
@@ -26,14 +27,15 @@ bp = Blueprint("health", __name__)
 
 
 def _flagged_rows() -> list[dict[str, Any]]:
-    """Checks with problems whose track still has that exact file."""
+    """Checks with problems (or an ISRC note) whose track still has that
+    exact file."""
     tables = {
         p["table_name"]: p for p in db.list_playlists(g.conn)
     }
     rows = []
     for check in db.list_file_checks(g.conn):
         pl = tables.get(check["table_name"])
-        if not check["problems"] or pl is None:
+        if pl is None or not (check["problems"] or check["evidence"].get(ISRC_NOTE)):
             continue
         track = db.get_track(g.conn, check["table_name"], check["track_id"])
         if not track or not track["downloaded"] or track["path"] != check["path"]:
@@ -47,7 +49,7 @@ def _flagged_rows() -> list[dict[str, Any]]:
 def library_health() -> ResponseReturnValue:
     all_rows = _flagged_rows()
     problem = request.args.get("problem") or None
-    if problem not in PROBLEMS:
+    if problem not in (*PROBLEMS, ISRC_NOTE):
         problem = None
     playlist_id = request.args.get("playlist") or None
     show_ignored = request.args.get("ignored") == "1"
@@ -55,10 +57,15 @@ def library_health() -> ResponseReturnValue:
         p: sum(1 for r in all_rows if p in r["problems"] and not r["ignored"])
         for p in PROBLEMS
     }
+    info_count = sum(1 for r in all_rows if r["evidence"].get(ISRC_NOTE) and not r["ignored"])
     rows = [
         r for r in all_rows
         if (show_ignored or not r["ignored"])
-        and (problem is None or problem in r["problems"])
+        and (
+            bool(r["evidence"].get(ISRC_NOTE)) if problem == ISRC_NOTE
+            else (problem in r["problems"]) if problem
+            else bool(r["problems"])
+        )
         and (playlist_id is None or r["playlist_id"] == playlist_id)
     ]
     try:
@@ -70,6 +77,8 @@ def library_health() -> ResponseReturnValue:
         active_page="health",
         rows=rows,
         counts=counts,
+        info_count=info_count,
+        isrc_note=ISRC_NOTE,
         labels=PROBLEM_LABELS,
         problem=problem,
         playlist_id=playlist_id,

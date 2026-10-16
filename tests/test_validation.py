@@ -275,14 +275,33 @@ class TestIsrcOnImport:
         ok, _ = importer_process.process_downloaded_file(str(f), "pl_x", conn, track_id="t1", source=SOURCE)
         return ok, f, tagged
 
-    def test_different_isrc_is_a_wrong_song_not_a_peer_ban(self, conn, monkeypatch, sandbox_dirs):
+    def test_different_isrc_alone_never_rejects(self, conn, monkeypatch, sandbox_dirs):
+        # Single vs album vs remaster: same song, different ISRC.
         downloads, _ = sandbox_dirs
+        monkeypatch.setattr(importer_process, "audio_length_seconds", lambda p: 201.0)
+        ok, _, tagged = self._run(conn, monkeypatch, downloads, "Heart To Find", "Mat Joe", "USUM71703861")
+        assert ok is True
+        event = db.list_history(conn, event="imported")[0]["data"]
+        assert event["isrc_mismatch"] == "ISRC mismatch (file USUM71703861, expected GBAYE0601498)"
+        assert tagged[0]["isrc"] is None  # the file's own ISRC is kept
+
+    def test_different_isrc_plus_duration_off_rejects(self, conn, monkeypatch, sandbox_dirs):
+        downloads, _ = sandbox_dirs
+        monkeypatch.setattr(importer_process, "audio_length_seconds", lambda p: 260.0)
         ok, f, _ = self._run(conn, monkeypatch, downloads, "Heart To Find", "Mat Joe", "USUM71703861")
         assert ok is False and not f.exists()
         assert db.list_blocklist(conn) == []
         assert "x.mp3" in db.get_tried_files(conn, "pl_x", "t1")
         assert db.list_history(conn, event="import_rejected")[0]["data"]["reason"] == (
-            "ISRC mismatch (file USUM71703861, expected GBAYE0601498)"
+            "duration 4:20 vs 3:20 + ISRC mismatch (file USUM71703861, expected GBAYE0601498)"
+        )
+
+    def test_different_isrc_plus_low_score_rejects_with_both_reasons(self, conn, monkeypatch, sandbox_dirs):
+        downloads, _ = sandbox_dirs
+        ok, _, _ = self._run(conn, monkeypatch, downloads, "Eyes On Fire", "Blue Foundation", "USUM71703861")
+        assert ok is False
+        assert db.list_history(conn, event="import_rejected")[0]["data"]["reason"].startswith(
+            "low score + ISRC mismatch"
         )
 
     def test_equal_isrc_overrides_a_low_tag_score(self, conn, monkeypatch, sandbox_dirs):

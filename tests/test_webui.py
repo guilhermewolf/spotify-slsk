@@ -954,6 +954,18 @@ class TestLibraryHealthPage:
         post(client, "/library-health/ignore?undo=1", {"only": "pid1:t1"})
         assert b"fake: steepest drop" in client.get("/library-health").data
 
+    def test_isrc_note_alone_is_info_not_a_problem(self, app_tmp, client, tmp_path):
+        self._seed(app_tmp, tmp_path, problems=())
+        conn = db.create_connection(app_tmp.config["DB_PATH"])
+        check = db.get_file_check(conn, "pl_x", "t1")
+        db.save_file_check(conn, "pl_x", "t1", path=check["path"], size=1, mtime=1.0,
+                           rules_version=1, evidence={"isrc_note": "ISRC differs: file A, expected B"})
+        conn.close()
+        assert b"Nothing flagged" in client.get("/library-health").data
+        r = client.get("/library-health?problem=isrc_note")
+        assert b"ISRC differs: file A, expected B" in r.data
+        assert b'name="tracks"' not in r.data  # never in a bulk quarantine
+
     def test_track_page_shows_the_verdict(self, app_tmp, client, tmp_path):
         self._seed(app_tmp, tmp_path)
         r = client.get("/track/pid1/t1")

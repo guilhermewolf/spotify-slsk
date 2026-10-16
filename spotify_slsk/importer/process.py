@@ -22,8 +22,8 @@ from ..db import (
     save_file_check,
     update_download_status,
 )
-from ..matching.candidates import filename_match
-from ..matching.normalize import version_mismatch
+from ..matching.candidates import _duration_off, filename_match
+from ..matching.normalize import version_mismatch, version_tier
 from ..matching.tracks import find_closest_match, score_track_match
 from ..models import Candidate, Track
 from ..utils import fmt_duration
@@ -156,24 +156,27 @@ def process_downloaded_file(
 
     title, artist, album = extract_metadata_from_file(file_path)
 
-    # ISRC: when Spotify and the file both carry one, it decides identity.
-    # Different -> the wrong recording (a per-track mismatch, never a global
-    # ban: the file may be right for another track). Equal -> strong accept
-    # evidence that may override a low title/artist score below, but never
-    # a version mismatch (remix/live/... tags).
-    expected_isrc = file_isrc = None
+    # ISRC. Equal -> strong accept evidence: it may override a low
+    # title/artist score below, never a version mismatch. Different -> NOT a
+    # rejection on its own: singles, albums, remasters and compilations carry
+    # different ISRCs for the same song. It is logged and recorded, and only
+    # rejects together with another failure (low score, version mismatch, or
+    # a real duration off from Spotify's).
+    expected_isrc = file_isrc = isrc_conflict = None
+    expected_ms = None
+    expected_name = ""
     if not reconcile and track_id is not None:
-        expected_isrc = normalize_isrc((get_track(conn, playlist_name, track_id) or {}).get("isrc"))
+        row = get_track(conn, playlist_name, track_id) or {}
+        expected_isrc, expected_ms = normalize_isrc(row.get("isrc")), row.get("duration_ms")
+        expected_name = row.get("name") or ""
         file_isrc = read_isrc(file_path)
         if expected_isrc and file_isrc and expected_isrc != file_isrc:
-            reason = f"ISRC mismatch (file {file_isrc}, expected {expected_isrc})"
-            logging.warning(f"❌ Rejecting {file_path}: {reason}")
-            _reject_and_log(
-                file_path, playlist_name, conn, track_id=track_id, reason=reason,
-                source=source,
-            )
-            return False, None
+            isrc_conflict = f"ISRC mismatch (file {file_isrc}, expected {expected_isrc})"
+            logging.warning(f"{isrc_conflict} for {file_path}; checking other evidence")
     isrc_match = bool(expected_isrc and file_isrc == expected_isrc)
+
+    def _with_isrc(reason: str) -> str:
+        return f"{reason} + {isrc_conflict}" if isrc_conflict else reason
 
     if not title or not artist:
         ok, reason = (
@@ -182,10 +185,11 @@ def process_downloaded_file(
             else (False, "invalid metadata")
         )
         if not ok:
+            assert reason is not None
             logging.warning(f"❌ Rejecting {file_path}: {reason}")
             _reject_and_log(
                 file_path, playlist_name, conn, track_id=track_id,
-                reason=reason, destructive=not reconcile, source=source,
+                reason=_with_isrc(reason), destructive=not reconcile, source=source,
                 peer_fault=reason in _PEER_FAULT_REASONS,
             )
             return False, None
@@ -215,7 +219,18 @@ def process_downloaded_file(
             match_method = "isrc"
         elif score < config.MIN_MATCH_SCORE:
             logging.warning(f"⚠️ Low match score ({score:.2f}) for {title} by {artist}. Skipping update.")
-            _reject_and_log(file_path, playlist_name, conn, track_id=track_id, reason="low score", destructive=not reconcile, source=source)
+            _reject_and_log(file_path, playlist_name, conn, track_id=track_id, reason=_with_isrc("low score"), destructive=not reconcile, source=source)
+            return False, None
+
+    if isrc_conflict and expected_ms and config.MAX_DURATION_DIFF_SECONDS > 0:
+        length = audio_length_seconds(file_path)
+        longer_ok = version_tier(os.path.basename(file_path)) < version_tier(expected_name)
+        if length is not None and _duration_off(length - expected_ms / 1000, longer_ok=longer_ok):
+            reason = _with_isrc(
+                f"duration {fmt_duration(length)} vs {fmt_duration(expected_ms / 1000)}"
+            )
+            logging.warning(f"❌ Rejecting {file_path}: {reason}")
+            _reject_and_log(file_path, playlist_name, conn, track_id=track_id, reason=reason, source=source)
             return False, None
 
     audio = None if reconcile else _lossless_check(file_path)
@@ -234,7 +249,11 @@ def process_downloaded_file(
     # Fall back to the Spotify-known album when the downloaded file has no
     # album tag (observed during Phase B testing: downloaded MP3 had no TALB).
     effective_album = album or db_album
-    tag_audio_file(file_path, title, artist, effective_album, isrc=expected_isrc or file_isrc)
+    # On a conflict the file's own ISRC is kept (write_tags leaves it alone).
+    tag_audio_file(
+        file_path, title, artist, effective_album,
+        isrc=None if isrc_conflict else (expected_isrc or file_isrc),
+    )
 
     # If the file is already inside the playlists dir, don't move it.
     playlists_root = os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists")
@@ -259,6 +278,7 @@ def process_downloaded_file(
                 path=final_path,
                 match=match_method,
                 isrc=file_isrc if isrc_match else None,
+                isrc_mismatch=isrc_conflict,
                 audio=audio.describe() if audio else None,
                 username=(source or {}).get("user"),
                 filename=(source or {}).get("filename"),

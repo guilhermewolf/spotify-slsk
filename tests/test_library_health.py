@@ -69,12 +69,17 @@ class TestVerifyFile:
                       ("Heart To Find (Live)", "Mat Joe", 200.0, None))
         assert r["problems"] == ["version_mismatch"]
 
-    def test_isrc_mismatch_and_duration_off(self, conn, sandbox_dirs, tags):
+    def test_isrc_mismatch_is_only_a_note(self, conn, sandbox_dirs, tags):
         _, pl = sandbox_dirs
-        r = _problems(conn, pl, tags, "t1", "Heart To Find", "Mat Joe", "a.mp3",
-                      ("Heart To Find", "Mat Joe", 260.0, "USUM71703861"), isrc="GBAYE0601498")
-        assert r["problems"] == ["isrc_mismatch", "duration_off"]
-        assert r["evidence"]["reasons"]["duration_off"] == "4:20 vs 3:20"
+        alone = _problems(conn, pl, tags, "t1", "Heart To Find", "Mat Joe", "a.mp3",
+                          ("Heart To Find", "Mat Joe", 200.0, "USUM71703861"), isrc="GBAYE0601498")
+        assert alone["problems"] == []
+        assert alone["evidence"]["isrc_note"].startswith("ISRC differs: file USUM71703861")
+        combined = _problems(conn, pl, tags, "t2", "Heart To Find", "Mat Joe", "b.mp3",
+                             ("Heart To Find", "Mat Joe", 260.0, "USUM71703861"), isrc="GBAYE0601498")
+        assert combined["problems"] == ["duration_off"]
+        assert combined["evidence"]["reasons"]["duration_off"] == "4:20 vs 3:20"
+        assert "isrc_note" in combined["evidence"]
 
     def test_equal_isrc_excuses_a_tag_score_miss(self, conn, sandbox_dirs, tags):
         _, pl = sandbox_dirs
