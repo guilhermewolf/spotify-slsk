@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import sqlite3
+from urllib.parse import urlsplit
 
 from .db import delete_setting, get_setting, list_settings, set_setting
 from .library import naming
@@ -105,6 +106,31 @@ def normalize_ext_list(env_val: str) -> list[str]:
     return items
 
 
+# Notification events (notifications.py), in the order the settings page lists them.
+NOTIFICATION_EVENTS = (
+    "grabbed", "imported", "upgraded", "download_failed", "import_rejected",
+    "quarantined", "health_issue", "health_restored", "playlist_synced", "cycle_summary",
+)
+
+# The UI login's password hash (webui.auth). Underscore: never rendered.
+UI_AUTH_HASH_KEY = "_ui_auth_password_hash"
+
+
+def ui_auth_state(conn: sqlite3.Connection) -> str:
+    """"on" (username and password set), "off" (neither) or "partial" (one
+    of them: the login is OFF, which the operator probably did not mean)."""
+    has_user = bool(get_setting(conn, "UI_AUTH_USERNAME", ""))
+    has_password = bool(list_settings(conn).get(UI_AUTH_HASH_KEY) or os.getenv("UI_AUTH_PASSWORD"))
+    if has_user and has_password:
+        return "on"
+    return "partial" if has_user or has_password else "off"
+
+
+def ui_auth_configured(conn: sqlite3.Connection) -> bool:
+    """Both a username and a password (stored hash or env) are set."""
+    return ui_auth_state(conn) == "on"
+
+
 # ---- deploy-time (env only) -------------------------------------------------
 
 DOWNLOAD_DIR = os.getenv("SLSKD_DOWNLOADS_DIR", "/downloads")
@@ -154,6 +180,10 @@ WRITE_M3U = os.getenv("WRITE_M3U", "1") == "1"
 WRITE_PLAYLIST_COVER = os.getenv("WRITE_PLAYLIST_COVER", "1") == "1"
 # Purge files in .quarantine/*/replaced/ older than this many days; 0 = never.
 RECYCLE_BIN_RETENTION_DAYS = int(os.getenv("RECYCLE_BIN_RETENTION_DAYS", "0"))
+# Health check: warn below this much free space on the playlists volume; 0 = off.
+MIN_FREE_SPACE_GB = int(os.getenv("MIN_FREE_SPACE_GB", "5"))
+# Daily database backups kept in data/backups; 0 = no automatic backups.
+BACKUP_RETENTION = int(os.getenv("BACKUP_RETENTION", "7"))
 # A track already downloaded in another playlist: hardlink | copy | off.
 LINK_MODES = ("hardlink", "copy", "off")
 LINK_MODE = os.getenv("LINK_MODE", "hardlink")
@@ -175,7 +205,7 @@ def reload(conn: sqlite3.Connection) -> None:
     global LOSSLESS_CHECK_ENABLED, LOSSLESS_FAKE_CUTOFF_HZ, LOSSLESS_MIN_DROP_DB
     global LIBRARY_SCAN_INTERVAL_HOURS, REQUIRED_TERMS, IGNORED_TERMS
     global EMBED_COVER_ART, FILE_NAME_TEMPLATE, LINK_MODE, RECYCLE_BIN_RETENTION_DAYS
-    global WRITE_M3U, WRITE_PLAYLIST_COVER
+    global WRITE_M3U, WRITE_PLAYLIST_COVER, MIN_FREE_SPACE_GB, BACKUP_RETENTION
     try:
         MIN_MATCH_SCORE = float(get_setting(conn, "MIN_MATCH_SCORE", "0.62"))
     except (TypeError, ValueError) as e:
@@ -232,6 +262,8 @@ def reload(conn: sqlite3.Connection) -> None:
         LOSSLESS_MIN_DROP_DB = int(get_setting(conn, "LOSSLESS_MIN_DROP_DB", "15"))
         LIBRARY_SCAN_INTERVAL_HOURS = int(get_setting(conn, "LIBRARY_SCAN_INTERVAL_HOURS", "0"))
         RECYCLE_BIN_RETENTION_DAYS = int(get_setting(conn, "RECYCLE_BIN_RETENTION_DAYS", "0"))
+        MIN_FREE_SPACE_GB = int(get_setting(conn, "MIN_FREE_SPACE_GB", "5"))
+        BACKUP_RETENTION = int(get_setting(conn, "BACKUP_RETENTION", "7"))
     except (TypeError, ValueError) as e:
         logging.warning(f"Bad lossless-check setting during refresh; using previous values: {e}")
 
@@ -309,6 +341,20 @@ SETTINGS_SPEC = [
     ("WRITE_M3U", "1", "Keep a '<playlist name>.m3u8' in each playlist folder: the downloaded tracks in Spotify playlist order, relative paths, UTF-8 (1 = on, 0 = off). Rewritten after each sync when it changed", "bool"),
     ("WRITE_PLAYLIST_COVER", "1", "Keep a cover.jpg (cover.png for PNG images) in each playlist folder from the Spotify playlist image, cached under data/artwork. A cover you put there yourself is never replaced (1 = on, 0 = off)", "bool"),
     ("RECYCLE_BIN_RETENTION_DAYS", "0", "Files replaced by an upgrade or a manual grab go to the recycle bin, .quarantine/<playlist>/replaced/. When this is above 0, a daily step deletes those older than this many days (counted from when they were replaced). 0 = keep them forever. Files you quarantined yourself (.quarantine/<playlist>/) are never deleted automatically", "int0"),
+    ("UI_AUTH_USERNAME", "", "Web UI login: with this and UI_AUTH_PASSWORD set, every page except /healthz asks for a login. Empty = no login (fine on loopback; put an authenticating proxy or this in front of anything wider)", "text"),
+    ("UI_AUTH_PASSWORD", "", "Web UI password. Stored only as a salted hash; never shown or logged. Changing it logs every session out", "password"),
+    ("BACKUP_RETENTION", "7", "Back the database up daily to data/backups/playlist_tracks-YYYYMMDD-HHMMSS.db (online backup, integrity-checked) and keep this many. 0 = no automatic backups (Backup now on System -> Status still works, and nothing is deleted)", "int0"),
+    ("MIN_FREE_SPACE_GB", "5", "Health check: warn when the playlists volume has less free space than this many GB. 0 disables the check", "int0"),
+    ("NTFY_URL", "", "ntfy server, e.g. https://ntfy.sh. Notifications are sent when this and NTFY_TOPIC are set", "url"),
+    ("NTFY_TOPIC", "", "ntfy topic to publish to", "text"),
+    ("NTFY_EVENTS", "playlist_synced,cycle_summary,health_issue,health_restored", "Events sent to ntfy (comma-separated): " + ", ".join(NOTIFICATION_EVENTS) + ". Per-track events are batched into one message per playlist per cycle", "events"),
+    ("WEBHOOK_URL", "", "POST a JSON body {event, ts, data} here for each notification (10 s timeout; paused for up to an hour after a failure). Empty = off", "url"),
+    ("WEBHOOK_HEADER_NAME", "", "Optional header sent with every webhook call, e.g. Authorization or X-Api-Key", "header"),
+    ("WEBHOOK_HEADER_VALUE", "", "Value of that header (a secret: stored, never shown or logged)", "secret"),
+    ("WEBHOOK_EVENTS", ",".join(NOTIFICATION_EVENTS), "Events sent to the webhook (comma-separated): " + ", ".join(NOTIFICATION_EVENTS), "events"),
+    ("SUBSONIC_URL", "", "Subsonic / Navidrome server, e.g. http://navidrome:4533. After a cycle that imported or upgraded files, it is asked to rescan its library (once per cycle). Empty = off", "url"),
+    ("SUBSONIC_USERNAME", "", "Subsonic user allowed to start a scan (Navidrome: an admin)", "text"),
+    ("SUBSONIC_PASSWORD", "", "That user's password (a secret: stored, never shown or logged; sent only as a salted token)", "secret"),
     ("LIBRARY_SCAN_INTERVAL_HOURS", "0", "Re-verify every library file (tags, duration, ISRC, lossless check) this often; report-only, a few hundred files per cycle. 0 = only when you press Scan library", "int0"),
 ]
 
@@ -350,6 +396,29 @@ def validate_setting(kind: str, value: str) -> tuple[str | None, str | None]:
     if kind == "template":
         error = naming.validate_template(value)
         return (None, error) if error else (value, None)
+
+    if kind == "url":
+        parts = urlsplit(value.strip())
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            return None, "must be an http:// or https:// URL"
+        return value.strip(), None
+
+    if kind == "events":
+        events = [e.strip().lower() for e in value.split(",") if e.strip()]
+        unknown = [e for e in events if e not in NOTIFICATION_EVENTS]
+        if unknown:
+            return None, f"unknown event(s) {', '.join(unknown)}; known: {', '.join(NOTIFICATION_EVENTS)}"
+        return ",".join(dict.fromkeys(events)), None
+
+    if kind == "header":
+        if not re.fullmatch(r"[A-Za-z0-9!#$%&'*+.^_`|~-]+", value.strip()):
+            return None, "must be an HTTP header name (letters, digits and dashes)"
+        return value.strip(), None
+
+    if kind == "secret":
+        if any(c in value for c in "\r\n\0"):
+            return None, "must be a single line"
+        return value, None
 
     if kind == "terms":
         terms, error = parse_terms(value)

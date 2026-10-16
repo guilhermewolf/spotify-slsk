@@ -39,7 +39,7 @@ and CI all agree; the Makefile defaults to `python3.12`). Individual targets:
   findings rather than adding ignores.
 - `make typecheck` — mypy over `spotify_slsk/` (`ignore_missing_imports`,
   `check_untyped_defs`). Every public function is annotated; keep it that way.
-- `make test` — 869 tests. Fast (~5s); no network, no external services. The
+- `make test` — 954 tests. Fast (~10s); no network, no external services. The
   real-FLAC decode tests need the `flac` CLI (CI apt-installs it) and skip with
   a reason without it.
 - `make audit` — `pip-audit` against the pinned `requirements.txt`. Advisories
@@ -85,12 +85,15 @@ spotify_slsk/
   __main__.py          entrypoint: python -m spotify_slsk -> daemon.main
   daemon.py            main(), startup order, cycle loop, heartbeat, signals, wake
   config.py            every tunable: env defaults, reload(conn), SETTINGS_SPEC
-  notify.py            ntfy
+  tasks.py             the periodic-task registry (/system/tasks) and is_due
+  healthchecks.py      structured health checks (/healthz `checks`, /system/status)
+  notifications.py     events -> ntfy / webhook, Subsonic rescan, batching, backoff
+  backup.py            DB backups (online backup API) and daily housekeeping
   models.py            Track + shared type aliases (Candidate, IsBlocked)
-  runtime_state.py     in-process observability + manual-grab queue
+  runtime_state.py     in-process observability + the UI -> daemon request queues
   log_config.py utils.py
   db/                  SQLite: connection (+migrations), playlists, tracks,
-                       settings, cycles, blocklist, history; re-exported by db/__init__
+                       settings, cycles, blocklist, history, tasks; re-exported by db/__init__
   spotify/             client.py (client + name lookup), sync.py (fetch/diff/insert)
   slskd/               models.py (typed JSON), client.py, search.py, transfers.py
   matching/            normalize.py (shared), candidates.py (search phase),
@@ -126,7 +129,9 @@ Single long-running process (`spotify_slsk/daemon.py::main`) with two threads:
 
 Startup order in `main()` matters and is load-bearing:
 
-1. Install SIGTERM/SIGINT handlers → `_shutdown` threading.Event.
+1. Install SIGTERM/SIGINT handlers → `_shutdown` threading.Event; start
+   listening to history for notifications (`notifications.install`); touch the
+   heartbeat (so the first health check doesn't report a missing one).
 2. Open the DB. `create_connection` probes the connection before returning it —
    `sqlite3.connect` succeeds on a corrupt file and every helper swallows
    `sqlite3.Error`, so without the probe callers get a connection on which
@@ -135,6 +140,8 @@ Startup order in `main()` matters and is load-bearing:
    are missing, so the UI still comes up.
 4. First boot: if `playlists_meta` is empty and `SPOTIFY_PLAYLIST_URLS` env is set, import the URLs into the DB. Then `config.ensure_quality_profile(conn)` freezes the quality profile on the first boot of Tier 4 (see Quality under Gotchas) and `config.reload(conn)` runs once.
 5. **Start the web UI thread** if `UI_ENABLED=1` — *before* waiting on slskd.
+   Then run the `health_checks` task once, so /healthz and /system/status say
+   why during a long slskd wait; it is queued again as soon as slskd is healthy.
 6. `block_until_slskd_healthy()` retries indefinitely, heartbeating while it
    waits. It does not raise: an slskd outage must not take down the dashboard
    the operator needs to diagnose it. Cycles do not start until slskd is
@@ -143,14 +150,23 @@ Startup order in `main()` matters and is load-bearing:
    includes a missing `SLSKD_API_KEY` (slskd-api raises `ValueError` building
    the client): the client is built inside the retry loop.
 7. One-shot on-disk reconciliation (`startup_check`) — matches existing files to DB rows so they aren't re-downloaded.
-8. Enter the cycle loop: `_touch_heartbeat()` → `config.reload(conn)` → iterate `list_playlists(only_enabled=True)`. On any unhandled exception, log and back off `CYCLE_ERROR_BACKOFF_SECONDS`. Between cycles, `_wake_event.wait(CYCLE_INTERVAL_SECONDS)` — interruptible by the UI's `wake_now()`.
+8. Enter the cycle loop: `_touch_heartbeat()` → `config.reload(conn)` →
+   `_run_cycle`: drain the UI's queues (`_drain_queues`: quarantines, renames,
+   manual grabs, upgrade checks) and run due/requested scheduled tasks
+   (`_run_scheduled`); then each enabled playlist, **each followed by
+   `_between_playlists`** (notification flush, queues, scheduled tasks, and a
+   small library-scan / quality-backfill step: 50 files / 30 s — a cycle with a
+   download backlog runs for hours, and a scan that only ran at the end of it
+   starved); then the full-budget scan and backfill, scheduled tasks, the
+   `cycle_summary` event, a flush and the Subsonic rescan. The cycle is recorded
+   as the `spotify_sync` task. On any unhandled exception, log and back off `CYCLE_ERROR_BACKOFF_SECONDS`. Between cycles, `_wake_event.wait(CYCLE_INTERVAL_SECONDS)` — interruptible by the UI's `wake_now()`.
 9. On shutdown, close the SQLite connection in a `finally`.
 
 Docker `HEALTHCHECK` compares `HEARTBEAT_FILE` mtime against `HEARTBEAT_STALE_SECONDS` (default 900s). The heartbeat is touched **per playlist and per track**, not once per cycle: one track can occupy minutes (60s search + up to 300s transfer + 60s post-processing per candidate), so a coarser touch made a busy daemon indistinguishable from a wedged one.
 
 ### Module responsibilities
 
-- **`daemon.py`** — `main()` and the startup order above; `process_playlist` (sync → pending downloads → throttled upgrade pass), `_process_manual_grabs`, `_run_startup_reconciliation`, `block_until_slskd_healthy`, the `_shutdown`/`_wake_event` Events, `wake_now()` and the heartbeat. The only module allowed to drive downloads and imports.
+- **`daemon.py`** — `main()` and the startup order above; `_run_cycle`, `process_playlist` (sync → pending downloads → throttled upgrade pass), `_drain_queues`/`_between_playlists`, `SCHEDULED` + `_run_scheduled`/`_run_task` (what each task does), `_run_startup_reconciliation`, `block_until_slskd_healthy`, the `_shutdown`/`_wake_event` Events, `wake_now()` and the heartbeat. The only module allowed to drive downloads and imports.
 - **`config.py`** — single source of truth for tunables. Deploy-time values are read from env once; UI-editable ones are module attributes rebound by `reload(conn)` at each cycle start, so **read them as `config.NAME` at call time**, never `from .config import NAME`. Also holds `SETTINGS_SPEC` + `validate_setting` (used by the settings page), `normalize_ext_list`, the quality profile (`QUALITY_PROFILE`, `load_quality_profile`, `ensure_quality_profile`) and the release terms (`REQUIRED_TERMS`/`IGNORED_TERMS`, `parse_terms`, `first_term`).
 - **`spotify/`** — `client.setup_spotify_client()` (returns `None` without credentials; token cache at `SPOTIPY_CACHE_PATH`), `client.fetch_playlist_name` (web UI, retries transport errors); `sync.fetch_and_compare_tracks` (snapshot short-circuit, diff, insert, duration backfill), `sync.migrate_env_playlists` (first boot).
 - **`slskd/models.py`** — tolerant typed views of slskd JSON: `SearchResponse`/`PeerFile` (camelCase in; `ext` from the filename because `extension` is often `""`; `lockedFiles` kept separate and never offered), `Search`, `Transfer` with `outcome` (`TransferOutcome` or `None` while pending) and `peer_fault`. All slskd JSON is read through these. `remote_basename` lives here.
@@ -160,7 +176,7 @@ Docker `HEALTHCHECK` compares `HEARTBEAT_FILE` mtime against `HEARTBEAT_STALE_SE
 - **`matching/`** — see "Matchers" under Gotchas. `normalize.py` (folding, artist splitting, version keywords/tiers — shared), `candidates.py` (`evaluate_candidates`: blocklist + release terms + quality profile + fixed 320 floor for MP3s with a known bitrate + effective-bitrate floor + FLAC plausibility + duration vs Spotify + the strict name rules in `filename_match`; returns every file with `accepted`, a human `reason`, `quality` and `quality_label`; `sort_candidates`: see Quality below), `tracks.py` (`score_track_match`, `_looks_like_match`, difflib helpers), `quality.py` (the ladder, `classify`, `quality_of_file`, `effective_quality`, `QualityProfile`; imports nothing from the package so `config` can use it).
 - **`importer/`** — `tags.py` is the single tagger: `spotify_tags(row, isrc)` builds a format-neutral `{key: [values]}` from a DB row (title, artists multi-value, album, album artist, track n/total, disc, release date, ISRC, Spotify track id; unknown fields are left out so nothing is blanked), `write_tags(path, tags, cover)` (raises; UI re-tag) maps it to Vorbis comments (FLAC + picture), ID3v2.4 (MP3/AIFF, APIC, `TXXX:SPOTIFY_TRACK_ID`) or MP4 atoms (M4A, `covr`, freeform ISRC/id), `tag_audio_file` (never raises; daemon), `read_tags`/`tag_diff` (the track page's preview), `extract_metadata_from_file`, `audio_length_seconds`, `read_isrc`/`normalize_isrc`. Imports are tagged from the verified Spotify row, not the peer's tags; on an ISRC conflict the file's ISRC is kept. `artwork.py`: `fetch_image(url, key)` — https on Spotify's image CDNs only (`*.scdn.co`, `*.spotifycdn.com`), no redirects, 10 s timeout, 10 MB cap, JPEG/PNG only, cached under `ARTWORK_CACHE_DIR` (default `./data/artwork`; conftest sandboxes it) with LRU eviction beyond 200 MB, failures negative-cached for 24 h (`<key>.fail`), never raises; `album_cover(row)`. `process.py`: `process_downloaded_file` (verify against the requested track, ISRC check, untagged filename+duration fallback, lossless check, tag, move, record verdict) and `_reject_and_log` (the only place a downloaded file is deleted). `audio_check.py`: the fake-lossless detector (see Validation below).
 - **`library/`** — `acquire.py`: `link_existing_copy` (cross-playlist dedupe, below), `handle_track_download`, `try_upgrade_track` (better version tier; below-cutoff quality upgrade; replaces a *suspect* lossless file with a lossless copy). `reconcile.py`: `startup_check` and its local file index (non-destructive). `health.py`: `verify_file`/`scan_step` (the report-only library health scan), `quarantine_track` and `retire_replaced_file` (daemon only), `purge_recycle_bin`, `backfill_qualities` (bounded per-cycle quality read). `naming.py`: `file_name(template, row, original, quality)`, `validate_template`, `safe_name`. `rename.py`: `rename_plan` (preview) and `apply_rename` (daemon only). `playlist_files.py`: `write_playlist_files` (daemon, after each playlist; never raises).
-- **`notify.py`** — ntfy; silent when unconfigured.
+- **`tasks.py`**, **`healthchecks.py`**, **`notifications.py`**, **`backup.py`** — see "Operations" below.
 - **`db/`** — SQLite persistence, split by table family and re-exported from `db/__init__.py`. WAL mode + `busy_timeout=5000` + `PRAGMA user_version` migrations (`db/connection.py`). Per-playlist dynamic tables (`pl_<sanitized_name>` + `pl_<…>_tried`) plus a global `playlists_meta` catalogue keyed by Spotify id, a global `settings` key-value bag, a global `blocklist` (peer files, or whole peers when `filename` is NULL), a global `history` event log and a global `file_checks` table (validation verdicts, `db/checks.py`). `get_setting(conn, key, default)` prefers DB, falls back to env, then default — so any env var becomes a mutable setting for free.
 - **`spotify_slsk/webui/`** — Flask dashboard (see next section).
 - **`spotify_slsk/runtime_state.py`** — in-process observability: thread-safe current-activity dict, a bounded log ring buffer (fed by a handler installed in `log_config`), per-track slskd search history (with accepted/rejected counts and reasons), interactive-search results keyed by (playlist_id, track_id) with a 10-minute TTL, the manual-grab and quarantine queues the UI fills and the daemon drains, and `touch_heartbeat()` (shared by the daemon and the importer). All of it is per-process and resets on restart — deliberately not persisted.
@@ -182,7 +198,8 @@ header health badge) and registers one blueprint per area: `playlists`
 (dashboard, playlist page, playlist mutations), `tracks` (track page,
 retry/re-tag, interactive search/grab), `wanted` (wanted, history, blocklist),
 `health` (library health report, scan/quarantine/ignore), `library` (rename preview/apply),
-`settings` (settings, ntfy probe), `system` (file, logs, activity, healthz).
+`queue` (live slskd transfers, cancel), `auth` (optional login), `settings`
+(settings, notification tests), `system` (file, logs, activity, healthz, status, tasks).
 Endpoints are blueprint-qualified — templates use `url_for('playlists.dashboard')`,
 not `url_for('dashboard')`. URLs are pinned by
 `test_url_map_is_unchanged_by_the_blueprint_split`.
@@ -201,29 +218,41 @@ Routes:
 - `GET /settings` — grouped, validated tunables · `POST /settings/quality` — the quality profile editor (checkbox + numeric order per quality, cutoff select, upgrades toggle; validated as a whole)
 - `GET /logs` · `GET /logs.json?since=&limit=` · `GET /activity.json` — live log tail and current daemon phase
 - `GET /file?rel=` — serves a downloaded file for the in-browser audio preview; `rel` is resolved against the playlists root and re-checked with `commonpath` after symlink normalisation
-- `GET /healthz` — JSON health (schema version, heartbeat age, reason)
-- `POST /playlists` · `POST /playlist/<id>/{toggle,delete,refresh}` (delete requires `confirm=1`, sent by the dashboard's `<details>` confirm) · `POST /track/<pid>/<tid>/retry` · `POST /track/<pid>/<tid>/retag` · `POST /settings/test-ntfy`
+- `GET /healthz` — JSON health (schema version, heartbeat age, reason, and `checks`; status code from `ok` only)
+- `GET /system/status` — checks, version, uptime, schema, DB size, disk space, backups (+ Backup now)
+- `GET /system/tasks` · `POST /system/tasks/<name>/run` (`next=status` returns to the status page) — scheduled tasks and Run now
+- `GET /queue` (htmx-polled every 3 s) · `POST /queue/cancel` (`username`, `id`, optional `blocklist=1`)
+- `GET /login` · `POST /login` · `POST /logout` — only meaningful when UI auth is configured
+- `POST /playlists` · `POST /playlist/<id>/{toggle,delete,refresh}` (delete requires `confirm=1`, sent by the dashboard's `<details>` confirm) · `POST /track/<pid>/<tid>/retry` · `POST /track/<pid>/<tid>/retag` · `POST /settings/test-notification/<ntfy|webhook|subsonic>`
 
 **Only the daemon thread downloads, moves files or imports.** The interactive
 search runs on a UI background thread with its own slskd client (not the
 daemon's shared session) and a blocklist snapshot, and never writes. A grab is
-queued in `runtime_state`; the daemon drains the queue at the top of each cycle
-and after each playlist (`daemon._process_manual_grabs`). Quarantine requests
-work the same way (`daemon._process_quarantines`, top of each cycle), so do
-renames (`daemon._process_renames`, right after), as do
-Cutoff-unmet searches (`daemon._process_upgrade_requests`, after the grabs), and
-"Scan library" only sets the `_library_scan_pending` settings flag that
-`daemon._run_library_scan` reads after the playlists.
+queued in `runtime_state`; so are quarantines, renames and Cutoff-unmet
+searches. The daemon drains all four (`daemon._drain_queues`, in that order)
+at the top of each cycle and after each playlist. "Scan library" only sets the
+`_library_scan_pending` settings flag that `daemon._run_library_scan` reads
+after each playlist (small step) and at the end of the cycle; "Run now" only
+sets `tasks.queued_at`. The queue page's Cancel is the one slskd write the UI
+makes (own `new_client`, 5 s timeout).
 
 **Two constraints any new UI code must respect:**
 1. **Every POST needs `csrf_token()` in its form** — the app-level `before_request` guard (it covers every blueprint) rejects tokenless requests with 400.
-2. **No inline `<script>`** — the CSP is `script-src 'self'`. The theme toggle and the log tail live in `static/theme.js` and `static/logs.js` for exactly this reason. Inline handlers fail silently in the browser, not in tests.
+2. **No inline `<script>`** — the CSP is `script-src 'self'`. The theme toggle, the log tail and toasts live in `static/theme.js`, `static/logs.js` and `static/toast.js` for exactly this reason. Inline handlers fail silently in the browser, not in tests.
+
+Feedback: `helpers.notify_user(message, category)` — an htmx request gets a
+toast (`HX-Trigger: {"toast": {"items": [...]}}`, added in `create_app`'s
+after_request, rendered by `toast.js`, text only); anything else gets a flash.
+htmx forms keep `method`/`action`, so they work as plain POST + redirect too.
+An htmx action route renders the page it would redirect to (the form's
+`hx-select` picks the fragment) instead of redirecting.
 
 ### Security boundary
 
-**The UI has no authentication.** Compose binds it to loopback; exposing it to a
-LAN means putting a reverse proxy with auth in front. Given that, the browser is
-the confused deputy, so:
+**The UI has no authentication by default.** Compose binds it to loopback;
+exposing it to a LAN means setting `UI_AUTH_USERNAME` + `UI_AUTH_PASSWORD`
+(below) or a reverse proxy with auth in front. Either way the browser is the
+confused deputy, so:
 
 - **Every mutating route requires a session-backed CSRF token.** Loopback
   binding does not mitigate CSRF — the browser is inside the trust boundary. A
@@ -236,9 +265,26 @@ the confused deputy, so:
 - Session cookie is HttpOnly + SameSite=Lax; set `UI_COOKIE_SECURE=1` when a
   proxy terminates TLS (forcing it would break plain-http loopback).
 - CSP plus `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`.
-- **`/logs` exposes the daemon's log tail with no authentication**, like every
-  other route. Keep credentials out of log messages — that page is the easiest
-  way for them to leak if the UI is ever exposed beyond loopback.
+- **Optional login** (`webui/auth.py`): on when both a username and a password
+  are set (env, or /settings). The password is only ever a salted werkzeug
+  hash — env value hashed in memory at startup, a /settings value stored as
+  `_ui_auth_password_hash` (wins over env). A before_request guard (after the
+  DB opens) covers every route but `/healthz`, `/login` and `static`; htmx
+  requests get 401 + `HX-Redirect`. Login clears the session (no fixation),
+  rate-limits 5 failures per IP per 15 min in memory (expired entries pruned,
+  at most 1000 IPs, LRU; behind a proxy that is one IP unless
+  `UI_TRUST_PROXY=1`, which applies werkzeug `ProxyFix(x_for=1)`), only follows local `?next=` paths, and stores a fingerprint of the
+  hash so a password change logs other sessions out. Lockout recovery:
+  `DELETE FROM settings WHERE key IN ('UI_AUTH_USERNAME','_ui_auth_password_hash')`.
+- **Secrets in settings** (`kind` `secret`/`password`: `WEBHOOK_HEADER_VALUE`,
+  `SUBSONIC_PASSWORD`, `UI_AUTH_PASSWORD`) are never rendered (password input,
+  `••••`, blank keeps, explicit clear checkbox) and never logged. Notification
+  failures log the HTTP status or the exception *type* only
+  (`notifications.safe_error`): requests' messages contain the full URL, and
+  webhook/Subsonic URLs carry tokens.
+- **`/logs` exposes the daemon's log tail** to anyone who can reach the UI
+  (no auth by default). Keep credentials out of log messages — that page is the
+  easiest way for them to leak if the UI is ever exposed beyond loopback.
 - **`.dockerignore` is load-bearing.** The Dockerfile does `COPY . /app/`;
   without it, a local `docker compose up --build` bakes `.env`, the production
   DB, the music library and slskd's keys into image layers. CI asserts none of
@@ -250,6 +296,63 @@ semicolon or comment delimiter can reach a table-name f-string — the dynamic
 SQL is **not** injectable. Jinja autoescaping neutralises Spotify-supplied
 metadata in templates. Peer-supplied filenames never reach a local path
 unnormalised.
+
+### Operations (Tier 6)
+
+- **Scheduler** (`tasks.py`, `db/tasks.py`, schema v9 `tasks` table). A
+  registry of `Task(name, label, interval)`: `spotify_sync` (every cycle),
+  `library_scan` (`LIBRARY_SCAN_INTERVAL_HOURS`, or on demand),
+  `quality_backfill` (every cycle), `recycle_purge` (daily when retention >
+  0), `db_backup` (daily when `BACKUP_RETENTION` > 0), `housekeeping`
+  (daily), `db_integrity` (daily `PRAGMA quick_check`), `health_checks`
+  (5 min). The daemon maps names to functions in `daemon.SCHEDULED` (the
+  cycle-driven three are recorded where they run) and records every run
+  (last run, duration, result, ok). "Run now" sets `queued_at` only when it
+  is NULL — repeated clicks collapse into one run; `library_scan` uses its
+  own `_library_scan_pending` flag instead. A failing task is recorded, never
+  raised. No general command framework, on purpose.
+- **Health checks** (`healthchecks.py`), each `{name, status: ok|warn|error,
+  message}`. Local, run per request (cheap): `downloads_dir`/`playlists_dir`
+  (exist + writable), `disk_space` (`MIN_FREE_SPACE_GB`), `heartbeat`,
+  `last_cycle` (warn after 48 h — backlog cycles are long), `flac_binary`
+  (when the lossless check is on), `db_integrity` (the daily task's last
+  result), `ui_auth` (warn: bound beyond loopback with no login — the
+  in-container 0.0.0.0 default included, since only the port mapping decides
+  reachability). Remote, daemon only (`refresh_remote`, uses the daemon's
+  client): `slskd` (connected + logged in), `spotify` (token fetch). Messages
+  carry exception *types*, never their text. /healthz's `ok` and status code
+  are unchanged (schema + heartbeat); `checks` is informational.
+- **Notifications** (`notifications.py`). History events (grabbed, imported,
+  upgraded, download_failed, import_rejected, quarantined) arrive through
+  `db.add_history_listener`; the daemon `emit`s playlist_synced, cycle_summary
+  (only when something was added/downloaded/failed), health_issue and
+  health_restored (only on a status change; the last statuses persist in
+  `_health_state`, so a restart is silent). Events queue in memory and the
+  daemon `flush`es after each playlist, after health checks and at the end of
+  a cycle; history events are batched per (event, playlist), 25 tracks listed.
+  Providers: ntfy, webhook (`{event, ts, data}` JSON, optional header, no
+  redirects), each with its own event list; 10 s timeout; a failure pauses
+  that provider (1 min doubling to 1 h, events dropped meanwhile). Subsonic
+  `startScan` (salted token, never the password) runs once per cycle and only
+  if something was imported or upgraded since the last scan. The Test buttons
+  bypass queue and backoff.
+- **Queue page** (`webui/queue.py`): `get_all_downloads` with a per-request
+  `new_client(timeout=5)`; rows are joined to tracks via
+  `runtime_state.get_current_transfer()` (set by `grab_candidate` while it
+  waits) and recent grabbed/download_failed history. Cancel → slskd
+  `cancel_download`; the waiting daemon sees "Completed, Cancelled" (not a peer
+  fault). Cancel + blocklist adds the file slskd reports for that id. Pending
+  UI requests are shown with `runtime_state.peek_*` (non-consuming).
+- **Backups and housekeeping** (`backup.py`). `create_backup`:
+  `conn.backup()` into `<db dir>/backups/playlist_tracks-YYYYMMDD-HHMMSS.db.partial`,
+  `journal_mode=DELETE`, `integrity_check`, then rename. Backups hold the
+  settings table (secrets, login hash, `_ui_secret_key`): the dir is 0700 and
+  each file is created 0600 before SQLite writes to it. Retention deletes only
+  names matching that pattern. `housekeeping`: history prune, VACUUM when ≥ 25%
+  of ≥ 1000 pages are free, `PRAGMA optimize`, and deletes only our own
+  expired temp files (artwork `.fail` past TTL, `.tmp`, backup `.partial`).
+  Partial files in slskd's `incomplete/` are **reported only** — slskd owns
+  them. Nothing here touches library files.
 
 ### State machine per track
 
@@ -306,8 +409,8 @@ unnormalised.
     A file outside the playlists root is left in place. The retirement time
     goes to the `recycle_bin` table (`db.recycle`), not the file's mtime.
 12. **Recycle bin vs quarantine.** `.quarantine/<table>/replaced/` is the
-    recycle bin: with `RECYCLE_BIN_RETENTION_DAYS` > 0, `daemon._run_housekeeping`
-    (at most daily, `_recycle_bin_purged_at`) deletes files there retired more
+    recycle bin: with `RECYCLE_BIN_RETENTION_DAYS` > 0, the `recycle_purge` task
+    (daily, last run in the `tasks` table) deletes files there retired more
     than N days ago (`health.purge_recycle_bin`, history `recycle_purged`,
     symlinks not followed). Retention is read from `recycle_bin.retired_at`,
     never mtime: a file with no record is registered as retired on first
@@ -357,13 +460,15 @@ Files enter via the shared `/downloads` volume, then move to `/playlists/<table>
 ### Environment knobs
 
 Deploy-time / infra (env only):
-- `SPOTIPY_CLIENT_ID`, `SPOTIPY_CLIENT_SECRET`, `SLSKD_API_KEY`, `NTFY_URL`, `NTFY_TOPIC`
+- `SPOTIPY_CLIENT_ID`, `SPOTIPY_CLIENT_SECRET`, `SLSKD_API_KEY`
 - `SLSKD_HOST_URL`, `SLSKD_URL_BASE`, `SLSKD_DOWNLOADS_DIR`, `SLSKD_PLAYLISTS_DIR`
 - `CYCLE_INTERVAL_SECONDS` (300), `CYCLE_ERROR_BACKOFF_SECONDS` (60), `SLSKD_HTTP_TIMEOUT` (30)
 - `HEARTBEAT_FILE`, `HEARTBEAT_STALE_SECONDS`
 - `LOGLEVEL`, `LIB_LOGLEVEL`, `TIMEZONE`
 - `PUID`/`PGID` (compose user override; the image itself is `USER 1000:1000`)
-- `UI_ENABLED` (1), `UI_BIND_ADDR` (0.0.0.0), `UI_PORT` (8000), `UI_SECRET_KEY`, `UI_COOKIE_SECURE` (0)
+- `UI_ENABLED` (1), `UI_BIND_ADDR` (0.0.0.0), `UI_PORT` (8000), `UI_SECRET_KEY`, `UI_COOKIE_SECURE` (0), `UI_TRUST_PROXY` (0)
+- `UI_AUTH_PASSWORD` — env form of the login password (hashed in memory; a
+  password saved on /settings wins)
 - `SPOTIFY_PLAYLIST_URLS` — read **only on first boot** to seed the DB
 
 UI-editable (env is a default; DB override wins). All are validated on save —
@@ -372,7 +477,7 @@ see `SETTINGS_SPEC` and `validate_setting` in `spotify_slsk/config.py`:
   `SLSKD_MIN_EFFECTIVE_MP3_KBPS` (280), `SLSKD_EARLY_STOP_RESPONSES` (20),
   `SLSKD_MAX_DURATION_DIFF_SECONDS` (15; 0 disables the duration filter and the
   untagged fallback), `SLSKD_WAIT_TIMEOUT` (60), `HISTORY_RETENTION_DAYS` (90,
-  pruned once per cycle), `UPGRADE_CHECK_INTERVAL_HOURS` (168),
+  pruned by the daily housekeeping task), `UPGRADE_CHECK_INTERVAL_HOURS` (168),
   `LOSSLESS_CHECK_ENABLED` (1, kind `bool`), `LOSSLESS_FAKE_CUTOFF_HZ` (19500),
   `LOSSLESS_MIN_DROP_DB` (15), `LIBRARY_SCAN_INTERVAL_HOURS` (0 = manual only),
   `REQUIRED_TERMS` / `IGNORED_TERMS` (empty; kind `terms`), `EMBED_COVER_ART` (1),
@@ -380,6 +485,14 @@ see `SETTINGS_SPEC` and `validate_setting` in `spotify_slsk/config.py`:
   error, example rendered on /settings), `LINK_MODE` (hardlink; kind
   `choice:hardlink|copy|off`), `WRITE_M3U` (1), `WRITE_PLAYLIST_COVER` (1),
   `RECYCLE_BIN_RETENTION_DAYS` (0 = keep forever)
+- Notifications: `NTFY_URL`, `NTFY_TOPIC` (kinds `url`/`text`; env still
+  works as the default), `NTFY_EVENTS` (playlist_synced, cycle_summary,
+  health_issue, health_restored), `WEBHOOK_URL`, `WEBHOOK_HEADER_NAME` (kind
+  `header`), `WEBHOOK_HEADER_VALUE` (`secret`), `WEBHOOK_EVENTS` (all; kind
+  `events`), `SUBSONIC_URL`, `SUBSONIC_USERNAME`, `SUBSONIC_PASSWORD` (`secret`)
+- System: `UI_AUTH_USERNAME`, `UI_AUTH_PASSWORD` (kind `password`: stored as
+  `_ui_auth_password_hash`, never as itself), `MIN_FREE_SPACE_GB` (5; 0 = off),
+  `BACKUP_RETENTION` (7; 0 = no automatic backups, nothing deleted)
 - `QUALITY_PROFILE` — JSON, **not** in `SETTINGS_SPEC` (own form, so the main
   form never clears it); validated by `matching.quality.make_profile`.
 - `SLSKD_PREFERRED_FORMATS` — **deprecated**: only seeds the first profile
@@ -414,7 +527,7 @@ threaded through the download call chain. The real per-track cap is
 - **slskd versions.** Compose pins the slskd server at **0.26.1** (0.26 moved `global`/`groups` under `transfers` and renamed `integration` → `integrations`; README has the migration). `slskd-api==0.2.4` is a thin HTTP wrapper; the transfer-state strings come from the **server**. `Transfer.outcome` treats any `"Completed, X"` other than `"Completed, Succeeded"` as a failure (Rejected, TimedOut, Errored, Aborted, Cancelled); only Errored/Rejected/Aborted (and "failed") are a peer fault. `tests/test_slskd_contract.py` pins every production state plus 401/404/500/connection/timeout handling at every call site — run it when bumping either.
 - **slskd fields are camelCase** (`bitRate`, `bitDepth`, `sampleRate`, `isVariableBitRate`, `uploadSpeed`). A lowercase `bitrate` read silently returned None for years. Read slskd JSON only through `slskd/models.py`; `tests/fixtures/slskd/` holds payloads in the real shape.
 - **slskd HTTP timeout.** `new_client` passes `timeout=SLSKD_HTTP_TIMEOUT` (default 30s) to `SlskdClient`; slskd-api's default is none, and a slskd that accepts but never answers would otherwise block the daemon thread until the healthcheck restarts the container. Every slskd call is a short request, so 30s is generous.
-- **SQLite WAL mode** means the DB file is always accompanied by `-wal` and `-shm` files. Backups must capture all three or run `PRAGMA wal_checkpoint(TRUNCATE)` first.
+- **SQLite WAL mode** means the DB file is always accompanied by `-wal` and `-shm` files. A hand-made copy must capture all three or run `PRAGMA wal_checkpoint(TRUNCATE)` first; the `db_backup` task uses the online backup API and writes a self-contained (rollback-journal) file, so it needs neither.
 - **Tracks removed from a Spotify playlist upstream are kept locally** — the library is append-only. `tests/test_pipeline.py` pins this so a change is deliberate.
 - **Validation (Tier 3).** `importer/audio_check.py` decodes 3 x 10 s windows
   (middle 80%) with the `flac` CLI (WAV via stdlib), Welch-averages Hann frames
@@ -483,7 +596,9 @@ threaded through the download call chain. The real per-track cap is
   also sees the raw path); an invalid regex in the env logs an error at import.
 - **Image.** The Dockerfile `apk add`s `flac` and strips numpy's bundled test
   suite; numpy (+ its OpenBLAS) is most of the ~76 MB the image grew in Tier 3.
-- **Schema version is 8.** v8 adds the Spotify tagging columns to every
+- **Schema version is 9.** v9 adds the `tasks` table (`CREATE TABLE IF NOT
+  EXISTS`, no resync; `test_v8_database_gains_the_table_without_a_resync`).
+  v8 adds the Spotify tagging columns to every
   catalogued per-playlist table — `album_artist`, `artist_names` (JSON list),
   `track_number`, `track_total`, `disc_number`, `release_date`, `album_id`,
   `cover_url`, `position` (`_TRACK_COLUMNS`; `db.SPOTIFY_COLUMNS` lists what

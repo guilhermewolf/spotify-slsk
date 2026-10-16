@@ -7,27 +7,31 @@ against the same DB file the daemon writes to (WAL mode makes this safe).
 flags, CSRF, security headers/CSP, the per-request DB connection, the
 header health badge - and registers one blueprint per area:
 
+* ``auth``      - optional login / logout
 * ``playlists`` - dashboard, playlist page, playlist mutations
 * ``tracks``    - track page, retry/re-tag, interactive search and grab
 * ``wanted``    - wanted, history, blocklist
 * ``health``    - library health report, scan / quarantine / ignore
-* ``settings``  - validated tunables, ntfy probe
-* ``system``    - audio preview file, logs, activity, /healthz
+* ``queue``     - live slskd transfers, cancel / cancel + blocklist
+* ``settings``  - validated tunables, notification tests
+* ``system``    - audio preview file, logs, activity, /healthz, status, tasks
 """
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 import os
 import secrets
 import threading
 
 from flask import Flask, abort, g, request, session
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from .. import db
 from ..utils import fmt_duration
-from . import health, library, playlists, settings, system, tracks, wanted
-from .helpers import health_snapshot, human_bytes
+from . import auth, health, library, playlists, queue, settings, system, tracks, wanted
+from .helpers import fmt_age, fmt_interval, fmt_ts, health_snapshot, human_bytes
 
 # Reserved settings key holding the generated Flask secret. It is not in
 # SETTINGS_SPEC, so it never appears on the settings page.
@@ -78,6 +82,11 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
         static_folder="static",
         static_url_path="/static",
     )
+    if os.getenv("UI_TRUST_PROXY", "0") == "1":
+        # One reverse proxy in front: take the client IP (login rate limit,
+        # logs) from its X-Forwarded-For. Without a proxy this would let
+        # clients pick their own address, hence opt-in.
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)  # type: ignore[method-assign]
     app.config["DB_PATH"] = db_path
     app.config["SPOTIFY"] = spotify_client
     # Optional callable invoked after state-changing requests so the daemon's
@@ -129,9 +138,21 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
     # Templates call csrf_token() to render the hidden field.
     app.jinja_env.globals["csrf_token"] = _csrf_token
     app.jinja_env.filters["human_bytes"] = human_bytes
+    app.jinja_env.filters["ts"] = fmt_ts
+    app.jinja_env.filters["interval"] = fmt_interval
+    app.jinja_env.filters["age"] = fmt_age
     app.jinja_env.filters["duration_ms"] = (
         lambda ms: fmt_duration(ms / 1000) if ms else "—"
     )
+
+    @app.after_request
+    def _toasts(response):
+        # htmx fires a "toast" event on the page for each request carrying
+        # this header; static/toast.js renders them (helpers.notify_user).
+        toasts = g.pop("toasts", None)
+        if toasts:
+            response.headers["HX-Trigger"] = json.dumps({"toast": {"items": toasts}})
+        return response
 
     @app.after_request
     def _security_headers(response):
@@ -155,6 +176,11 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
         if g.conn is None:
             abort(503, "database unavailable")
 
+    # Optional login (webui.auth): a no-op unless credentials are set.
+    # After _open_conn, because the credentials live in the settings table.
+    app.config["AUTH_ENV_HASH"] = auth.env_password_hash()
+    app.before_request(auth.require_login)
+
     @app.teardown_appcontext
     def _close_conn(_exc):
         conn = g.pop("conn", None)
@@ -164,14 +190,17 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
             except Exception:
                 logging.debug("Error closing webui conn", exc_info=True)
 
-    for blueprint in (playlists.bp, tracks.bp, wanted.bp, health.bp, library.bp, settings.bp, system.bp):
+    for blueprint in (
+        auth.bp, playlists.bp, tracks.bp, wanted.bp, health.bp, library.bp, queue.bp,
+        settings.bp, system.bp,
+    ):
         app.register_blueprint(blueprint)
 
     @app.context_processor
     def _inject_health():
         # Every page shows the daemon's status in the header, so it must not
         # depend on a single route remembering to pass it.
-        return {"health": health_snapshot()}
+        return {"health": health_snapshot(), "auth_user": auth.current_user()}
 
     return app
 

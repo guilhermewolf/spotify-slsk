@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% set active_page = 'system' %}
+{% set system_tab = 'tasks' %}
+{% block title %}Tasks · spotify-slsk{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Tasks</h1>
+    <p class="subtle">
+      Periodic work the daemon does besides syncing. "Run now" queues the task; the
+      daemon picks it up at the start of the next cycle or between two playlists.
+      Asking again while it is queued does nothing.
+    </p>
+  </div>
+</div>
+{% include "_system_tabs.html" %}
+
+<div class="table-wrap" id="tasks">
+  <table class="track-table">
+    <thead>
+      <tr>
+        <th scope="col">Task</th>
+        <th scope="col">Interval</th>
+        <th scope="col">Last run</th>
+        <th scope="col" class="num">Took</th>
+        <th scope="col">Result</th>
+        <th scope="col">Next</th>
+        <th scope="col">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for t in tasks %}
+      <tr>
+        <td class="nowrap">{{ t.label }}</td>
+        <td class="nowrap">{{ t.cadence or (t.interval | interval) }}</td>
+        <td class="nowrap">{{ t.last_run | ts if t.last_run else 'never' }}</td>
+        <td class="num">{{ '%.1fs' % t.last_duration if t.last_duration is not none else '—' }}</td>
+        <td>
+          {% if t.last_ok == false %}<span class="badge badge-suspended">failed</span>{% endif %}
+          {{ t.last_result or '' }}
+        </td>
+        <td class="nowrap">
+          {% if t.queued %}<span class="badge badge-pending">queued</span>
+          {% elif t.next_due %}{{ t.next_due | ts }}
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          <form method="POST" action="{{ url_for('system.task_run', name=t.name) }}" class="inline-form"
+                hx-post="{{ url_for('system.task_run', name=t.name) }}" hx-target="#tasks"
+                hx-select="#tasks" hx-swap="outerHTML">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="secondary outline" {% if t.queued %}disabled{% endif %}>Run now</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

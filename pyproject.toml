@@ -1,6 +1,6 @@
 [project]
 name = "spotify-slsk"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Sync Spotify playlists into a local music library via slskd (Soulseek)."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -18,6 +18,9 @@ dependencies = [
 
 [project.scripts]
 spotify-slsk = "spotify_slsk.daemon:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "spotify_slsk.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["spotify_slsk*"]

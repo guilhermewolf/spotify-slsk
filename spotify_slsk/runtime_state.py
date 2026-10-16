@@ -21,6 +21,9 @@ from collections import deque
 
 from . import config
 
+# Process start, for the uptime on /system/status.
+STARTED_AT = time.time()
+
 
 def touch_heartbeat() -> None:
     """Update config.HEARTBEAT_FILE so the Docker HEALTHCHECK can tell a
@@ -285,6 +288,11 @@ def enqueue_manual_grab(request: dict) -> None:
         _grab_queue.append(dict(request))
 
 
+def peek_manual_grabs() -> list:
+    with _grab_lock:
+        return [dict(r) for r in _grab_queue]
+
+
 def pop_manual_grabs() -> list:
     with _grab_lock:
         items = list(_grab_queue)
@@ -308,6 +316,11 @@ def enqueue_quarantine(table_name: str, track_id: str, path: str | None) -> None
             _quarantine_queue.append((table_name, track_id, path))
 
 
+def peek_quarantines() -> list:
+    with _quarantine_lock:
+        return list(_quarantine_queue)
+
+
 def pop_quarantines() -> list:
     with _quarantine_lock:
         items = list(_quarantine_queue)
@@ -329,6 +342,11 @@ def enqueue_rename(table_name: str, track_id: str, old_path: str, new_name: str)
     with _rename_lock:
         if not any(q[:2] == (table_name, track_id) for q in _rename_queue):
             _rename_queue.append((table_name, track_id, old_path, new_name))
+
+
+def peek_renames() -> list:
+    with _rename_lock:
+        return list(_rename_queue)
 
 
 def pop_renames() -> list:
@@ -359,8 +377,46 @@ def enqueue_upgrade_check(table_name: str, track_id: str) -> None:
             _upgrade_queue.append((table_name, track_id))
 
 
+def peek_upgrade_checks() -> list:
+    with _upgrade_lock:
+        return list(_upgrade_queue)
+
+
 def pop_upgrade_checks() -> list:
     with _upgrade_lock:
         items = list(_upgrade_queue)
         _upgrade_queue.clear()
     return items
+
+
+# --- the daemon's current transfer (queue page) -----------------------------
+#
+# Set by slskd.transfers.grab_candidate while it waits on a transfer, so the
+# queue page can name the track a transfer is for before history has a row.
+
+_transfer_lock = threading.Lock()
+_current_transfer: dict | None = None
+
+
+# Every enqueue the daemon made recently (newest last), so a transfer that
+# finished or was left queued in slskd can still be named after the daemon
+# moved on. Bounded; per-process like the rest of this module.
+_recent_transfers: deque = deque(maxlen=500)
+
+
+def set_current_transfer(info: dict | None) -> None:
+    global _current_transfer
+    with _transfer_lock:
+        _current_transfer = dict(info) if info else None
+        if info:
+            _recent_transfers.append(dict(info))
+
+
+def recent_transfers() -> list[dict]:
+    with _transfer_lock:
+        return [dict(t) for t in _recent_transfers]
+
+
+def get_current_transfer() -> dict | None:
+    with _transfer_lock:
+        return dict(_current_transfer) if _current_transfer else None

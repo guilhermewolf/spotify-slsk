@@ -564,12 +564,12 @@ class TestLiveObservability:
 
 
 class TestExtraEndpoints:
-    def test_test_ntfy_without_env_flashes_error(self, client, monkeypatch):
+    def test_ntfy_test_without_settings_flashes_error(self, client, monkeypatch):
         monkeypatch.delenv("NTFY_URL", raising=False)
         monkeypatch.delenv("NTFY_TOPIC", raising=False)
-        r = post(client, "/settings/test-ntfy", follow_redirects=True)
+        r = post(client, "/settings/test-notification/ntfy", follow_redirects=True)
         assert r.status_code == 200
-        assert b"not set" in r.data
+        assert b"not configured" in r.data
 
     def test_serve_file_rejects_traversal(self, client):
         r = client.get("/file?rel=../../etc/passwd")
@@ -883,13 +883,21 @@ def test_url_map_is_unchanged_by_the_blueprint_split(app_tmp):
         ("/library/rename", "POST"),
         ("/settings", "GET"),
         ("/settings", "POST"),
-        ("/settings/test-ntfy", "POST"),
+        ("/settings/test-notification/<provider>", "POST"),
         ("/settings/quality", "POST"),
         ("/file", "GET"),
         ("/logs", "GET"),
         ("/logs.json", "GET"),
         ("/activity.json", "GET"),
         ("/healthz", "GET"),
+        ("/system/tasks", "GET"),
+        ("/queue", "GET"),
+        ("/queue/cancel", "POST"),
+        ("/login", "GET"),
+        ("/login", "POST"),
+        ("/logout", "POST"),
+        ("/system/status", "GET"),
+        ("/system/tasks/<name>/run", "POST"),
     }
 
 

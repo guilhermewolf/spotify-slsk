@@ -1,19 +1,32 @@
-"""Settings page (validated tunables) and the ntfy probe."""
+"""Settings page (validated tunables) and the notification test buttons."""
 from __future__ import annotations
 
-import os
-
-import requests
-from flask import Blueprint, flash, g, redirect, render_template, request, url_for
+from flask import (
+    Blueprint,
+    abort,
+    flash,
+    g,
+    redirect,
+    render_template,
+    request,
+    url_for,
+)
 from flask.typing import ResponseReturnValue
 
-from .. import config, db
+from .. import config, db, notifications
 from ..config import SETTINGS_SPEC, validate_setting
 from ..library import naming
 from ..matching.quality import FLOOR_BLOCKED, LADDER, LADDER_INDEX, make_profile
+from .auth import hash_password
 from .helpers import wake_daemon
 
 bp = Blueprint("settings", __name__)
+
+MASK = "••••"
+AUTH_PARTIAL_WARNING = (
+    "Only one of UI_AUTH_USERNAME / UI_AUTH_PASSWORD is set: the login is OFF and "
+    "the web UI is open. Set both to require a login, or clear both."
+)
 
 
 # ---- settings -----------------------------------------------------
@@ -27,7 +40,22 @@ def settings() -> ResponseReturnValue:
         errors: list[str] = []
         for key, _default, _help, kind in SETTINGS_SPEC:
             val = (request.form.get(key) or "").strip()
-            if not val:
+            if kind == "password":
+                # Hashed; the plain value is never stored. Blank keeps it.
+                # Not stripped: the login form does not strip either.
+                raw = request.form.get(key) or ""
+                if request.form.get(f"clear_{key}") == "1":
+                    cleaned[config.UI_AUTH_HASH_KEY] = None
+                if raw:
+                    cleaned[config.UI_AUTH_HASH_KEY] = hash_password(raw)
+                continue
+            if kind == "secret":
+                # Never rendered back, so an empty field means "keep".
+                if request.form.get(f"clear_{key}") == "1":
+                    cleaned[key] = None
+                if not val:
+                    continue
+            elif not val:
                 cleaned[key] = None  # clear the override
                 continue
             normalised, error = validate_setting(kind, val)
@@ -63,11 +91,27 @@ def settings() -> ResponseReturnValue:
         key: db.get_setting(g.conn, key, default=default)
         for key, default, _help, _kind in SETTINGS_SPEC
     }
+    # Secrets never reach the page: only whether one is set.
+    stored = db.list_settings(g.conn)
+    for key, _default, _help, kind in SETTINGS_SPEC:
+        if kind == "secret":
+            effective[key] = MASK if effective[key] else ""
+            if key in overrides:
+                overrides[key] = MASK
+        elif kind == "password":
+            in_db = bool(stored.get(config.UI_AUTH_HASH_KEY))
+            effective[key] = MASK if in_db or effective[key] else ""
+            overrides.pop(key, None)
+            if in_db:
+                overrides[key] = MASK
     profile = config.load_quality_profile(g.conn)
     # Allowed qualities in profile order, then the rest in ladder order.
     quality_rows = sorted(LADDER, key=lambda q: profile.rank(q.key))
     return render_template(
         "settings.html",
+        auth_partial_warning=(
+            AUTH_PARTIAL_WARNING if config.ui_auth_state(g.conn) == "partial" else None
+        ),
         spec=SETTINGS_SPEC,
         overrides=overrides,
         effective=effective,
@@ -114,26 +158,17 @@ def save_quality_profile() -> ResponseReturnValue:
     return redirect(url_for("settings.settings") + "#quality")
 
 
-# ---- ntfy probe ---------------------------------------------------
+# ---- notification test ---------------------------------------------
 
-@bp.route("/settings/test-ntfy", methods=["POST"])
-def test_ntfy() -> ResponseReturnValue:
-    """Fire one ntfy notification using the configured URL+topic."""
-    ntfy_url = os.getenv("NTFY_URL", "").strip()
-    ntfy_topic = os.getenv("NTFY_TOPIC", "").strip()
-    if not ntfy_url or not ntfy_topic:
-        flash("NTFY_URL or NTFY_TOPIC is not set in the environment.", "error")
-        return redirect(url_for("settings.settings"))
+@bp.route("/settings/test-notification/<provider>", methods=["POST"])
+def test_notification(provider: str) -> ResponseReturnValue:
+    """Send one test message (or Subsonic scan) with the saved settings.
+    Errors show the HTTP status or exception type only: a URL can carry a
+    token, and requests' messages include it."""
+    if provider not in (*notifications.PROVIDERS, "subsonic"):
+        abort(404)
     try:
-        resp = requests.post(
-            f"{ntfy_url}/{ntfy_topic}",
-            data="spotify-slsk: test notification from /settings",
-            timeout=5,
-        )
-        if resp.ok:
-            flash(f"Sent! ntfy responded {resp.status_code}.", "success")
-        else:
-            flash(f"ntfy responded {resp.status_code}: {resp.text[:200]}", "error")
+        flash(notifications.send_test(g.conn, provider) + ".", "success")
     except Exception as e:
-        flash(f"ntfy request failed: {e}", "error")
-    return redirect(url_for("settings.settings"))
+        flash(f"Test failed: {notifications.safe_error(e)}", "error")
+    return redirect(url_for("settings.settings") + "#notifications")

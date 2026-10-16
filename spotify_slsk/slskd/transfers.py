@@ -6,7 +6,7 @@ import os
 import sqlite3
 import time
 
-from .. import config
+from .. import config, runtime_state
 from ..db import add_blocklist, add_tried_file, record_history
 from ..models import Candidate
 from . import client as slskd_client
@@ -86,6 +86,10 @@ def grab_candidate(
     logging.info(
         f"Attempting download: {candidate['filename']} from {candidate['user']}"
     )
+    runtime_state.set_current_transfer({
+        "username": candidate["user"], "filename": candidate["filename"],
+        "size": candidate.get("size"), "table_name": playlist_name, "track_id": track_id,
+    })
     try:
         slskd_client.get_client().transfers.enqueue(
             username=candidate["user"],
@@ -140,6 +144,8 @@ def grab_candidate(
         logging.error(
             f"Error downloading {basename} from {candidate['user']}: {e}"
         )
+    finally:
+        runtime_state.set_current_transfer(None)
     return None
 
 

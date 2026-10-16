@@ -5,7 +5,7 @@ import logging
 import os
 import time
 
-from flask import current_app, g
+from flask import current_app, flash, g, request
 
 from .. import db
 
@@ -65,6 +65,34 @@ def human_bytes(n: float) -> str:
     return f"{n:.1f} PiB"
 
 
+def fmt_ts(epoch: float | None) -> str:
+    """Epoch seconds -> local "YYYY-MM-DD HH:MM"."""
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(epoch)) if epoch else "—"
+
+
+def fmt_interval(seconds: int | None) -> str:
+    """3600 -> "1h", 86400 -> "1d", 300 -> "5m"; 0 -> "on demand"."""
+    if not seconds:
+        return "on demand"
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size and seconds % size == 0:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
+
+
+def fmt_age(seconds: float | None) -> str:
+    """Seconds -> "3d 4h", "2h 5m", "4m"."""
+    seconds = int(seconds or 0)
+    days, rest = divmod(seconds, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes = rest // 60
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
 def wake_daemon() -> None:
     """Interrupt the daemon's cycle sleep so a change shows up in seconds."""
     cb = current_app.config.get("WAKE_DAEMON")
@@ -109,4 +137,22 @@ def health_snapshot() -> dict:
             "reason": reason,
         }
     except Exception as e:
-        return {"ok": False, "error": str(e), "reason": str(e)}
+        # Public endpoint: the exception type, never its text.
+        return {"ok": False, "error": type(e).__name__, "reason": type(e).__name__}
+
+
+# ---- feedback: toasts for htmx actions, flashes otherwise -----------
+
+def is_htmx() -> bool:
+    return request.headers.get("HX-Request") == "true"
+
+
+def notify_user(message: str, category: str = "success") -> None:
+    """Tell the operator how an action went. An htmx request gets a toast
+    (an HX-Trigger header, added by create_app, rendered by static/toast.js)
+    because its response is swapped into the page, not navigated to; a
+    classic form POST gets the usual flash on the page it redirects to."""
+    if is_htmx():
+        g.setdefault("toasts", []).append({"message": message, "level": category})
+    else:
+        flash(message, category)

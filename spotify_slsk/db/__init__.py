@@ -29,6 +29,7 @@ from .cycles import (
 from .history import (
     FAILURE_EVENTS,
     HISTORY_EVENTS,
+    add_history_listener,
     latest_failures,
     list_history,
     prune_history,
@@ -53,6 +54,12 @@ from .settings import (
     get_setting,
     list_settings,
     set_setting,
+)
+from .tasks import (
+    list_task_rows,
+    pop_queued_tasks,
+    queue_task,
+    record_task_run,
 )
 from .tracks import (
     MAX_ATTEMPTS_BEFORE_SUSPEND,
@@ -81,6 +88,10 @@ from .tracks import (
 )
 
 __all__ = [
+    "list_task_rows",
+    "pop_queued_tasks",
+    "queue_task",
+    "record_task_run",
     "forget_retired",
     "record_retired",
     "retired_times",
@@ -134,6 +145,7 @@ __all__ = [
     "load_blocklist",
     "is_blocklisted",
     "HISTORY_EVENTS",
+    "add_history_listener",
     "FAILURE_EVENTS",
     "record_history",
     "list_history",

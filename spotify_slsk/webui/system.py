@@ -2,19 +2,27 @@
 from __future__ import annotations
 
 import os
+import platform
+import time
 
 from flask import (
     Blueprint,
     abort,
+    current_app,
+    g,
     jsonify,
+    redirect,
     render_template,
     request,
     send_from_directory,
+    url_for,
 )
 from flask.typing import ResponseReturnValue
 
-from .. import runtime_state
-from .helpers import health_snapshot
+from .. import __version__, backup, config, db, healthchecks, runtime_state, tasks
+from ..library.health import SCAN_PENDING_KEY
+from . import auth
+from .helpers import health_snapshot, is_htmx, notify_user, wake_daemon
 
 bp = Blueprint("system", __name__)
 
@@ -80,5 +88,90 @@ def activity_json() -> ResponseReturnValue:
 
 @bp.route("/healthz")
 def healthz() -> ResponseReturnValue:
+    """`ok` (schema version + heartbeat) decides the status code, as
+    before; `checks` is informational and never fails the probe."""
     snapshot = health_snapshot()
+    # /healthz is public (Docker, monitors). The checks name paths, disk
+    # space and what is misconfigured, so with a login configured only a
+    # logged-in caller gets them.
+    if auth.credentials() is None or auth.current_user() is not None:
+        try:
+            snapshot["checks"] = healthchecks.collect(g.conn)
+        except Exception as e:  # a check must never break the probe
+            snapshot["checks"] = [
+                {"name": "checks", "status": "error", "message": type(e).__name__}
+            ]
     return jsonify(snapshot), 200 if snapshot["ok"] else 503
+
+
+# ---- status -------------------------------------------------------
+
+def _db_size(path: str) -> int:
+    """The DB plus its WAL and shared-memory files."""
+    total = 0
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            total += os.path.getsize(path + suffix)
+        except OSError:
+            pass
+    return total
+
+
+@bp.route("/system/status")
+def status_page() -> ResponseReturnValue:
+    db_path = current_app.config["DB_PATH"]
+    volumes = []
+    for label, path in (
+        ("Playlists", os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists")),
+        ("Downloads", config.DOWNLOAD_DIR),
+        ("Data", os.path.dirname(os.path.abspath(db_path))),
+    ):
+        usage = healthchecks.disk_usage(path)
+        volumes.append({"label": label, "path": path, "free": usage[0] if usage else None,
+                        "total": usage[1] if usage else None})
+    return render_template(
+        "system_status.html",
+        system_tab="status",
+        checks=healthchecks.collect(g.conn),
+        version=__version__,
+        python_version=platform.python_version(),
+        uptime=time.time() - runtime_state.STARTED_AT,
+        schema_version=g.conn.execute("PRAGMA user_version").fetchone()[0],
+        db_path=db_path,
+        db_size=_db_size(db_path),
+        volumes=volumes,
+        backups=backup.list_backups(g.conn),
+        backup_dir=backup.backup_dir(g.conn),
+        backup_queued=(db.list_task_rows(g.conn).get("db_backup") or {}).get("queued_at") is not None,
+    )
+
+
+# ---- scheduled tasks ----------------------------------------------
+
+@bp.route("/system/tasks")
+def tasks_page() -> ResponseReturnValue:
+    return render_template("system_tasks.html", tasks=tasks.describe(g.conn))
+
+
+@bp.route("/system/tasks/<name>/run", methods=["POST"])
+def task_run(name: str) -> ResponseReturnValue:
+    """Queue a run for the daemon (deduplicated: a second click while the
+    first is queued does nothing). The UI never runs a task itself."""
+    task = tasks.BY_NAME.get(name)
+    if task is None:
+        abort(404)
+    if name == "library_scan":
+        # The scan's own request flag, shared with the Library health button.
+        queued = db.get_setting(g.conn, SCAN_PENDING_KEY, "0") != "1"
+        db.set_setting(g.conn, SCAN_PENDING_KEY, "1")
+    else:
+        queued = db.queue_task(g.conn, name)
+    wake_daemon()
+    if queued:
+        notify_user(f"{task.label}: queued.")
+    else:
+        notify_user(f"{task.label} is already queued.")
+    to_status = request.form.get("next") == "status"
+    if is_htmx():  # the page swaps in its refreshed table and shows a toast
+        return status_page() if to_status else tasks_page()
+    return redirect(url_for("system.status_page" if to_status else "system.tasks_page"))

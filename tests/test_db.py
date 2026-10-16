@@ -501,7 +501,7 @@ class TestSchemaMigrations:
         raw.close()
 
         conn = db.create_connection(path)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8 == db.SCHEMA_VERSION
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
         cols = {r[1] for r in conn.execute('PRAGMA table_info("pl_v7")')}
         assert set(db.SPOTIFY_COLUMNS) <= cols
         assert "cover_url" in {r[1] for r in conn.execute("PRAGMA table_info(playlists_meta)")}

@@ -9,6 +9,7 @@
        what lets the CSP stay at script-src 'self'. -->
   <link rel="stylesheet" href="{{ url_for('static', filename='pico.classless.min.css') }}">
   <script src="{{ url_for('static', filename='htmx.min.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='toast.js') }}" defer></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
   <!-- Not deferred: applies the stored theme before first paint. -->
   <script src="{{ url_for('static', filename='theme.js') }}"></script>
@@ -32,6 +33,10 @@
              {% if active_page == 'wanted' %}aria-current="page"{% endif %}>Wanted</a>
         </li>
         <li>
+          <a href="{{ url_for('queue.queue_page') }}"
+             {% if active_page == 'queue' %}aria-current="page"{% endif %}>Queue</a>
+        </li>
+        <li>
           <a href="{{ url_for('wanted.history_page') }}"
              {% if active_page == 'history' %}aria-current="page"{% endif %}>History</a>
         </li>
@@ -52,9 +57,21 @@
              {% if active_page == 'logs' %}aria-current="page"{% endif %}>Logs</a>
         </li>
         <li>
+          <a href="{{ url_for('system.status_page') }}"
+             {% if active_page == 'system' %}aria-current="page"{% endif %}>System</a>
+        </li>
+        <li>
           <a href="{{ url_for('settings.settings') }}"
              {% if active_page == 'settings' %}aria-current="page"{% endif %}>Settings</a>
         </li>
+        {% if auth_user %}
+        <li>
+          <form method="POST" action="{{ url_for('auth.logout') }}" class="inline-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="secondary outline" title="Logged in as {{ auth_user }}">Log out</button>
+          </form>
+        </li>
+        {% endif %}
         <li>
           <button type="button" class="theme-toggle" id="theme-toggle"
                   title="Toggle dark mode" aria-label="Toggle dark mode">🌓</button>
@@ -81,6 +98,9 @@
     </div>
     {% endif %}
   {% endwith %}
+
+  <!-- Toasts for htmx actions (static/toast.js); classic POSTs use the flashes above. -->
+  <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
 
   <main id="main">
     {% block content %}{% endblock %}

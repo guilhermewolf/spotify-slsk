@@ -344,9 +344,6 @@ def retire_replaced_file(
     return dest
 
 
-RECYCLE_PURGED_KEY = "_recycle_bin_purged_at"
-
-
 def purge_recycle_bin(conn: sqlite3.Connection, days: int, now: float | None = None) -> int:
     """Delete recycle-bin files (<root>/.quarantine/<table>/replaced/**)
     retired more than `days` days ago; 0 days = keep forever.

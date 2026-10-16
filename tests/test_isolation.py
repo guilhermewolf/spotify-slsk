@@ -47,6 +47,11 @@ class TestEnvironmentIsolation:
         assert os.environ["NTFY_URL"] == ""
         assert os.environ["NTFY_TOPIC"] == ""
 
+    def test_webhook_subsonic_and_ui_login_are_off(self):
+        for key in ("WEBHOOK_URL", "SUBSONIC_URL", "SUBSONIC_PASSWORD",
+                    "UI_AUTH_USERNAME", "UI_AUTH_PASSWORD"):
+            assert os.environ[key] == "", key
+
 
 class TestOutboundBoundariesAreBlocked:
     """Reaching a real external system must fail loudly, not silently work."""
