@@ -1,0 +1,204 @@
+"""Library health scan: re-verify files already in the library (report-only).
+
+For every downloaded row of every enabled playlist, the file is checked
+against the DB row with the current strict rules - tags (score_track_match,
+version keywords), real duration vs Spotify's, ISRC - and lossless files get
+the spectrum check. Results go to `file_checks`; nothing is moved or
+deleted here (quarantine is a separate, operator-triggered action).
+
+The scan is chunked: `scan_step` does bounded work (files and seconds) per
+daemon cycle, stops on shutdown, and is resumable for free - a file whose
+check is current (same path, size, mtime and RULES_VERSION) is skipped, so
+the next step continues where the last one stopped.
+"""
+from __future__ import annotations
+
+import logging
+import os
+import sqlite3
+import time
+from collections.abc import Callable
+from typing import Any
+
+from .. import config
+from ..db import get_file_check, list_playlists, list_tracks, save_file_check
+from ..importer.audio_check import CHECKABLE_EXTS, REJECT_VERDICTS, SUSPECT, check_file
+from ..importer.tags import (
+    audio_length_seconds,
+    extract_metadata_from_file,
+    normalize_isrc,
+    read_isrc,
+)
+from ..matching.candidates import _duration_off, filename_match
+from ..matching.normalize import version_mismatch, version_tier
+from ..matching.tracks import score_track_match
+from ..utils import fmt_duration
+
+# Bump when the identity rules below change: every file is re-verified once.
+RULES_VERSION = 1
+
+# Problem codes, in display priority order.
+PROBLEMS = (
+    "missing_file",
+    "isrc_mismatch",
+    "version_mismatch",
+    "title_artist_mismatch",
+    "duration_off",
+    "fake_lossless",
+    "suspect_lossless",
+)
+PROBLEM_LABELS = {
+    "missing_file": "Missing file",
+    "isrc_mismatch": "Wrong song: ISRC mismatch",
+    "version_mismatch": "Wrong song: version mismatch",
+    "title_artist_mismatch": "Wrong song: title/artist mismatch",
+    "duration_off": "Duration off",
+    "fake_lossless": "Fake lossless",
+    "suspect_lossless": "Suspect lossless",
+}
+
+# Internal settings keys (underscore: never rendered on /settings).
+SCAN_PENDING_KEY = "_library_scan_pending"
+SCAN_COMPLETED_KEY = "_library_scan_completed_at"
+
+MAX_FILES_PER_STEP = 200
+MAX_SECONDS_PER_STEP = 120.0
+
+
+def _stat(path: str | None) -> tuple[int | None, float | None]:
+    try:
+        st = os.stat(path) if path else None
+    except OSError:
+        st = None
+    return (st.st_size, st.st_mtime) if st else (None, None)
+
+
+def is_current(check: dict[str, Any] | None, row: dict[str, Any]) -> bool:
+    """True when `check` already describes the row's file under the current rules."""
+    return bool(
+        check
+        and check["rules_version"] == RULES_VERSION
+        and check["path"] == row["path"]
+        and (check["size"], check["mtime"]) == _stat(row["path"])
+    )
+
+
+def verify_file(row: dict[str, Any], previous: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Check one downloaded row's file. Returns save_file_check kwargs.
+
+    `previous` lets an unchanged file reuse its spectrum verdict (the
+    expensive part) when only the identity rules need re-running.
+    """
+    path = row["path"]
+    size, mtime = _stat(path)
+    expected_isrc = normalize_isrc(row.get("isrc"))
+    evidence: dict[str, Any] = {
+        "expected_title": row["name"],
+        "expected_artist": row["artists"],
+        "expected_duration_s": round(row["duration_ms"] / 1000) if row.get("duration_ms") else None,
+        "expected_isrc": expected_isrc,
+        "reasons": {},
+    }
+    result: dict[str, Any] = {
+        "path": path, "size": size, "mtime": mtime, "rules_version": RULES_VERSION,
+        "evidence": evidence,
+    }
+    reasons: dict[str, str] = evidence["reasons"]
+    if size is None:
+        reasons["missing_file"] = f"no file at {path}" if path else "no path recorded"
+        result["problems"] = ["missing_file"]
+        return result
+
+    title, artist, _album = extract_metadata_from_file(path)
+    length = audio_length_seconds(path)
+    file_isrc = read_isrc(path)
+    evidence.update(
+        file_title=title, file_artist=artist, file_isrc=file_isrc,
+        file_duration_s=round(length) if length else None,
+    )
+
+    isrc_equal = bool(expected_isrc and file_isrc == expected_isrc)
+    if expected_isrc and file_isrc and not isrc_equal:
+        reasons["isrc_mismatch"] = f"file {file_isrc}, expected {expected_isrc}"
+    if title and artist:
+        if version_mismatch(row["name"], title, row["artists"]):
+            reasons["version_mismatch"] = f"tags say '{title}'"
+        elif not isrc_equal:
+            score, scored = score_track_match(title, artist, row["name"], row["artists"])
+            if score < config.MIN_MATCH_SCORE:
+                reasons["title_artist_mismatch"] = f"tags '{title}' by '{artist}' (score {score:.2f}, {scored})"
+    else:
+        name = os.path.join(os.path.basename(os.path.dirname(path)), os.path.basename(path))
+        _, why = filename_match(name, row["name"], row["artists"])
+        if why:
+            key = "version_mismatch" if why.startswith("version mismatch") else "title_artist_mismatch"
+            reasons[key] = f"no tags; filename: {why}"
+
+    if config.MAX_DURATION_DIFF_SECONDS > 0 and row.get("duration_ms") and length:
+        expected = row["duration_ms"] / 1000
+        longer_ok = version_tier(os.path.basename(path)) < version_tier(row["name"])
+        if _duration_off(length - expected, longer_ok=longer_ok):
+            reasons["duration_off"] = f"{fmt_duration(length)} vs {fmt_duration(expected)}"
+
+    if config.LOSSLESS_CHECK_ENABLED and os.path.splitext(path)[1].lower() in CHECKABLE_EXTS:
+        verdict: str
+        cutoff: int | None
+        drop: float | None
+        if (
+            previous
+            and previous["audio_check"]
+            and (previous["path"], previous["size"], previous["mtime"]) == (path, size, mtime)
+        ):
+            verdict = previous["audio_check"]
+            cutoff, drop = previous["audio_cutoff_hz"], previous["audio_drop_db"]
+        else:
+            audio = check_file(path)
+            verdict, cutoff, drop = audio.verdict, audio.cutoff_hz, audio.drop_db
+        result.update(audio_check=verdict, audio_cutoff_hz=cutoff, audio_drop_db=drop)
+        if cutoff is not None:
+            detail = f"{verdict}: steepest drop {drop:.0f} dB at {cutoff / 1000:.1f} kHz"
+        else:
+            detail = verdict
+        if verdict in REJECT_VERDICTS:
+            reasons["fake_lossless"] = detail
+        elif verdict == SUSPECT:
+            reasons["suspect_lossless"] = detail
+
+    result["problems"] = [p for p in PROBLEMS if p in reasons]
+    return result
+
+
+def scan_step(
+    conn: sqlite3.Connection,
+    *,
+    should_stop: Callable[[], bool] = lambda: False,
+    heartbeat: Callable[[], None] = lambda: None,
+    max_files: int = MAX_FILES_PER_STEP,
+    max_seconds: float = MAX_SECONDS_PER_STEP,
+) -> tuple[int, bool]:
+    """Check up to `max_files` stale files (or `max_seconds`). Returns
+    (files_checked, finished); finished means every file is current."""
+    started = time.monotonic()
+    checked = 0
+    for pl in list_playlists(conn, only_enabled=True):
+        table = pl["table_name"]
+        for row in list_tracks(conn, table):
+            if not row["downloaded"]:
+                continue
+            previous = get_file_check(conn, table, row["id"])
+            if is_current(previous, row):
+                continue
+            if (
+                should_stop()
+                or checked >= max_files
+                or time.monotonic() - started >= max_seconds
+            ):
+                return checked, False
+            heartbeat()
+            try:
+                save_file_check(conn, table, row["id"], **verify_file(row, previous))
+            except Exception:
+                logging.exception(f"[health] Could not check {row['path']}")
+                continue
+            checked += 1
+    return checked, True

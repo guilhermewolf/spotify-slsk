@@ -20,6 +20,7 @@ from . import config, runtime_state
 from .db import (
     clear_tried_entries,
     create_connection,
+    delete_setting,
     get_pending_tracks,
     get_playlist_meta,
     get_setting,
@@ -30,8 +31,10 @@ from .db import (
     prune_history,
     record_cycle,
     record_history,
+    set_setting,
 )
 from .importer.process import process_downloaded_file
+from .library import health
 from .library.acquire import handle_track_download, try_upgrade_track
 from .library.reconcile import startup_check
 from .log_config import setup_logging
@@ -275,6 +278,31 @@ def _process_manual_grabs(conn):
             logging.exception(f"Manual grab failed for {track.id} in {table_name}")
 
 
+def _run_library_scan(conn: sqlite3.Connection) -> None:
+    """One bounded step of the library health scan, when one is requested
+    (UI button) or due (LIBRARY_SCAN_INTERVAL_HOURS). Report-only."""
+    pending = get_setting(conn, health.SCAN_PENDING_KEY, "0") == "1"
+    try:
+        last = float(get_setting(conn, health.SCAN_COMPLETED_KEY, "0") or 0)
+    except ValueError:
+        last = 0.0
+    interval = config.LIBRARY_SCAN_INTERVAL_HOURS
+    due = interval > 0 and time.time() - last >= interval * 3600
+    if not (pending or due):
+        return
+    runtime_state.set_activity("scanning", detail="Library health scan")
+    checked, finished = health.scan_step(
+        conn, should_stop=_shutdown.is_set, heartbeat=_touch_heartbeat
+    )
+    logging.info(
+        f"[health] Checked {checked} file(s); "
+        f"{'scan complete' if finished else 'continuing next cycle'}"
+    )
+    if finished:
+        delete_setting(conn, health.SCAN_PENDING_KEY)
+        set_setting(conn, health.SCAN_COMPLETED_KEY, str(time.time()))
+
+
 def _run_startup_reconciliation(sp, conn):
     """Run the one-shot on-disk reconciliation once per daemon start."""
     for pl in list_playlists(conn, only_enabled=True):
@@ -397,6 +425,8 @@ def main() -> None:
                     if counters:
                         for k in cycle_totals:
                             cycle_totals[k] += counters.get(k, 0)
+                if not _shutdown.is_set():
+                    _run_library_scan(conn)
             except Exception:
                 logging.exception("Cycle failed; backing off and retrying")
                 if _shutdown.wait(config.CYCLE_ERROR_BACKOFF_SECONDS):
