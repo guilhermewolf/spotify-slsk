@@ -1,6 +1,6 @@
 # Minor version pinned; the patch level floats so base-image security fixes
 # land on rebuild. Must match requires-python in pyproject.toml and CI.
-FROM python:3.12-alpine
+FROM python:3.14-alpine
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
