@@ -38,6 +38,25 @@ ARTIST_SPLIT_RE = re.compile(
 )
 
 
+# Release-site watermarks glued onto titles and filenames: "Get Down
+# (Extended Mix)www.electronicfresh.com", "[www.site.com]", " - site.ru".
+# A domain needs "www." or a known TLD with no space before the dot, so
+# "Mr. Brightside", "U.N.I.T.Y.", "Vol. 2" and "5.5" are left alone.
+_DOMAIN = (
+    r"(?:https?://)?(?:www\.[\w-]+(?:\.[\w-]+)+"
+    r"|[\w-]+(?:\.[\w-]+)*\.(?:com|net|org|ru|info|io|biz)\b)"
+)
+WEB_NOISE_RE = re.compile(
+    rf"\s*[\[\(\{{]\s*{_DOMAIN}\s*[\]\)\}}]|(?:\s+[-–—])?\s*{_DOMAIN}",
+    re.IGNORECASE,
+)
+
+
+def strip_web_noise(text: str | None) -> str:
+    """Drop website watermarks from a title or filename stem."""
+    return WEB_NOISE_RE.sub("", text or "").strip()
+
+
 def fold(text: str | None) -> str:
     """Lowercase, strip accents, collapse every non-alphanumeric run to a
     space, and spell "rmx" as "remix"."""
@@ -54,10 +73,18 @@ def expected_title_tokens(title: str | None) -> set[str]:
     return core or {t for t in folded if not t.isdigit()} or set(folded)
 
 
+# Disambiguators that tag sites and Discogs append to an artist name:
+# "HILLS (US)", "Ajna [BE]", "Dominus (2)". Only 2-3 letters or a small
+# number, so real bracketed credits ("(feat. X)", "(VIP)") are untouched.
+ARTIST_DISAMBIGUATOR_RE = re.compile(r"\s*[\(\[](?:[^\W\d_]{2,3}|\d{1,2})[\)\]]")
+
+
 def credited_names(artist_str: str | None) -> list[str]:
-    """The full credit plus each credited artist, folded, "The " dropped."""
+    """The full credit plus each credited artist, folded, "The " dropped
+    along with any "(US)"-style disambiguator."""
+    artist_str = ARTIST_DISAMBIGUATOR_RE.sub("", artist_str or "")
     names = []
-    for part in [artist_str or ""] + ARTIST_SPLIT_RE.split(artist_str or ""):
+    for part in [artist_str] + ARTIST_SPLIT_RE.split(artist_str):
         name = fold(part)
         if name.startswith("the "):
             name = name[4:]

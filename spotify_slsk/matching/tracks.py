@@ -21,9 +21,13 @@ from typing import Any
 
 from .normalize import (
     ARTIST_SPLIT_RE,
+    FEAT_RE,
+    NEUTRAL_TITLE_WORDS,
+    VERSION_KEYWORDS,
     credited_names,
     expected_title_tokens,
     fold,
+    strip_web_noise,
     version_keywords,
     version_mismatch,
 )
@@ -101,6 +105,27 @@ def _remix_equivalent(file_title: str, db_title: str) -> bool:
     return _titles_token_equivalent(f, d)
 
 
+# Words whose presence or absence never makes a different song.
+_FILLER_WORDS = (
+    NEUTRAL_TITLE_WORDS
+    # Single-word keywords only: "up" (from "sped up") is a real title word.
+    | {kw for kw in VERSION_KEYWORDS if " " not in kw}
+    | {"a", "an", "the", "of", "n"}
+)
+
+
+def _content_words(title: str) -> set:
+    """Title words that identify the song: feat. credits, neutral/version
+    words, fillers and years dropped; apostrophes and accents folded away
+    ("Don't" == "Dont", "Mañana" == "Manana"). Bracket words are kept, so a
+    remixer's name still counts."""
+    t = re.sub(r"['’`]", "", FEAT_RE.sub(" ", strip_web_noise(title)))
+    return {
+        w for w in fold(t).split()
+        if w not in _FILLER_WORDS and not re.fullmatch(r"(?:19|20)\d\d", w)
+    }
+
+
 def find_closest_match(
     conn: sqlite3.Connection, table_name: str, title: str, artist: str
 ) -> tuple[tuple[Any, ...] | None, float]:
@@ -127,11 +152,18 @@ def score_track_match(file_title: str, file_artist: str, db_title: str, db_artis
     match used to score 0.90 (0.88 for remixes), far above config.MIN_MATCH_SCORE,
     which accepted "Your Eyes" for "Eyes On Fire" by someone else.
     """
+    file_title = strip_web_noise(file_title)
     title_sim = _similar(file_title, db_title)
     if not _artists_overlap(file_artist, db_artist):
         return 0.0, f"no_artist_overlap fuzzy(title={title_sim:.2f})"
     if not _version_matches(file_title, db_title, db_artist):
         return 0.0, "version_mismatch"
+
+    # A word swapped for another ("Get Up" / "Get Down", remixer A / B) is a
+    # different song however similar the strings are.
+    file_words, db_words = _content_words(file_title), _content_words(db_title)
+    if file_words - db_words and db_words - file_words:
+        return 0.0, f"title_word_mismatch fuzzy(title={title_sim:.2f})"
 
     if _titles_token_equivalent(file_title, db_title):
         return 0.97, "title_tokens+artist_overlap"
@@ -139,6 +171,10 @@ def score_track_match(file_title: str, file_artist: str, db_title: str, db_artis
     if _remix_equivalent(file_title, db_title):
         return 0.95, "remix_equivalent+artist_overlap"
 
+    # Fuzzy similarity may only bridge spelling/punctuation, never a whole
+    # word present on one side alone.
+    if file_words != db_words:
+        return 0.0, f"title_word_mismatch fuzzy(title={title_sim:.2f})"
     score = min(1.0, title_sim * 0.85 + 0.15)
     return score, f"fuzzy(title={title_sim:.2f})+artist_overlap"
 

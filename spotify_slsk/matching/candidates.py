@@ -27,6 +27,7 @@ from .normalize import (
     credited_names,
     expected_title_tokens,
     fold,
+    strip_web_noise,
     version_keywords,
     version_mismatch,
     version_tier,
@@ -176,7 +177,7 @@ def filename_match(path: str, expected_title: str, expected_artist: str) -> tupl
     (All-Night Vigil)" folder matched "All Night".
     """
     base = remote_basename(path)
-    stem = os.path.splitext(base)[0]
+    stem = strip_web_noise(os.path.splitext(base)[0])
     folder_folded = fold(" ".join(re.split(r"[\\/]", path or "")[:-1]))
     artist_names = credited_names(expected_artist)
     title_tokens = expected_title_tokens(expected_title)

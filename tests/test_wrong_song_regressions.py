@@ -273,6 +273,13 @@ RIGHT_ARTIST_TAGS = [
     ("Song", "Artist1 vs. Artist2", "Song", "Artist2"),
     ("Song", "Artist1 with Artist2", "Song", "Artist2"),
     ("Song", "Format B", "Song", "Format:B"),
+    # Production library scan: tag-site disambiguators on the file's artist.
+    ("Talk To Me (Extended Mix)", "HILLS (US)", "Talk To Me", "HILLS"),
+    ("Some Title", "Ajna (BE), Samm (BE)", "Some Title", "Ajna, Samm"),
+    ("Warlord [Soul Mass Transit System Remix]", "Dominus (UK)",
+     "Warlord - Soul Mass Transit System Remix",
+     "Daffy, Dominus, Riko Dan, Soul Mass Transit System"),
+    ("Song", "Dominus [2]", "Song", "Dominus"),
 ]
 
 
@@ -292,3 +299,83 @@ class TestArtistSplitting:
         assert _split_artists("AC/DC") == {"ac dc"}
         assert _split_artists("Lil Nas X") == {"lil nas x"}
         assert _split_artists("Daft Punk") == {"daft punk"}
+
+    def test_disambiguator_is_not_a_free_overlap(self):
+        # Stripping "(US)" must not let two different artists overlap.
+        score, _ = score_track_match("Talk To Me", "Other (US)", "Talk To Me", "HILLS")
+        assert score == 0.0
+
+    def test_filename_with_disambiguated_artist(self):
+        assert filename_match("HILLS (US) - Talk To Me.flac", "Talk To Me", "HILLS")[1] is None
+
+
+# Production library scan: release-site watermarks diluted the title.
+class TestWebsiteNoise:
+    @pytest.mark.parametrize("raw,clean", [
+        ("Get Down (Extended Mix)www.electronicfresh.com", "Get Down (Extended Mix)"),
+        ("Get Down [www.electronicfresh.com]", "Get Down"),
+        ("Get Down - www.electronicfresh.com", "Get Down"),
+        ("Get Down - electronicfresh.com", "Get Down"),
+        ("Get Down (https://site.net)", "Get Down"),
+        ("Get Down www.site.co.uk", "Get Down"),
+    ])
+    def test_stripped(self, raw, clean):
+        from spotify_slsk.matching.normalize import strip_web_noise
+        assert strip_web_noise(raw) == clean
+
+    @pytest.mark.parametrize("title", [
+        "Mr. Brightside", "U.N.I.T.Y.", "Ego Death Vol. 2", "5.5", "Pt. 2",
+        "Feat. Someone", "St. Elsewhere", "Dr. Feelgood",
+    ])
+    def test_titles_with_dots_untouched(self, title):
+        from spotify_slsk.matching.normalize import strip_web_noise
+        assert strip_web_noise(title) == title
+
+    def test_tags_match_after_stripping(self):
+        score, reason = score_track_match(
+            "Get Down (Extended Mix)www.electronicfresh.com", "Owen Andrews, Luke Andrews",
+            "Get Down", "Owen Andrews, Luke Andrews",
+        )
+        assert score >= MIN_MATCH, reason
+
+    @pytest.mark.parametrize("path", [
+        "Owen Andrews - Get Down (Extended Mix)www.electronicfresh.com.mp3",
+        "Owen Andrews - Get Down - www.electronicfresh.com.mp3",
+    ])
+    def test_filename_coverage_not_diluted(self, path):
+        assert filename_match(path, "Get Down", "Owen Andrews") == (1.0, None)
+
+
+
+# A whole content word swapped or added is a different song; the fuzzy
+# fallback used to floor at 0.15 + 0.85*sim, so "Get Up" passed for "Get Down".
+class TestContentWordGate:
+    @pytest.mark.parametrize("ft,dt", [
+        ("Get Up", "Get Down"),
+        ("Get Up www.electronicfresh.com", "Get Down"),
+        ("Get Up Now Baby", "Get Down Now Baby"),
+        ("Song (Alpha Remix)", "Song - Bravo Remix"),
+        ("Pt. 3", "Pt. 2"),
+        # Regional spelling: rejected on purpose. Spotify and the tag usually
+        # come from the same release, so a differing word is far likelier a
+        # different song than "Colour"/"Color"; a miss only costs a retry.
+        ("Colour", "Color"),
+    ])
+    def test_rejected(self, ft, dt):
+        score, reason = score_track_match(ft, "Artist", dt, "Artist")
+        assert score < MIN_MATCH, reason
+
+    @pytest.mark.parametrize("ft,dt", [
+        ("Don't Stop", "Dont Stop"),
+        ("Rock 'n' Roll", "Rock n Roll"),
+        ("Mañana", "Manana"),
+        ("Don’t Stop (feat. Someone)", "Don't Stop"),
+        ("Here Comes The Sun - Remastered 2019", "Here Comes The Sun"),
+    ])
+    def test_spelling_variants_pass(self, ft, dt):
+        score, reason = score_track_match(ft, "Artist", dt, "Artist")
+        assert score >= MIN_MATCH, reason
+
+    def test_candidate_side_rejects_swapped_word(self):
+        assert filename_match("Artist - Get Up.flac", "Get Down", "Artist")[1] is not None
+        assert filename_match("Get Up - Artist.flac", "Get Down", "Artist")[1] is not None
