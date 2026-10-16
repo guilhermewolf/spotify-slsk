@@ -49,8 +49,16 @@ dashboard for adding playlists, watching progress and retrying what failed.
   why each search result was rejected, interactive search with manual grab, a
   Wanted page with bulk re-search, manual retry, and editable settings that
   apply without a restart.
-- **Health** — `/healthz` plus a Docker `HEALTHCHECK` fed by a heartbeat file.
-- **ntfy notifications** — optional; silently skipped when unconfigured.
+- **Operations** — see [Operations](#operations): a System page with health
+  checks (slskd, Spotify, folders, disk space, heartbeat, DB integrity...),
+  scheduled tasks with "Run now", daily verified database backups and
+  housekeeping; a live Queue page with cancel / cancel + blocklist.
+- **Health** — `/healthz` (with the health checks under `checks`) plus a
+  Docker `HEALTHCHECK` fed by a heartbeat file.
+- **Notifications** — ntfy, a generic JSON webhook and a Subsonic / Navidrome
+  library rescan, with per-provider event choices; all optional.
+- **Optional login** — set `UI_AUTH_USERNAME` / `UI_AUTH_PASSWORD` to require
+  one for every page except `/healthz`.
 
 ## Requirements
 
@@ -83,7 +91,8 @@ Set these in `.env`. Everything has a working default except the credentials.
 | `SLSKD_DOWNLOADS_DIR` | Where slskd writes downloads (default `/downloads`) |
 | `SLSKD_PLAYLISTS_DIR` | Where tagged files are filed (default `/playlists`) |
 | `SPOTIFY_PLAYLIST_URLS` | Comma-separated playlist URLs; **first boot only** |
-| `NTFY_URL` / `NTFY_TOPIC` | Optional push notifications |
+| `NTFY_URL` / `NTFY_TOPIC` | Optional ntfy notifications (also editable on Settings) |
+| `UI_AUTH_USERNAME` / `UI_AUTH_PASSWORD` | Optional dashboard login (also settable on Settings) |
 | `CYCLE_INTERVAL_SECONDS` | Seconds between sync cycles (default 300) |
 | `UI_ENABLED` / `UI_BIND_ADDR` / `UI_PORT` | Dashboard toggle and bind (default `1`, `0.0.0.0`, `8000`) |
 | `UI_SECRET_KEY` | Flask secret. Generated and stored in the DB if unset |
@@ -100,7 +109,9 @@ overrides the environment variable and changes apply on the next cycle:
 `LOSSLESS_CHECK_ENABLED`, `LOSSLESS_FAKE_CUTOFF_HZ`, `LOSSLESS_MIN_DROP_DB`,
 `LIBRARY_SCAN_INTERVAL_HOURS`, `REQUIRED_TERMS`, `IGNORED_TERMS`,
 `EMBED_COVER_ART`, `FILE_NAME_TEMPLATE`, `LINK_MODE`, `WRITE_M3U`,
-`WRITE_PLAYLIST_COVER`, `RECYCLE_BIN_RETENTION_DAYS` (see [Library](#library)).
+`WRITE_PLAYLIST_COVER`, `RECYCLE_BIN_RETENTION_DAYS` (see [Library](#library)),
+the notification settings, `UI_AUTH_USERNAME` / `UI_AUTH_PASSWORD`,
+`MIN_FREE_SPACE_GB` and `BACKUP_RETENTION` (see [Operations](#operations)).
 The quality profile has its own section on the same page.
 
 `SLSKD_PREFERRED_FORMATS` is **deprecated**: on the first boot of this version
@@ -303,12 +314,99 @@ spotify-slsk side: the transfer states it reads (`Completed, Succeeded`,
 `Queued, Remotely`, ...) are the same, and they are pinned by
 `tests/test_slskd_contract.py`.
 
+## Operations
+
+**System → Status** lists health checks (each `ok`, `warn` or `error`), the
+version, uptime, schema version, database size, free disk space and the
+backups. The same checks are in `/healthz` under `checks`; `/healthz`'s status
+code still depends only on the schema version and the daemon heartbeat, so
+Docker's `HEALTHCHECK` and any monitor keyed on it behave as before.
+
+| Check | Warns / fails when |
+|---|---|
+| `slskd` | slskd unreachable, not connected or not logged in (checked by the daemon every 5 min) |
+| `spotify` | no credentials, or Spotify rejects them |
+| `downloads_dir`, `playlists_dir` | missing or not writable by the container user |
+| `disk_space` | less than `MIN_FREE_SPACE_GB` (default 5) free on the playlists volume |
+| `heartbeat` | the daemon loop has not touched its heartbeat in `HEARTBEAT_STALE_SECONDS` |
+| `last_cycle` | no cycle completed for 48 h |
+| `flac_binary` | `flac` missing while the lossless check is on |
+| `db_integrity` | the daily `PRAGMA quick_check` found a problem |
+| `ui_auth` | the UI listens beyond loopback with no login (inside Docker it always listens on `0.0.0.0`: fine if the port is published on `127.0.0.1` only) |
+
+**System → Tasks** shows each periodic task — Spotify sync, library scan,
+quality backfill, recycle-bin purge, database backup, housekeeping, integrity
+check, health checks — with its interval, last run, duration, result and next
+run. **Run now** queues a task for the daemon, which picks it up at the start of
+the next cycle or between two playlists; clicking again while it is queued does
+nothing.
+
+**Queue** shows slskd's current downloads (progress, speed, ETA) with the
+track each one is for, plus requests waiting for the daemon (manual grabs,
+quarantines, renames, upgrade checks). **Cancel** stops a transfer; the track
+counts it as a failed attempt for that file. **Cancel + blocklist** also adds
+the file to the blocklist so no track downloads it again.
+
+**Housekeeping** runs daily: trims history, compacts the database when much of
+it is free space, and removes expired artwork cache entries and interrupted
+temp files of its own. Partial downloads older than 7 days in slskd's
+`incomplete/` folder are reported in the task result, never deleted.
+
+The library health scan now also advances a little (50 files) after every
+playlist, so a long download cycle no longer holds it up for hours.
+
+### Notifications
+
+Configure on **Settings → Notifications**; each provider has a test button.
+
+| Event | When |
+|---|---|
+| `grabbed`, `imported`, `upgraded` | a file was downloaded, imported, or replaced by a better one |
+| `download_failed`, `import_rejected` | a transfer failed; a file was rejected after download (fake lossless included) |
+| `quarantined` | a library file was quarantined from Library health |
+| `playlist_synced` | a sync found new tracks in a playlist |
+| `cycle_summary` | a cycle added, downloaded or failed something |
+| `health_issue`, `health_restored` | a health check changed status (only on change, also across restarts) |
+
+Per-track events are batched: one message per event and playlist per cycle
+("Imported: 12 track(s) in Chill"), listing up to 25 tracks.
+
+- **ntfy**: `NTFY_URL` (e.g. `https://ntfy.sh`) and `NTFY_TOPIC`.
+  `NTFY_EVENTS` defaults to `playlist_synced,cycle_summary,health_issue,health_restored`.
+- **Webhook**: `WEBHOOK_URL` receives `POST` JSON `{"event": ..., "ts": "<ISO 8601>", "data": {...}}`
+  for each event in `WEBHOOK_EVENTS` (default: all). For a secret, set
+  `WEBHOOK_HEADER_NAME` (e.g. `Authorization`) and `WEBHOOK_HEADER_VALUE`
+  (e.g. `Bearer …`). Requests time out after 10 s and do not follow redirects.
+- **Navidrome / Subsonic**: `SUBSONIC_URL` (e.g. `http://navidrome:4533`),
+  `SUBSONIC_USERNAME`, `SUBSONIC_PASSWORD`. After a cycle that imported or
+  upgraded something, the server is asked once to rescan its library
+  (`/rest/startScan`, salted-token auth, so the password is never sent). In
+  Navidrome the user must be an admin.
+
+A provider that fails is paused (1 minute, doubling up to an hour) and its
+events are dropped meanwhile. `WEBHOOK_HEADER_VALUE` and `SUBSONIC_PASSWORD`
+are never shown again after saving (leave the field blank to keep them, tick
+"Clear" to remove) and never written to the logs; neither is any notification
+URL, since those often carry tokens.
+
+The old per-playlist "Finished processing" and startup ntfy messages are gone;
+`cycle_summary` replaces the former and is only sent when something happened.
+
 ## Security
 
-**The dashboard has no authentication.** Compose binds it to `127.0.0.1` for
-that reason. If you expose it beyond loopback, put a reverse proxy with
-authentication in front of it, and set `UI_COOKIE_SECURE=1` if that proxy
-terminates TLS.
+**The dashboard has no authentication by default.** Compose binds it to
+`127.0.0.1` for that reason. To expose it beyond loopback, either turn on the
+built-in login or put a reverse proxy with authentication in front of it, and
+set `UI_COOKIE_SECURE=1` if a proxy terminates TLS.
+
+**Built-in login**: set `UI_AUTH_USERNAME` and `UI_AUTH_PASSWORD` in `.env`, or
+on **Settings → System**. Every page then requires a login except `/healthz`
+(so Docker and monitors keep working). The password is stored only as a salted
+hash (a password saved on Settings replaces the one from `.env`), five failed
+logins from one address lock it out for 15 minutes, and changing the password
+logs every other session out. Locked out? Stop the container and run
+`sqlite3 data/playlist_tracks.db "DELETE FROM settings WHERE key IN ('UI_AUTH_USERNAME','_ui_auth_password_hash')"`,
+then remove the variables from `.env`.
 
 State-changing actions are CSRF-protected, static assets are self-hosted (no
 CDN), and security headers including a CSP are sent on every response. The
@@ -342,9 +440,28 @@ the less obvious design decisions.
 
 ## Backups
 
-SQLite runs in WAL mode, so `data/playlist_tracks.db` is always accompanied by
-`-wal` and `-shm` files. Copy all three, or run
-`PRAGMA wal_checkpoint(TRUNCATE);` before backing up the single file.
+The database is backed up daily to
+`data/backups/playlist_tracks-YYYYMMDD-HHMMSS.db` using SQLite's online backup
+API (safe while everything is running), and each backup is integrity-checked
+before it is kept. `BACKUP_RETENTION` (default 7) is how many are kept; `0`
+turns the daily backup off. **Backup now** on System → Status takes one
+immediately. Backups are single self-contained files; only files named like
+the above are ever deleted. They cover the database (playlists, track states,
+settings, history), not your music: back up the playlists folder separately.
+
+**Restore**:
+
+```bash
+docker compose stop spotify-slsk
+cp data/playlist_tracks.db data/playlist_tracks.db.before-restore   # just in case
+cp data/backups/playlist_tracks-20260101-030000.db data/playlist_tracks.db
+rm -f data/playlist_tracks.db-wal data/playlist_tracks.db-shm
+docker compose start spotify-slsk
+```
+
+Delete the `-wal` and `-shm` files when restoring: they belong to the database
+you replaced. To copy the live database by hand instead, copy all three files,
+or run `PRAGMA wal_checkpoint(TRUNCATE);` first.
 
 ## Releases
 

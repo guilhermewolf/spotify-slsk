@@ -10,8 +10,9 @@ services:
       - ./downloads:/downloads
       - ./playlists:/playlists
     ports:
-      # Web UI has no authentication: keep it on loopback, or put an
-      # authenticating reverse proxy in front.
+      # The web UI has no login unless UI_AUTH_USERNAME / UI_AUTH_PASSWORD
+      # are set: keep it on loopback, set those, or put an authenticating
+      # reverse proxy in front.
       - "127.0.0.1:8000:8000"
     depends_on:
       slskd:
