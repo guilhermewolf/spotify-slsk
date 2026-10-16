@@ -22,15 +22,15 @@ dashboard for adding playlists, watching progress and retrying what failed.
   by more than `SLSKD_MAX_DURATION_DIFF_SECONDS` are skipped, and an untagged
   download is accepted only if its filename and real duration both match.
 - **Validation** — see [Validation](#validation): fake-lossless detection
-  (FLAC/WAV that is really a lossy transcode is rejected and its peer file
-  blocklisted), ISRC checks against Spotify, implausibly small FLACs skipped
+  (FLAC/WAV that is really a lossy transcode is rejected and
+  re-searched), ISRC checks against Spotify, implausibly small FLACs skipped
   before download, and a library health scan with quarantine & re-download.
 - **Retry and back-off** — a track that fails twice is suspended for two days
   rather than retried forever; rejected filenames are remembered so the same bad
   file isn't downloaded again.
 - **Blocklist** — peer files that slskd reports as failed/rejected, or that
-  turn out broken after download (no tags, unreadable, truncated, fake
-  lossless), are skipped
+  turn out broken after download (no tags, unreadable, truncated, padded
+  16-bit), are skipped
   for every track; whole users can be banned from the UI. A file that is merely
   the wrong song for one track is only skipped for that track.
 - **History** — every grab, import, failure, upgrade and retry is kept for
@@ -100,9 +100,9 @@ top of the spectrum with a steep lowpass (128 kbps MP3 ~16 kHz, 192 ~19 kHz,
 
 | Verdict | Rule | Effect |
 |---|---|---|
-| `fake` | drop ≥ `LOSSLESS_MIN_DROP_DB` (15 dB) below `LOSSLESS_FAKE_CUTOFF_HZ` (19500 Hz) | rejected, deleted, peer file blocklisted |
-| `upsampled` | > 48 kHz file with a ≥ 20 dB drop at ≤ 26 kHz | rejected (a CD master resampled to "hi-res") |
-| `padded_16` | 24-bit file whose low 8 bits are always zero | rejected |
+| `fake` | drop ≥ `LOSSLESS_MIN_DROP_DB` (15 dB) below `LOSSLESS_FAKE_CUTOFF_HZ` (19500 Hz), in every sampled window, cutoffs within 1 kHz (otherwise `suspect`) | rejected and deleted; skipped for this track only |
+| `upsampled` | > 48 kHz file with a ≥ 20 dB drop at ≤ 26 kHz | rejected (a CD master resampled to "hi-res"); this track only |
+| `padded_16` | 24-bit file whose low 8 bits are always zero | rejected, peer file blocklisted |
 | `suspect` | the drop sits between the cutoff and 20.5 kHz | **kept**, flagged, and retried by the upgrade pass for a lossless copy |
 | `ok` / `unknown` | no cliff / could not decode | kept (`unknown` never rejects) |
 

@@ -91,6 +91,22 @@ class TestAnalyse:
         assert result.verdict == ac.UNKNOWN
         assert not result.rejected
 
+    def test_inconsistent_cutoff_across_windows_is_only_suspect(self):
+        # Two thirds cut at 16 kHz, one third full band: one passage of a real
+        # master can look like that. Never rejected.
+        x = _noise(44100, 30)
+        third = len(x) // 3
+        cut = _lowpass(x[: 2 * third], 44100, 16000)
+        mixed = np.concatenate([cut, x[2 * third:]])
+        assert not _verdict(mixed).rejected
+        # Cut everywhere but at different frequencies (> 1 kHz apart): suspect.
+        drift = np.concatenate([
+            _lowpass(x[:third], 44100, 14000),
+            _lowpass(x[third:2 * third], 44100, 16000),
+            _lowpass(x[2 * third:], 44100, 16000),
+        ])
+        assert _verdict(drift).verdict == ac.SUSPECT
+
     def test_thresholds_come_from_config(self, monkeypatch):
         fake_at_16k = _lowpass(_noise(44100), 44100, 16000)
         monkeypatch.setattr(config, "LOSSLESS_FAKE_CUTOFF_HZ", 15000)
@@ -170,6 +186,17 @@ class TestDecodeFlac:
         path = tmp_path / "padded.flac"
         _write_flac(path, _to_int(_noise(44100), 16) << 8, 44100, 24)
         assert ac.check_file(str(path)).verdict == ac.PADDED_16
+
+    def test_unknown_length_is_unknown_without_running_flac(self, tmp_path, monkeypatch):
+        import mutagen.flac
+
+        path = tmp_path / "real.flac"
+        _write_flac(path, _to_int(_noise(44100, 5), 16), 44100, 16)
+        info = type("I", (), {"sample_rate": 44100, "bits_per_sample": 16,
+                              "channels": 2, "total_samples": 0})()
+        monkeypatch.setattr(mutagen.flac, "FLAC", lambda p: type("F", (), {"info": info})())
+        monkeypatch.setattr(ac.subprocess, "run", lambda *a, **k: pytest.fail("ran flac"))
+        assert ac.check_file(str(path)).verdict == ac.UNKNOWN
 
     def test_missing_binary_is_unknown(self, tmp_path, monkeypatch):
         path = tmp_path / "real.flac"

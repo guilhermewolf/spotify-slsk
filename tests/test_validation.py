@@ -67,19 +67,22 @@ class TestLosslessCheckOnImport:
 
         assert (ok, final) == (False, None)
         assert not f.exists()
-        assert db.is_blocklisted(conn, "peer", SOURCE["filename"])
+        # Thin margins: a false positive must not ban the file for every track.
+        assert not db.is_blocklisted(conn, "peer", SOURCE["filename"])
         assert "Mat Joe - Heart To Find.flac" in db.get_tried_files(conn, "pl_x", "t1")
         rejected = db.list_history(conn, event="import_rejected")[0]
         assert rejected["data"]["reason"] == "fake lossless (cutoff 16.2 kHz, drop 21 dB)"
         assert db.get_track(conn, "pl_x", "t1")["downloaded"] is False
 
-    @pytest.mark.parametrize("verdict", [ac.UPSAMPLED, ac.PADDED_16])
-    def test_other_reject_verdicts(self, conn, tagged, monkeypatch, sandbox_dirs, verdict):
+    @pytest.mark.parametrize("verdict,banned", [(ac.UPSAMPLED, False), (ac.PADDED_16, True)])
+    def test_other_reject_verdicts(self, conn, tagged, monkeypatch, sandbox_dirs, verdict, banned):
         downloads, _ = sandbox_dirs
         _stub_check(monkeypatch, ac.AudioCheck(verdict, 22000, 40.0))
         f = _download(downloads)
         ok, _ = importer_process.process_downloaded_file(str(f), "pl_x", conn, track_id="t1", source=SOURCE)
         assert ok is False and not f.exists()
+        # Only the exact padded-16 verdict bans the peer file globally.
+        assert db.is_blocklisted(conn, "peer", SOURCE["filename"]) is banned
 
     def test_suspect_is_kept_recorded_and_made_due_for_upgrade(self, conn, tagged, monkeypatch, sandbox_dirs):
         downloads, _ = sandbox_dirs

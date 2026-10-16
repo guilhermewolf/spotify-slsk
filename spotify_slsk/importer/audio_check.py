@@ -14,7 +14,9 @@ mean level 0.2-1 kHz above f.
 
 Verdicts (thresholds in ``config``; the measured margins are thin, ~3-5 dB):
 
-* ``fake``      drop >= LOSSLESS_MIN_DROP_DB below LOSSLESS_FAKE_CUTOFF_HZ
+* ``fake``      drop >= LOSSLESS_MIN_DROP_DB below LOSSLESS_FAKE_CUTOFF_HZ,
+                consistently: each third of the sampled audio says so on its
+                own, cutoffs within 1 kHz - otherwise only ``suspect``
 * ``upsampled`` sample rate > 48 kHz and a >= 20 dB drop at <= 26 kHz
                 (a CD master resampled to "hi-res")
 * ``padded_16`` a 24-bit file whose low 8 bits are always zero
@@ -45,6 +47,10 @@ FAKE, UPSAMPLED, PADDED_16, SUSPECT, OK, UNKNOWN = (
 )
 # The verdicts that reject a download (and flag a library file).
 REJECT_VERDICTS = frozenset({FAKE, UPSAMPLED, PADDED_16})
+# The ones certain enough to blocklist the peer file for *every* track: a
+# zero low byte is exact. fake/upsampled rest on thin dB margins, so a false
+# positive must cost one track a re-search, not ban a good file globally.
+BLOCKLIST_VERDICTS = frozenset({PADDED_16})
 # Formats this module can decode: FLAC via the `flac` CLI, WAV via stdlib.
 CHECKABLE_EXTS = (".flac", ".wav")
 
@@ -59,6 +65,7 @@ BAND_NEAR_HZ, BAND_FAR_HZ = 200.0, 1000.0
 SUSPECT_MAX_HZ = 20500.0
 UPSAMPLED_MAX_HZ = 26000.0
 UPSAMPLED_MIN_DROP_DB = 20.0
+FAKE_CUTOFF_SPREAD_HZ = 1000.0
 DECODE_TIMEOUT_SECONDS = 60
 
 
@@ -149,7 +156,14 @@ def classify(
 
 
 def analyse(samples: np.ndarray, sample_rate: int, bit_depth: int) -> AudioCheck:
-    """Judge integer PCM `samples` shaped (n, channels)."""
+    """Judge integer PCM `samples` shaped (n, channels).
+
+    A FAKE verdict must also be *consistent*: the samples are split into
+    SEGMENTS parts (the decoded windows, for a long file) and every part
+    must classify FAKE on its own with cutoffs within FAKE_CUTOFF_SPREAD_HZ
+    of each other. The margins are thin (~3-5 dB), and a real master can
+    dip in one passage; disagreement downgrades to SUSPECT (never rejected).
+    """
     mono = samples.mean(axis=1) / float(1 << (bit_depth - 1))
     measured = steepest_drop(mono, sample_rate)
     if measured is None:
@@ -157,7 +171,31 @@ def analyse(samples: np.ndarray, sample_rate: int, bit_depth: int) -> AudioCheck
                           error="too little non-silent audio")
     cutoff, drop = measured
     verdict = classify(sample_rate, cutoff, drop, is_padded_16(samples, bit_depth))
+    if verdict == FAKE and not _consistently_fake(mono, sample_rate):
+        verdict = SUSPECT
     return AudioCheck(verdict, round(cutoff), round(drop, 1), sample_rate, bit_depth)
+
+
+def _consistently_fake(mono: np.ndarray, sample_rate: int) -> bool:
+    measured = [steepest_drop(part, sample_rate) for part in np.array_split(mono, SEGMENTS)]
+    parts = [m for m in measured if m is not None]
+    if len(parts) < len(measured):
+        return False  # a part too quiet to judge: not proven consistent
+    cutoffs = [c for c, _ in parts]
+    return (
+        all(classify(sample_rate, c, d) == FAKE for c, d in parts)
+        and max(cutoffs) - min(cutoffs) <= FAKE_CUTOFF_SPREAD_HZ
+    )
+
+
+def rules_key() -> str:
+    """Identifies the thresholds a stored verdict was made under: the health
+    scan re-checks a file when this changes. Bump the trailing version when
+    the classification logic itself changes."""
+    return (
+        f"{int(config.LOSSLESS_CHECK_ENABLED)}/{config.LOSSLESS_FAKE_CUTOFF_HZ}/"
+        f"{config.LOSSLESS_MIN_DROP_DB}/v2"
+    )
 
 
 def _windows(total: int, sample_rate: int) -> list[tuple[int, int]]:
@@ -187,6 +225,9 @@ def _decode_flac(path: str) -> tuple[np.ndarray, int, int]:
 
     info = FLAC(path).info
     sr, bits, ch = info.sample_rate, info.bits_per_sample, info.channels
+    if not info.total_samples or info.total_samples <= 0:
+        # Unknown length in STREAMINFO: --until=0 would decode nothing useful.
+        raise ValueError("FLAC reports no total sample count")
     flac_bin = shutil.which("flac")
     if not flac_bin:
         raise RuntimeError("flac binary not found")
@@ -206,6 +247,8 @@ def _decode_flac(path: str) -> tuple[np.ndarray, int, int]:
 def _decode_wav(path: str) -> tuple[np.ndarray, int, int]:
     with wave.open(path, "rb") as w:
         sr, ch, width = w.getframerate(), w.getnchannels(), w.getsampwidth()
+        if w.getnframes() <= 0:
+            raise ValueError("WAV has no frames")
         chunks = []
         for start, end in _windows(w.getnframes(), sr):
             w.setpos(start)

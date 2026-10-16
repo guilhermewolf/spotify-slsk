@@ -258,8 +258,11 @@ unnormalised.
    global `blocklist` (which survives retries and success): slskd reporting the
    transfer failed/errored/rejected/aborted (`candidate["peer_fault"]`), or a
    post-download rejection of the file itself — no usable tags, unreadable
-   audio, a real length far from what the peer advertised, or a lossless file
-   failing the spectrum check (fake/upsampled/padded_16). Our wait timeout,
+   audio, a real length far from what the peer advertised, or a 24-bit file
+   that is padded 16-bit audio (`padded_16`, an exact test). A `fake` or
+   `upsampled` spectrum verdict deletes the file and goes to `_tried` + history
+   only: those rest on ~3-5 dB margins, and a false positive must cost one track
+   a re-search, not ban a good file for every track. Our wait timeout,
    "Queued, Remotely" stalls, slskd not listing the transfer yet, a file not
    found afterwards, a wrong-track mismatch ("no match"/"low score"/filename or
    Spotify-duration miss/ISRC mismatch), shutdown and reconcile never blocklist: the same file
@@ -341,8 +344,10 @@ threaded through the download call chain. The real per-track cap is
 - **Validation (Tier 3).** `importer/audio_check.py` decodes 3 x 10 s windows
   (middle 80%) with the `flac` CLI (WAV via stdlib), Welch-averages Hann frames
   (4096, silent frames dropped), smooths to ~170 Hz and finds the steepest drop
-  above 11 kHz (mean 0.2-1 kHz below f minus 0.2-1 kHz above). fake / upsampled
-  / padded_16 reject; suspect (19.5-20.5 kHz, MP3-320 vs brickwalled masters)
+  above 11 kHz (mean 0.2-1 kHz below f minus 0.2-1 kHz above). `fake` also
+  needs consistency: each third of the sampled audio must classify fake on its
+  own with cutoffs within 1 kHz, else it is downgraded to suspect. fake /
+  upsampled / padded_16 reject (only padded_16 blocklists, see Blocklist policy); suspect (19.5-20.5 kHz, MP3-320 vs brickwalled masters)
   and unknown never do. Margins are ~3-5 dB, so thresholds are settings; AAC-256
   transcodes are undetectable. Before download, `evaluate_candidates` rejects a
   16-bit FLAC under 400 kbps and demotes (`note`, sorted last within its format)

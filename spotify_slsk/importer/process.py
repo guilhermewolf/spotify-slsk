@@ -27,7 +27,13 @@ from ..matching.normalize import version_mismatch
 from ..matching.tracks import find_closest_match, score_track_match
 from ..models import Candidate, Track
 from ..utils import fmt_duration
-from .audio_check import CHECKABLE_EXTS, SUSPECT, AudioCheck, check_file
+from .audio_check import (
+    BLOCKLIST_VERDICTS,
+    CHECKABLE_EXTS,
+    SUSPECT,
+    AudioCheck,
+    check_file,
+)
 from .tags import (
     audio_length_seconds,
     extract_metadata_from_file,
@@ -121,9 +127,10 @@ def process_downloaded_file(
     `source` is the slskd candidate the file came from. A rejection only
     blocklists that peer file when the fault is the file's own, whatever
     track it is for: no usable tags, unreadable audio, a real length
-    far from what the peer advertised (truncated/corrupt), or a lossless
-    file that fails the spectrum check (fake/upsampled/padded; see
-    importer.audio_check - "suspect" and "unknown" are accepted). A mismatch
+    far from what the peer advertised (truncated/corrupt), or a 24-bit file
+    that is padded 16-bit audio. A fake/upsampled verdict (see
+    importer.audio_check) rejects for this track only; "suspect" and
+    "unknown" are accepted. A mismatch
     against the *requested* track ("no match", "low score", a filename or
     Spotify-duration miss) is recorded in the track's _tried list and
     history only — the same file can be exactly right for another track,
@@ -213,13 +220,14 @@ def process_downloaded_file(
 
     audio = None if reconcile else _lossless_check(file_path)
     if audio is not None and audio.rejected:
-        # A property of the file itself, so the peer file is blocklisted for
-        # every track, like a truncated or untagged download.
+        # Deleted and tried for this track. Only an exact verdict (padded_16)
+        # blocklists the peer file globally: fake/upsampled rest on thin dB
+        # margins, and a false positive must not ban a good file everywhere.
         reason = audio.describe()
         logging.warning(f"❌ Rejecting {file_path}: {reason}")
         _reject_and_log(
             file_path, playlist_name, conn, track_id=track_id, reason=reason,
-            source=source, peer_fault=True,
+            source=source, peer_fault=audio.verdict in BLOCKLIST_VERDICTS,
         )
         return False, None
 
