@@ -72,8 +72,9 @@ def try_upgrade_track(
 ) -> bool:
     """Replace the file when slskd has something better:
 
-    * a *strictly better* version tier (Extended Mix > Original Mix > other),
-      in any allowed quality - the DJ preference wins, as in ranking;
+    * a *strictly better* version tier (Extended Mix > Original Mix > other)
+      at the same or a better profile quality - a version upgrade never
+      lowers quality (unknown quality of a lossless file: lossless only);
     * with quality upgrades on, a file below the profile cutoff may also be
       replaced by the same version tier in a *strictly better* quality
       (the lossless verdict counts: a suspect FLAC ranks as MP3 320);
@@ -131,8 +132,16 @@ def try_upgrade_track(
         album=track.album,
         max_version_tier=max_tier,
         duration_ms=track.duration_ms,
-        lossless_only=suspect,
+        # Never trade quality for a version: a better tier must be at the
+        # same or a better profile quality. Unknown quality of a lossless
+        # file -> lossless candidates only. A suspect file is compared by
+        # lossless_only alone (it counts as MP3 320).
+        lossless_only=suspect or (
+            quality is None
+            and os.path.splitext(current_basename)[1].lower() in config.LOSSLESS_EXTS
+        ),
         better_quality_than=quality if below_cutoff else None,
+        current_quality=None if suspect else quality,
     )
     if not new_file:
         logging.info(f"[upgrade] No better candidate for '{track.name}'")

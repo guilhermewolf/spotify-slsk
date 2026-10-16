@@ -410,7 +410,10 @@ threaded through the download call chain. The real per-track cap is
   likely-upsampled demotion > free upload slot > shorter queue (log2 bucket)
   > faster peer (log2 bucket of KiB/s) > size closest to the quality's
   `preferred_kbps`. **Upgrades** (`try_upgrade_track`, rate limit unchanged):
-  a strictly better version tier (any allowed quality), or — with
+  a strictly better version tier at the same or a better profile quality
+  (`current_quality`: a version upgrade **never lowers quality**, "lower
+  quality than the current file (X)"; unknown quality of a lossless-extension
+  file → lossless candidates only; unknown otherwise → as before), or — with
   `upgrades_allowed` and the effective quality below the cutoff — the same
   tier in a strictly better profile quality (`better_quality_than`); the
   suspect-lossless path is unchanged and independent of the toggle. The

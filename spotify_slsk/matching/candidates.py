@@ -222,6 +222,7 @@ def evaluate_candidates(
     is_blocked: IsBlocked | None = None,
     lossless_only: bool = False,
     better_quality_than: str | None = None,
+    current_quality: str | None = None,
 ) -> list[Candidate]:
     """
     Judge every file in slskd search results against the expected track.
@@ -240,7 +241,9 @@ def evaluate_candidates(
     lossy format (replacing a "suspect" lossless file). `better_quality_than`
     (a quality key; upgrade pass, file below the profile cutoff) also accepts
     a file of the *same* version tier as `max_version_tier` when its quality
-    ranks strictly better in the profile. Title/artist/version
+    ranks strictly better in the profile. `current_quality` (upgrade pass)
+    makes a better version tier acceptable only at the same or a better
+    profile quality: a version upgrade never lowers quality. Title/artist/version
     use the strict rules in `filename_match`.
     """
     evaluated = []
@@ -326,7 +329,7 @@ def evaluate_candidates(
             elif not config.QUALITY_PROFILE.allows(quality):
                 entry["reason"] = f"quality not allowed by profile: {entry['quality_label']}"
             elif lossless_only and ext not in config.LOSSLESS_EXTS:
-                entry["reason"] = "not lossless (replacing a suspect lossless file)"
+                entry["reason"] = "not lossless (replacing a lossless file)"
             # Reject MP3s whose reported/inferred bitrate is known-low.
             elif ext == ".mp3" and effective_bitrate is not None and effective_bitrate < 320:
                 entry["reason"] = f"bitrate {effective_bitrate} < 320"
@@ -365,6 +368,16 @@ def evaluate_candidates(
             entry["title_coverage"] = round(title_coverage, 2)
             if reason:
                 entry["reason"] = reason
+            elif (
+                max_version_tier is not None
+                and entry["version_tier"] < max_version_tier
+                and current_quality is not None
+                and config.QUALITY_PROFILE.rank(entry["quality"])
+                > config.QUALITY_PROFILE.rank(current_quality)
+            ):
+                entry["reason"] = (
+                    f"lower quality than the current file ({describe(current_quality)})"
+                )
             elif max_version_tier is not None and entry["version_tier"] >= max_version_tier:
                 if not (
                     better_quality_than is not None

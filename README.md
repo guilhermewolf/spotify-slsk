@@ -125,7 +125,7 @@ The single global **profile** (Settings → Quality profile) has:
   `UPGRADE_CHECK_INTERVAL_HOURS`) re-searches files below the cutoff and
   replaces one with the *same or a better version* in a *strictly better*
   quality. Better versions (Extended Mix > Original Mix > other) are always
-  upgraded regardless; a suspect lossless file is always retried for a
+  upgraded regardless of the toggle, but never to a lower quality; a suspect lossless file is always retried for a
   lossless copy.
 
 Replaced files (upgrades and manual grabs) are moved to
