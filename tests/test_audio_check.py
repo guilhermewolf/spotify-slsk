@@ -45,7 +45,9 @@ def _verdict(x, sr=44100, bits=16):
 
 class TestAnalyse:
     def test_full_band_noise_is_ok(self):
-        assert _verdict(_noise(44100)).verdict == ac.OK
+        result = _verdict(_noise(44100))
+        assert result.verdict == ac.OK
+        assert result.describe() == "lossless ok"
 
     def test_lossy_lowpass_at_16k_is_fake(self):
         result = _verdict(_lowpass(_noise(44100), 44100, 16000))

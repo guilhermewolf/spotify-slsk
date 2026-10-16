@@ -85,8 +85,8 @@ class AudioCheck:
             OK: "lossless ok",
             UNKNOWN: "lossless check inconclusive",
         }.get(self.verdict, self.verdict)
-        if self.verdict == PADDED_16:
-            return label
+        if self.verdict in (PADDED_16, OK):
+            return label  # an OK file's "steepest drop" is just noise
         if self.verdict == UNKNOWN:
             return f"{label} ({self.error})" if self.error else label
         if self.cutoff_hz is None or self.drop_db is None:
