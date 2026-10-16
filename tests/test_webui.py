@@ -412,6 +412,11 @@ class TestSettingsValidation:
         assert db.list_settings(conn).get("LOSSLESS_CHECK_ENABLED") == "0"
         conn.close()
 
+    def test_bad_term_regex_is_rejected(self, client):
+        r = post(client, "/settings", data={"IGNORED_TERMS": "karaoke, /(oops/"},
+                 follow_redirects=True)
+        assert b"IGNORED_TERMS: invalid regex /(oops/" in r.data
+
     def test_one_bad_field_does_not_half_apply_the_form(self, app_tmp, client):
         r = post(client, "/settings",
                  data={"MIN_MATCH_SCORE": "0.8", "SLSKD_WAIT_TIMEOUT": "nope"},

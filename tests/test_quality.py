@@ -409,3 +409,57 @@ class TestRanking:
         assert users.index("sparse_peer") < users.index("lossless_peer") < users.index("cbr_peer")
         assert [c["quality"] for c in ranked] == sorted(
             (c["quality"] for c in ranked), key=config.QUALITY_PROFILE.rank)
+
+
+class TestReleaseTerms:
+    def test_parse_plain_and_regex(self):
+        from spotify_slsk.config import parse_terms
+
+        terms, err = parse_terms(" Karaoke , /\\bremix{1,2}\\b/ ,, sped up")
+        assert err is None
+        assert [label for label, _ in terms] == ["Karaoke", "/\\bremix{1,2}\\b/", "sped up"]
+        assert terms[0][1].search("Song (KARAOKE Version)")
+        assert terms[1][1].search("song remix") and not terms[1][1].search("remixes")
+
+    def test_invalid_regex_is_an_error(self):
+        from spotify_slsk.config import parse_terms, validate_setting
+
+        assert parse_terms("/(unclosed/")[0] is None
+        value, err = validate_setting("terms", "karaoke, /(unclosed/")
+        assert value is None and "invalid regex /(unclosed/" in err
+
+    def test_validate_normalises(self):
+        from spotify_slsk.config import validate_setting
+
+        assert validate_setting("terms", " karaoke ,  /a,b/ ") == ("karaoke, /a,b/", None)
+
+    def _eval(self, monkeypatch, filename, required="", ignored=""):
+        from spotify_slsk import config
+        from spotify_slsk.matching.candidates import evaluate_candidates
+
+        monkeypatch.setattr(config, "QUALITY_PROFILE", q.profile_from_formats([".flac"]))
+        monkeypatch.setattr(config, "REQUIRED_TERMS", config.parse_terms(required)[0])
+        monkeypatch.setattr(config, "IGNORED_TERMS", config.parse_terms(ignored)[0])
+        files = [{"filename": filename, "size": 33_000_000, "length": 300, "bitDepth": 16}]
+        (c,) = evaluate_candidates([{"username": "u", "files": files}], "Lose Yourself", "Eminem")
+        return c
+
+    def test_no_terms_change_nothing(self, monkeypatch):
+        assert self._eval(monkeypatch, "Eminem - Lose Yourself.flac")["accepted"] is True
+
+    def test_ignored_term_on_the_full_peer_path(self, monkeypatch):
+        c = self._eval(monkeypatch, "Karaoke Hits\\Eminem - Lose Yourself.flac",
+                       ignored="nightcore, karaoke")
+        assert c["reason"] == "ignored term: karaoke"
+
+    def test_ignored_regex(self, monkeypatch):
+        c = self._eval(monkeypatch, "@@x\\Eminem - Lose Yourself [WEB].flac",
+                       ignored="/\\[web\\]/")
+        assert c["reason"] == "ignored term: /\\[web\\]/"
+
+    def test_required_terms(self, monkeypatch):
+        c = self._eval(monkeypatch, "Eminem - Lose Yourself.flac", required="vinyl, /\\bcd\\b/")
+        assert c["reason"] == "missing required term (one of: vinyl, /\\bcd\\b/)"
+        ok = self._eval(monkeypatch, "Eminem\\8 Mile (CD)\\Eminem - Lose Yourself.flac",
+                        required="vinyl, /\\bcd\\b/")
+        assert ok["accepted"] is True

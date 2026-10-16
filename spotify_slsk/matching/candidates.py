@@ -1,6 +1,7 @@
 """Search-phase matching: judge every file in an slskd search response.
 
-`evaluate_candidates` applies the quality gates (quality profile, 320 kbps
+`evaluate_candidates` applies the release terms (required/ignored, on the
+full peer path), the quality gates (quality profile, 320 kbps
 MP3 rule, effective-bitrate floor, duration, blocklist) and then the strict
 wrong-song rules in `filename_match`; `sort_candidates` orders the accepted
 ones (version tier > profile quality > availability > size).
@@ -312,6 +313,14 @@ def evaluate_candidates(
 
             if is_blocked is not None and is_blocked(user, filename):
                 entry["reason"] = "blocklisted"
+            # Release terms see the full peer path (folders included).
+            elif ignored := config.first_term(config.IGNORED_TERMS, filename):
+                entry["reason"] = f"ignored term: {ignored}"
+            elif config.REQUIRED_TERMS and not config.first_term(config.REQUIRED_TERMS, filename):
+                entry["reason"] = (
+                    "missing required term (one of: "
+                    f"{', '.join(label for label, _ in config.REQUIRED_TERMS)})"
+                )
             elif quality is None:
                 entry["reason"] = f"format not allowed: {ext or '(none)'}"
             elif not config.QUALITY_PROFILE.allows(quality):

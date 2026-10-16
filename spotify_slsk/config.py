@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sqlite3
 
 from .db import delete_setting, get_setting, list_settings, set_setting
@@ -33,6 +34,41 @@ from .matching.quality import (
 DEFAULT_FORMATS = "flac,mp3,aiff,wav"
 # Formats that claim to be lossless.
 LOSSLESS_EXTS = (".flac", ".wav", ".aiff")
+
+
+# A comma-separated term list; `/.../` is a regex and may contain commas.
+_TERM_RE = re.compile(r"\s*(/(?:\\.|[^\\/])+/|[^,]*)\s*(?:,|$)")
+Terms = list[tuple[str, re.Pattern[str]]]
+
+
+def parse_terms(value: str | None) -> tuple[Terms | None, str | None]:
+    """Release-profile terms (Lidarr's required/ignored): plain terms match
+    as case-insensitive substrings, `/regex/` as a case-insensitive search.
+    Returns ([(label, pattern)], error); exactly one is None."""
+    terms: Terms = []
+    text, pos = value or "", 0
+    while pos < len(text):
+        m = _TERM_RE.match(text, pos)
+        if m is None or m.end() == pos:
+            break
+        pos = m.end()
+        token = m.group(1).strip()
+        if not token:
+            continue
+        if len(token) > 2 and token.startswith("/") and token.endswith("/"):
+            try:
+                pattern = re.compile(token[1:-1], re.IGNORECASE)
+            except re.error as e:
+                return None, f"invalid regex {token}: {e}"
+        else:
+            pattern = re.compile(re.escape(token), re.IGNORECASE)
+        terms.append((token, pattern))
+    return terms, None
+
+
+def first_term(terms: Terms, text: str) -> str | None:
+    """Label of the first term found in `text`, or None."""
+    return next((label for label, pattern in terms if pattern.search(text)), None)
 
 
 def normalize_ext_list(env_val: str) -> list[str]:
@@ -90,6 +126,10 @@ MAX_DURATION_DIFF_SECONDS = int(os.getenv("SLSKD_MAX_DURATION_DIFF_SECONDS", "15
 LOSSLESS_CHECK_ENABLED = os.getenv("LOSSLESS_CHECK_ENABLED", "1") == "1"
 LOSSLESS_FAKE_CUTOFF_HZ = int(os.getenv("LOSSLESS_FAKE_CUTOFF_HZ", "19500"))
 LOSSLESS_MIN_DROP_DB = int(os.getenv("LOSSLESS_MIN_DROP_DB", "15"))
+# Release terms (matching.candidates), applied to the full peer path before
+# any scoring. Empty = no filtering.
+REQUIRED_TERMS: Terms = parse_terms(os.getenv("REQUIRED_TERMS", ""))[0] or []
+IGNORED_TERMS: Terms = parse_terms(os.getenv("IGNORED_TERMS", ""))[0] or []
 # Re-run the library health scan this often; 0 = only from the UI button.
 LIBRARY_SCAN_INTERVAL_HOURS = int(os.getenv("LIBRARY_SCAN_INTERVAL_HOURS", "0"))
 
@@ -106,7 +146,7 @@ def reload(conn: sqlite3.Connection) -> None:
     global EARLY_STOP_RESPONSES, EXTERNAL_PROCESS_WAIT_TIMEOUT
     global MAX_DURATION_DIFF_SECONDS
     global LOSSLESS_CHECK_ENABLED, LOSSLESS_FAKE_CUTOFF_HZ, LOSSLESS_MIN_DROP_DB
-    global LIBRARY_SCAN_INTERVAL_HOURS
+    global LIBRARY_SCAN_INTERVAL_HOURS, REQUIRED_TERMS, IGNORED_TERMS
     try:
         MIN_MATCH_SCORE = float(get_setting(conn, "MIN_MATCH_SCORE", "0.62"))
     except (TypeError, ValueError) as e:
@@ -116,6 +156,14 @@ def reload(conn: sqlite3.Connection) -> None:
     except (TypeError, ValueError) as e:
         logging.warning(f"Bad HISTORY_RETENTION_DAYS in DB; keeping previous: {e}")
 
+    for key in ("REQUIRED_TERMS", "IGNORED_TERMS"):
+        terms, error = parse_terms(get_setting(conn, key, ""))
+        if terms is None:
+            logging.warning(f"Bad {key} in DB; keeping previous: {error}")
+        elif key == "REQUIRED_TERMS":
+            REQUIRED_TERMS = terms
+        else:
+            IGNORED_TERMS = terms
     profile = load_quality_profile(conn)
     if profile is not None:
         QUALITY_PROFILE = profile
@@ -207,6 +255,8 @@ SETTINGS_SPEC = [
     ("LOSSLESS_CHECK_ENABLED", "1", "Spectrum-check downloaded FLAC/WAV files and reject lossy transcodes (1 = on, 0 = off)", "bool"),
     ("LOSSLESS_FAKE_CUTOFF_HZ", "19500", "A steep spectral drop below this frequency (Hz) marks a FLAC as a lossy transcode. 128-192 kbps MP3s cut at 16-19 kHz; MP3-320 at ~20 kHz is only flagged 'suspect'", "int1"),
     ("LOSSLESS_MIN_DROP_DB", "15", "How steep (dB over ~1 kHz) that drop must be. Lower catches more fakes but risks flagging dark-sounding real masters; measured margins are ~3-5 dB", "int1"),
+    ("REQUIRED_TERMS", "", "A file's full peer path must contain at least one of these (comma-separated, case-insensitive; /regex/ allowed). Empty = no requirement", "terms"),
+    ("IGNORED_TERMS", "", "Reject a file whose full peer path contains any of these, even when the title matches (comma-separated, case-insensitive; /regex/ allowed). Common: karaoke, instrumental, nightcore, sped up, 8d audio, /\\bcover\\b/. Plain terms match inside words ('live' matches 'Oliver'): use a /\\b...\\b/ regex for whole words", "terms"),
     ("LIBRARY_SCAN_INTERVAL_HOURS", "0", "Re-verify every library file (tags, duration, ISRC, lossless check) this often; report-only, a few hundred files per cycle. 0 = only when you press Scan library", "int0"),
 ]
 
@@ -239,5 +289,11 @@ def validate_setting(kind: str, value: str) -> tuple[str | None, str | None]:
         if lowered in ("0", "false", "no", "off"):
             return "0", None
         return None, "must be 1 (on) or 0 (off)"
+
+    if kind == "terms":
+        terms, error = parse_terms(value)
+        if terms is None:
+            return None, error
+        return ", ".join(label for label, _ in terms), None
 
     return value, None
