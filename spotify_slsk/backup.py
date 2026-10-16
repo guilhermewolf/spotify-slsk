@@ -20,6 +20,7 @@ import os
 import re
 import sqlite3
 import time
+from collections.abc import Callable
 from typing import Any
 
 from . import config
@@ -153,30 +154,52 @@ def stale_partials(now: float) -> int:
     return count
 
 
-def maybe_vacuum(conn: sqlite3.Connection) -> bool:
-    pages = conn.execute("PRAGMA page_count").fetchone()[0]
-    free = conn.execute("PRAGMA freelist_count").fetchone()[0]
-    if pages < VACUUM_MIN_PAGES or free < pages * VACUUM_FREE_RATIO:
-        return False
-    conn.execute("VACUUM")
-    return True
+def maybe_vacuum(
+    conn: sqlite3.Connection, heartbeat: Callable[[], None] = lambda: None
+) -> str:
+    """VACUUM when much of the file is free pages. Returns what happened.
+
+    VACUUM rewrites the whole file and needs an exclusive lock, so it can
+    take a while (heartbeat before and after) and can find the database
+    busy - the web UI reads it all the time. A failure is logged and left
+    for the next daily run; it never fails the task."""
+    try:
+        pages = conn.execute("PRAGMA page_count").fetchone()[0]
+        free = conn.execute("PRAGMA freelist_count").fetchone()[0]
+        if pages < VACUUM_MIN_PAGES or free < pages * VACUUM_FREE_RATIO:
+            return "no vacuum needed"
+        heartbeat()
+        conn.execute("VACUUM")
+    except sqlite3.Error as e:
+        logging.warning(f"[housekeeping] VACUUM skipped ({e}); retrying on the next run")
+        return f"vacuum skipped ({e}); retrying on the next run"
+    finally:
+        heartbeat()
+    return "vacuumed"
 
 
-def housekeeping(conn: sqlite3.Connection, now: float | None = None) -> str:
+def housekeeping(
+    conn: sqlite3.Connection,
+    now: float | None = None,
+    heartbeat: Callable[[], None] = lambda: None,
+) -> str:
     """Daily. Never touches library files."""
     now = now if now is not None else time.time()
     prune_history(conn, config.HISTORY_RETENTION_DAYS)
-    vacuumed = maybe_vacuum(conn)
+    vacuum = maybe_vacuum(conn, heartbeat)
     # Our own temp files: an artwork negative-cache entry past its TTL, an
     # interrupted artwork write, an interrupted backup.
     artwork_removed = _remove_stale(artwork.cache_dir(), (".fail",), artwork.FAILURE_TTL_SECONDS, now)
     artwork_removed += _remove_stale(artwork.cache_dir(), (".tmp",), STALE_TEMP_SECONDS, now)
     backups_removed = _remove_stale(backup_dir(conn), (".partial",), STALE_TEMP_SECONDS, now)
     partials = stale_partials(now)
-    conn.execute("PRAGMA optimize")
+    try:
+        conn.execute("PRAGMA optimize")
+    except sqlite3.Error as e:
+        logging.warning(f"[housekeeping] PRAGMA optimize skipped: {e}")
     parts = [
         "history trimmed",
-        "vacuumed" if vacuumed else "no vacuum needed",
+        vacuum,
         f"{artwork_removed} expired artwork cache file(s) removed",
     ]
     if backups_removed:

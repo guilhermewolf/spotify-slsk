@@ -105,14 +105,33 @@ class TestHousekeeping:
         assert "1 partial download(s)" in result and "report only" in result
 
     def test_vacuum_only_when_much_is_free(self, conn):
-        assert backup.maybe_vacuum(conn) is False  # tiny DB
+        assert backup.maybe_vacuum(conn) == "no vacuum needed"  # tiny DB
         conn.execute("CREATE TABLE junk (x BLOB)")
         with conn:
             conn.executemany("INSERT INTO junk VALUES (?)", [(b"x" * 4000,)] * 3000)
         with conn:
             conn.execute("DELETE FROM junk")
-        assert backup.maybe_vacuum(conn) is True
+        beats = []
+        assert backup.maybe_vacuum(conn, heartbeat=lambda: beats.append(1)) == "vacuumed"
         assert conn.execute("PRAGMA freelist_count").fetchone()[0] == 0
+        assert len(beats) == 2  # before and after
+
+    def test_locked_database_skips_vacuum_without_failing_the_task(self, conn, tmp_path, monkeypatch):
+        conn.execute("CREATE TABLE junk (x BLOB)")
+        with conn:
+            conn.executemany("INSERT INTO junk VALUES (?)", [(b"x" * 4000,)] * 3000)
+        with conn:
+            conn.execute("DELETE FROM junk")
+        conn.execute("PRAGMA busy_timeout = 0")
+        other = sqlite3.connect(backup.db_file(conn))
+        other.execute("BEGIN EXCLUSIVE")  # someone else holds the write lock
+        try:
+            monkeypatch.setenv("ARTWORK_CACHE_DIR", str(tmp_path / "art"))
+            result = backup.housekeeping(conn)
+        finally:
+            other.rollback()
+            other.close()
+        assert "vacuum skipped" in result and "next run" in result
 
     def test_history_is_trimmed(self, conn, monkeypatch):
         monkeypatch.setattr(config, "HISTORY_RETENTION_DAYS", 1)

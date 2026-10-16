@@ -493,7 +493,7 @@ def _health_checks(conn: sqlite3.Connection) -> str:
 SCHEDULED: dict[str, Callable[[sqlite3.Connection], str]] = {
     "recycle_purge": _purge_recycle_bin,
     "db_backup": backup.run_backup,
-    "housekeeping": backup.housekeeping,
+    "housekeeping": lambda conn: backup.housekeeping(conn, heartbeat=_touch_heartbeat),
     "db_integrity": _db_integrity,
     "health_checks": _health_checks,
 }
