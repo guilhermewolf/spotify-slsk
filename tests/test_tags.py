@@ -126,7 +126,7 @@ class TestTagDiff:
 
 class _Resp:
     def __init__(self, body, status=200):
-        self.body, self.status = body, status
+        self.body, self.status_code = body, status
 
     def __enter__(self):
         return self
@@ -134,47 +134,82 @@ class _Resp:
     def __exit__(self, *a):
         return False
 
-    def raise_for_status(self):
-        if self.status >= 400:
-            raise RuntimeError(f"HTTP {self.status}")
-
     def iter_content(self, n):
         for i in range(0, len(self.body), n):
             yield self.body[i:i + n]
 
 
 class TestArtwork:
-    def test_fetches_once_then_serves_from_cache(self, monkeypatch, tmp_path):
+    @pytest.fixture(autouse=True)
+    def _cache(self, monkeypatch, tmp_path):
         monkeypatch.setenv("ARTWORK_CACHE_DIR", str(tmp_path))
+
+    def test_fetches_once_then_serves_from_cache(self, monkeypatch, tmp_path):
         calls = []
         monkeypatch.setattr(
             artwork.requests, "get",
-            lambda url, timeout, stream: calls.append((url, timeout)) or _Resp(COVER),
+            lambda url, timeout, stream, allow_redirects: calls.append(
+                (url, timeout, allow_redirects)) or _Resp(COVER),
         )
         assert artwork.album_cover(ROW) == COVER
         assert artwork.album_cover(ROW) == COVER
-        assert calls == [(ROW["cover_url"], artwork.TIMEOUT_SECONDS)]
+        assert calls == [(ROW["cover_url"], artwork.TIMEOUT_SECONDS, False)]
         assert [p.name.startswith("album_alb1_") for p in tmp_path.iterdir()] == [True]
 
     @pytest.mark.parametrize("body,status", [
         (b"<html>not an image</html>", 200),
         (COVER, 404),
+        (COVER, 302),  # redirects are not followed
         (b"\xff\xd8\xff" + b"0" * (artwork.MAX_BYTES + 1), 200),
     ])
     def test_bad_responses_are_none_and_not_cached(self, monkeypatch, tmp_path, body, status):
-        monkeypatch.setenv("ARTWORK_CACHE_DIR", str(tmp_path))
         monkeypatch.setattr(artwork.requests, "get", lambda *a, **k: _Resp(body, status))
         assert artwork.album_cover(ROW) is None
-        assert list(tmp_path.iterdir()) == []
+        assert not list(tmp_path.glob("*.img"))
 
-    def test_network_error_and_non_https_are_none(self, monkeypatch):
+    def test_failure_is_remembered_for_a_day(self, monkeypatch, tmp_path):
+        calls = []
+
         def boom(*a, **k):
+            calls.append(1)
             raise TimeoutError("slow")
 
         monkeypatch.setattr(artwork.requests, "get", boom)
         assert artwork.album_cover(ROW) is None
-        assert artwork.fetch_image("http://i.scdn.co/x", "k") is None
-        assert artwork.fetch_image(None, "k") is None
+        assert artwork.album_cover(ROW) is None
+        assert len(calls) == 1
+        fail = next(tmp_path.glob("*.fail"))
+        os.utime(fail, (0, 0))  # a day later
+        monkeypatch.setattr(artwork.requests, "get", lambda *a, **k: _Resp(COVER))
+        assert artwork.album_cover(ROW) == COVER
+        assert not list(tmp_path.glob("*.fail"))
+
+    @pytest.mark.parametrize("url,ok", [
+        ("https://i.scdn.co/image/ab67616d0000b273", True),
+        ("https://mosaic.scdn.co/640/ab67616d", True),
+        ("https://image-cdn-ak.spotifycdn.com/image/ab67706c", True),
+        ("https://image-cdn-fa.spotifycdn.com/image/ab67706c", True),
+        ("http://i.scdn.co/image/x", False),
+        ("https://evil.example/i.scdn.co/x", False),
+        ("https://i.scdn.co.evil.example/x", False),
+        ("https://notscdn.co/x", False),
+        (None, False),
+    ])
+    def test_only_spotify_image_hosts(self, url, ok, monkeypatch):
+        monkeypatch.setattr(artwork.requests, "get", lambda *a, **k: _Resp(COVER))
+        assert artwork.allowed_url(url) is ok
+        assert (artwork.fetch_image(url, "k") == COVER) is ok
+
+    def test_cache_is_capped_least_recently_used_first(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(artwork, "CACHE_MAX_BYTES", 2 * len(COVER))
+        monkeypatch.setattr(artwork.requests, "get", lambda *a, **k: _Resp(COVER))
+        artwork.fetch_image("https://i.scdn.co/image/0", "k0")
+        artwork.fetch_image("https://i.scdn.co/image/1", "k1")
+        os.utime(next(tmp_path.glob("k1_*.img")), (1, 1))
+        artwork.fetch_image("https://i.scdn.co/image/0", "k0")  # cache hit refreshes k0
+        artwork.fetch_image("https://i.scdn.co/image/2", "k2")
+        names = sorted(p.name.split("_")[0] for p in tmp_path.glob("*.img"))
+        assert names == ["k0", "k2"]
 
 
 class TestImportTagsFromSpotify:
