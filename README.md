@@ -9,7 +9,11 @@ dashboard for adding playlists, watching progress and retrying what failed.
 
 - **Spotify sync** — polls your playlists and picks up new tracks. Uses Spotify's
   `snapshot_id` to skip the expensive track fetch when a playlist hasn't changed.
-- **Quality-aware search** — format allowlist, a fixed 320 kbps floor for MP3s
+- **Quality profile** — see [Quality profile](#quality-profile): an ordered
+  list of acceptable qualities (FLAC 24-bit, FLAC 16-bit, MP3 320, ...), a
+  cutoff, optional quality upgrades, required/ignored terms, and Lidarr-style
+  ranking (version > quality > free slot > queue > speed > size).
+- **Quality-aware search** — a fixed 320 kbps floor for MP3s
   whose bitrate is known, an effective-bitrate check from size and duration
   (`SLSKD_MIN_EFFECTIVE_MP3_KBPS`, catches 128 kbps files retagged as 320), and a
   version gate so a Live or Remix version isn't accepted for a studio track.
@@ -83,12 +87,72 @@ Set these in `.env`. Everything has a working default except the credentials.
 
 These are also editable from the **Settings** page, where the database value
 overrides the environment variable and changes apply on the next cycle:
-`MIN_MATCH_SCORE`, `SLSKD_PREFERRED_FORMATS`, `SLSKD_MIN_PEER_UPLOAD_SPEED`,
+`MIN_MATCH_SCORE`, `SLSKD_MIN_PEER_UPLOAD_SPEED`,
 `SLSKD_MIN_EFFECTIVE_MP3_KBPS`, `SLSKD_EARLY_STOP_RESPONSES`,
 `SLSKD_MAX_DURATION_DIFF_SECONDS`, `SLSKD_WAIT_TIMEOUT`,
 `HISTORY_RETENTION_DAYS`, `UPGRADE_CHECK_INTERVAL_HOURS`,
 `LOSSLESS_CHECK_ENABLED`, `LOSSLESS_FAKE_CUTOFF_HZ`, `LOSSLESS_MIN_DROP_DB`,
-`LIBRARY_SCAN_INTERVAL_HOURS`.
+`LIBRARY_SCAN_INTERVAL_HOURS`, `REQUIRED_TERMS`, `IGNORED_TERMS`. The quality
+profile has its own section on the same page.
+
+`SLSKD_PREFERRED_FORMATS` is **deprecated**: on the first boot of this version
+it is converted into the quality profile (below) and ignored afterwards.
+
+## Quality profile
+
+Every file is classified on a quality ladder, best first:
+
+| Quality | From |
+|---|---|
+| FLAC 24-bit | `.flac`, bit depth ≥ 24 (any sample rate — one rung) |
+| FLAC 16-bit | `.flac`, 16-bit or unknown |
+| ALAC · AIFF · WAV | lossless, in that order |
+| MP3 320 | `.mp3`, 320 kbps or bitrate unknown |
+| MP3 V0 | VBR MP3 averaging 220-319 kbps — **always rejected** by the 320 floor |
+| AAC 256+ · OGG/Opus · AAC <256 | lossy |
+| MP3 <320 | **always rejected** by the 320 floor |
+
+A lossless file that the spectrum check called `suspect` counts as MP3 320,
+`fake` as MP3 <320, `upsampled`/`padded_16` as FLAC 16-bit.
+
+The single global **profile** (Settings → Quality profile) has:
+
+- **Allowed qualities, in order** — anything unticked is rejected with
+  "quality not allowed by profile: MP3 320". The order is the ranking. The
+  fixed 320 kbps MP3 floor still applies: a profile can only be stricter.
+- **Cutoff** — a downloaded file at or above it is never upgraded for quality.
+- **Upgrade toggle** — when on, the upgrade pass (every
+  `UPGRADE_CHECK_INTERVAL_HOURS`) re-searches files below the cutoff and
+  replaces one with the *same or a better version* in a *strictly better*
+  quality. Better versions (Extended Mix > Original Mix > other) are always
+  upgraded regardless; a suspect lossless file is always retried for a
+  lossless copy.
+
+Replaced files (upgrades and manual grabs) are moved to
+`<playlists>/.quarantine/<playlist>/replaced/` — never deleted. Purge by hand.
+
+**Wanted → Cutoff unmet** lists downloaded tracks below the cutoff (and suspect
+lossless files); *Search selected*/*Search all* run an upgrade check on the
+next cycle, ignoring the interval. Run it before enabling upgrades to see what
+would be re-downloaded.
+
+**Ranking** of acceptable candidates: version tier > profile order >
+"likely upsampled" last > free upload slot > shorter queue > faster peer
+(queue and speed in factor-of-two buckets) > size closest to the quality's
+typical bitrate.
+
+**Terms** — `IGNORED_TERMS` rejects any file whose full peer path (folders
+included) contains a term ("ignored term: karaoke"); `REQUIRED_TERMS` rejects
+files containing none of them. Comma-separated, case-insensitive substrings,
+or `/regex/`. Both are empty by default. Useful ignored terms: `karaoke`,
+`instrumental`, `nightcore`, `sped up`, `8d audio`, `/\bcover\b/`.
+
+**Migration.** On first boot the profile is built from
+`SLSKD_PREFERRED_FORMATS` (Settings value, else the environment, else
+`flac,mp3,aiff,wav`): each format becomes its rungs in the same order (`flac` →
+FLAC 24-bit, FLAC 16-bit), the cutoff is the lowest allowed quality and quality
+upgrades are **off** — the same files are accepted as before and nothing
+already downloaded is queued for re-download.
 
 ## Validation
 
