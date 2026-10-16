@@ -19,6 +19,7 @@ header health badge - and registers one blueprint per area:
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 import os
 import secrets
@@ -137,6 +138,15 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
     app.jinja_env.filters["duration_ms"] = (
         lambda ms: fmt_duration(ms / 1000) if ms else "—"
     )
+
+    @app.after_request
+    def _toasts(response):
+        # htmx fires a "toast" event on the page for each request carrying
+        # this header; static/toast.js renders them (helpers.notify_user).
+        toasts = g.pop("toasts", None)
+        if toasts:
+            response.headers["HX-Trigger"] = json.dumps({"toast": {"items": toasts}})
+        return response
 
     @app.after_request
     def _security_headers(response):

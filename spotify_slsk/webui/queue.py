@@ -20,7 +20,6 @@ from typing import Any
 from flask import (
     Blueprint,
     abort,
-    flash,
     g,
     redirect,
     render_template,
@@ -32,6 +31,7 @@ from flask.typing import ResponseReturnValue
 from .. import db, runtime_state
 from ..slskd import client as slskd_client
 from ..slskd.models import Transfer, remote_basename
+from .helpers import is_htmx, notify_user
 
 bp = Blueprint("queue", __name__)
 
@@ -121,6 +121,11 @@ def queue_page() -> ResponseReturnValue:
     )
 
 
+def _after_action() -> ResponseReturnValue:
+    """htmx: the refreshed queue (swapped in) plus a toast; else redirect."""
+    return queue_page() if is_htmx() else redirect(url_for("queue.queue_page"))
+
+
 @bp.route("/queue/cancel", methods=["POST"])
 def queue_cancel() -> ResponseReturnValue:
     username = request.form.get("username") or ""
@@ -134,11 +139,11 @@ def queue_cancel() -> ResponseReturnValue:
         transfer = Transfer.from_json(client.transfers.get_download(username, transfer_id))
         ok = client.transfers.cancel_download(username, transfer_id, remove=False)
     except Exception as e:
-        flash(f"Could not reach slskd ({type(e).__name__}).", "error")
-        return redirect(url_for("queue.queue_page"))
+        notify_user(f"Could not reach slskd ({type(e).__name__}).", "error")
+        return _after_action()
     if not ok:
-        flash("slskd refused to cancel that transfer (already finished?).", "error")
-        return redirect(url_for("queue.queue_page"))
+        notify_user("slskd refused to cancel that transfer (already finished?).", "error")
+        return _after_action()
     name = remote_basename(transfer.filename) or transfer_id
     if blocklist and transfer.filename:
         link = _track_index().get((username, transfer.filename))
@@ -146,7 +151,7 @@ def queue_cancel() -> ResponseReturnValue:
             g.conn, username, transfer.filename, transfer.size,
             "cancelled and blocklisted from the queue page", link[1] if link else None,
         )
-        flash(f"Cancelled and blocklisted {name} from {username}.", "success")
+        notify_user(f"Cancelled and blocklisted {name} from {username}.", "success")
     else:
-        flash(f"Cancelled {name} from {username}.", "success")
-    return redirect(url_for("queue.queue_page"))
+        notify_user(f"Cancelled {name} from {username}.", "success")
+    return _after_action()

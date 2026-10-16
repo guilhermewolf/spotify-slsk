@@ -62,13 +62,17 @@
         <td>
           {% if not r.done and t.id %}
           <div class="card-actions">
-            <form method="POST" action="{{ url_for('queue.queue_cancel') }}" class="inline-form">
+            <form method="POST" action="{{ url_for('queue.queue_cancel') }}" class="inline-form"
+                  hx-post="{{ url_for('queue.queue_cancel') }}" hx-target="#queue-live"
+                  hx-select="#queue-live" hx-swap="outerHTML">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <input type="hidden" name="username" value="{{ t.username }}">
               <input type="hidden" name="id" value="{{ t.id }}">
               <button type="submit" class="secondary outline">Cancel</button>
             </form>
-            <form method="POST" action="{{ url_for('queue.queue_cancel') }}" class="inline-form">
+            <form method="POST" action="{{ url_for('queue.queue_cancel') }}" class="inline-form"
+                  hx-post="{{ url_for('queue.queue_cancel') }}" hx-target="#queue-live"
+                  hx-select="#queue-live" hx-swap="outerHTML">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <input type="hidden" name="username" value="{{ t.username }}">
               <input type="hidden" name="id" value="{{ t.id }}">

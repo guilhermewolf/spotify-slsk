@@ -5,7 +5,7 @@ import logging
 import os
 import time
 
-from flask import current_app, g
+from flask import current_app, flash, g, request
 
 from .. import db
 
@@ -138,3 +138,20 @@ def health_snapshot() -> dict:
         }
     except Exception as e:
         return {"ok": False, "error": str(e), "reason": str(e)}
+
+
+# ---- feedback: toasts for htmx actions, flashes otherwise -----------
+
+def is_htmx() -> bool:
+    return request.headers.get("HX-Request") == "true"
+
+
+def notify_user(message: str, category: str = "success") -> None:
+    """Tell the operator how an action went. An htmx request gets a toast
+    (an HX-Trigger header, added by create_app, rendered by static/toast.js)
+    because its response is swapped into the page, not navigated to; a
+    classic form POST gets the usual flash on the page it redirects to."""
+    if is_htmx():
+        g.setdefault("toasts", []).append({"message": message, "level": category})
+    else:
+        flash(message, category)

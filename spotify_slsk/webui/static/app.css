@@ -592,3 +592,16 @@ details.confirm[open] { max-width: 22rem; }
 .badge-check-error { background: var(--ss-suspended-bg); color: var(--ss-suspended); }
 
 .login-card { max-width: 24rem; margin: 3rem auto; }
+
+/* Toasts (static/toast.js): fixed, stacked bottom-right. */
+.toasts {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-width: min(28rem, calc(100vw - 2rem));
+}
+.toast { margin: 0; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15); }

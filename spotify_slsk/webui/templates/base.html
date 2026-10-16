@@ -9,6 +9,7 @@
        what lets the CSP stay at script-src 'self'. -->
   <link rel="stylesheet" href="{{ url_for('static', filename='pico.classless.min.css') }}">
   <script src="{{ url_for('static', filename='htmx.min.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='toast.js') }}" defer></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
   <!-- Not deferred: applies the stored theme before first paint. -->
   <script src="{{ url_for('static', filename='theme.js') }}"></script>
@@ -97,6 +98,9 @@
     </div>
     {% endif %}
   {% endwith %}
+
+  <!-- Toasts for htmx actions (static/toast.js); classic POSTs use the flashes above. -->
+  <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
 
   <main id="main">
     {% block content %}{% endblock %}

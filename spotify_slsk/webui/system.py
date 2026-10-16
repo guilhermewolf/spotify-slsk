@@ -9,7 +9,6 @@ from flask import (
     Blueprint,
     abort,
     current_app,
-    flash,
     g,
     jsonify,
     redirect,
@@ -22,7 +21,7 @@ from flask.typing import ResponseReturnValue
 
 from .. import __version__, backup, config, db, healthchecks, runtime_state, tasks
 from ..library.health import SCAN_PENDING_KEY
-from .helpers import health_snapshot, wake_daemon
+from .helpers import health_snapshot, is_htmx, notify_user, wake_daemon
 
 bp = Blueprint("system", __name__)
 
@@ -162,8 +161,10 @@ def task_run(name: str) -> ResponseReturnValue:
         queued = db.queue_task(g.conn, name)
     wake_daemon()
     if queued:
-        flash(f"{task.label}: queued.", "success")
+        notify_user(f"{task.label}: queued.")
     else:
-        flash(f"{task.label} is already queued.", "success")
-    back = "system.status_page" if request.form.get("next") == "status" else "system.tasks_page"
-    return redirect(url_for(back))
+        notify_user(f"{task.label} is already queued.")
+    to_status = request.form.get("next") == "status"
+    if is_htmx():  # the page swaps in its refreshed table and shows a toast
+        return status_page() if to_status else tasks_page()
+    return redirect(url_for("system.status_page" if to_status else "system.tasks_page"))

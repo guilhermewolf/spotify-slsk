@@ -5,7 +5,9 @@
     <strong>Backups</strong>
     <div class="subtle"><code>{{ backup_dir }}</code> · daily, newest first; retention is BACKUP_RETENTION on Settings</div>
   </header>
-  <form method="POST" action="{{ url_for('system.task_run', name='db_backup') }}">
+  <form method="POST" action="{{ url_for('system.task_run', name='db_backup') }}"
+        hx-post="{{ url_for('system.task_run', name='db_backup') }}" hx-target="#backups"
+        hx-select="#backups" hx-swap="outerHTML">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="next" value="status">
     <button type="submit" class="secondary outline" style="width:auto" {% if backup_queued %}disabled{% endif %}>
@@ -98,7 +100,9 @@
     <strong>Backups</strong>
     <div class="subtle"><code>{{ backup_dir }}</code> · daily, newest first; retention is BACKUP_RETENTION on Settings</div>
   </header>
-  <form method="POST" action="{{ url_for('system.task_run', name='db_backup') }}">
+  <form method="POST" action="{{ url_for('system.task_run', name='db_backup') }}"
+        hx-post="{{ url_for('system.task_run', name='db_backup') }}" hx-target="#backups"
+        hx-select="#backups" hx-swap="outerHTML">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="next" value="status">
     <button type="submit" class="secondary outline" style="width:auto" {% if backup_queued %}disabled{% endif %}>

@@ -46,7 +46,9 @@
           {% else %}—{% endif %}
         </td>
         <td>
-          <form method="POST" action="{{ url_for('system.task_run', name=t.name) }}" class="inline-form">
+          <form method="POST" action="{{ url_for('system.task_run', name=t.name) }}" class="inline-form"
+                hx-post="{{ url_for('system.task_run', name=t.name) }}" hx-target="#tasks"
+                hx-select="#tasks" hx-swap="outerHTML">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="secondary outline" {% if t.queued %}disabled{% endif %}>Run now</button>
           </form>
