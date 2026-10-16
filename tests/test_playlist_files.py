@@ -68,6 +68,27 @@ class TestM3u8:
         playlist_files.write_playlist_files(conn, "pid1")
         assert sorted(p.name for p in folder.glob("*.m3u8")) == ["Summer.m3u8", "mine.m3u8"]
 
+    def test_never_overwrites_a_users_m3u8(self, pl):
+        conn, folder = pl
+        user = folder / "Road Trip - 2024+25.m3u8"
+        user.write_text("#EXTM3U\nmy own order\n")
+        playlist_files.write_playlist_files(conn, "pid1")
+        playlist_files.write_playlist_files(conn, "pid1")
+        assert user.read_text() == "#EXTM3U\nmy own order\n"
+        ours = folder / "Road Trip - 2024+25 (spotify-slsk).m3u8"
+        assert "#SPOTIFY-SLSK:pid1" in ours.read_text()
+
+    def test_case_only_rename_keeps_the_fresh_file(self, pl):
+        conn, folder = pl
+        db.rename_playlist_meta(conn, "pid1", "pl_road_trip", "summer")
+        playlist_files.write_playlist_files(conn, "pid1")
+        db.rename_playlist_meta(conn, "pid1", "pl_road_trip", "Summer")
+        for _ in range(2):
+            playlist_files.write_playlist_files(conn, "pid1")
+            files = list(folder.glob("*.m3u8"))
+            assert len(files) == 1 and files[0].name.casefold() == "summer.m3u8"
+            assert "#SPOTIFY-SLSK:pid1" in files[0].read_text()
+
     def test_disabled_writes_nothing(self, pl, monkeypatch):
         conn, folder = pl
         monkeypatch.setattr(config, "WRITE_M3U", False)

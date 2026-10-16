@@ -5,7 +5,8 @@ The m3u8 is UTF-8 extended M3U: downloaded tracks in Spotify playlist order
 with `#EXTINF:<seconds>,Artist - Title` and paths relative to the folder.
 It carries a `#SPOTIFY-SLSK:<playlist id>` marker, so a playlist renamed on
 Spotify replaces its old m3u8 instead of leaving a stale one; m3u8 files
-without our marker are never touched. Both files are rewritten only when
+without our marker are never overwritten or removed (a user's file of the
+same name pushes ours to "<name> (spotify-slsk).m3u8"). Both files are rewritten only when
 their content changed. The matchers and scans never look at them: startup
 reconciliation indexes audio extensions only, and the health scan and the
 renamer work from DB rows.
@@ -56,19 +57,51 @@ def _write_if_changed(path: str, data: bytes) -> bool:
     return True
 
 
+def _ours(path: str, playlist_id: str) -> bool:
+    """True when `path` is an m3u8 this playlist wrote (marker line)."""
+    try:
+        with open(path, "rb") as f:
+            return f"{MARKER}{playlist_id}".encode() in f.read(4096).splitlines()
+    except OSError:
+        return False
+
+
+def _m3u8_target(folder: str, name: str, playlist_id: str) -> str | None:
+    """Where to write: `name` when absent or ours, else the
+    "<stem> (spotify-slsk).m3u8" fallback (same rule). A user's file is
+    never overwritten; None when both names are taken by other files."""
+    stem = name[: -len(".m3u8")]
+    for candidate in (name, f"{stem} (spotify-slsk).m3u8"):
+        path = os.path.join(folder, candidate)
+        if not os.path.lexists(path) or _ours(path, playlist_id):
+            return path
+    return None
+
+
+def _same_entry(a: str, b: str) -> bool:
+    if os.path.basename(a).casefold() == os.path.basename(b).casefold():
+        return True
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
 def _remove_stale_m3u8(folder: str, keep: str, playlist_id: str) -> None:
-    marker = f"{MARKER}{playlist_id}".encode()
+    """Remove this playlist's other m3u8s (e.g. after a Spotify rename).
+    Case-insensitive: on SMB/macOS a case-only rename is the same file."""
     for name in os.listdir(folder):
         path = os.path.join(folder, name)
-        if name == keep or not name.lower().endswith(".m3u8") or not os.path.isfile(path):
+        if (
+            not name.lower().endswith(".m3u8") or not os.path.isfile(path)
+            or _same_entry(path, keep) or not _ours(path, playlist_id)
+        ):
             continue
         try:
-            with open(path, "rb") as f:
-                if marker in f.read(4096).splitlines():
-                    os.remove(path)
-                    logging.info(f"[playlist] Removed stale {path}")
+            os.remove(path)
+            logging.info(f"[playlist] Removed stale {path}")
         except OSError as e:
-            logging.warning(f"[playlist] Could not check {path}: {e}")
+            logging.warning(f"[playlist] Could not remove {path}: {e}")
 
 
 def write_playlist_files(conn: sqlite3.Connection, playlist_id: str) -> None:
@@ -91,11 +124,14 @@ def _write(conn: sqlite3.Connection, playlist_id: str) -> None:
     if not os.path.isdir(folder):
         return
     if config.WRITE_M3U:
-        name = m3u8_name(playlist["name"])
-        text = build_m3u8(playlist, list_tracks(conn, playlist["table_name"]), folder)
-        if _write_if_changed(os.path.join(folder, name), text.encode("utf-8")):
-            logging.info(f"[playlist] Wrote {os.path.join(folder, name)}")
-        _remove_stale_m3u8(folder, name, playlist_id)
+        target = _m3u8_target(folder, m3u8_name(playlist["name"]), playlist_id)
+        if target is None:
+            logging.warning(f"[playlist] {folder}: m3u8 names taken by other files; not written")
+        else:
+            text = build_m3u8(playlist, list_tracks(conn, playlist["table_name"]), folder)
+            if _write_if_changed(target, text.encode("utf-8")):
+                logging.info(f"[playlist] Wrote {target}")
+            _remove_stale_m3u8(folder, target, playlist_id)
     if config.WRITE_PLAYLIST_COVER:
         image = fetch_image(playlist.get("cover_url"), f"playlist_{playlist_id}")
         if image and _write_if_changed(os.path.join(folder, "cover.jpg"), image):
