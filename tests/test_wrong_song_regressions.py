@@ -307,3 +307,41 @@ class TestArtistSplitting:
 
     def test_filename_with_disambiguated_artist(self):
         assert filename_match("HILLS (US) - Talk To Me.flac", "Talk To Me", "HILLS")[1] is None
+
+
+# Production library scan: release-site watermarks diluted the title.
+class TestWebsiteNoise:
+    @pytest.mark.parametrize("raw,clean", [
+        ("Get Down (Extended Mix)www.electronicfresh.com", "Get Down (Extended Mix)"),
+        ("Get Down [www.electronicfresh.com]", "Get Down"),
+        ("Get Down - www.electronicfresh.com", "Get Down"),
+        ("Get Down - electronicfresh.com", "Get Down"),
+        ("Get Down (https://site.net)", "Get Down"),
+        ("Get Down www.site.co.uk", "Get Down"),
+    ])
+    def test_stripped(self, raw, clean):
+        from spotify_slsk.matching.normalize import strip_web_noise
+        assert strip_web_noise(raw) == clean
+
+    @pytest.mark.parametrize("title", [
+        "Mr. Brightside", "U.N.I.T.Y.", "Ego Death Vol. 2", "5.5", "Pt. 2",
+        "Feat. Someone", "St. Elsewhere", "Dr. Feelgood",
+    ])
+    def test_titles_with_dots_untouched(self, title):
+        from spotify_slsk.matching.normalize import strip_web_noise
+        assert strip_web_noise(title) == title
+
+    def test_tags_match_after_stripping(self):
+        score, reason = score_track_match(
+            "Get Down (Extended Mix)www.electronicfresh.com", "Owen Andrews, Luke Andrews",
+            "Get Down", "Owen Andrews, Luke Andrews",
+        )
+        assert score >= MIN_MATCH, reason
+
+    @pytest.mark.parametrize("path", [
+        "Owen Andrews - Get Down (Extended Mix)www.electronicfresh.com.mp3",
+        "Owen Andrews - Get Down - www.electronicfresh.com.mp3",
+    ])
+    def test_filename_coverage_not_diluted(self, path):
+        assert filename_match(path, "Get Down", "Owen Andrews") == (1.0, None)
+

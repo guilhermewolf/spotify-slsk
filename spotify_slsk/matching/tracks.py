@@ -24,6 +24,7 @@ from .normalize import (
     credited_names,
     expected_title_tokens,
     fold,
+    strip_web_noise,
     version_keywords,
     version_mismatch,
 )
@@ -127,6 +128,7 @@ def score_track_match(file_title: str, file_artist: str, db_title: str, db_artis
     match used to score 0.90 (0.88 for remixes), far above config.MIN_MATCH_SCORE,
     which accepted "Your Eyes" for "Eyes On Fire" by someone else.
     """
+    file_title = strip_web_noise(file_title)
     title_sim = _similar(file_title, db_title)
     if not _artists_overlap(file_artist, db_artist):
         return 0.0, f"no_artist_overlap fuzzy(title={title_sim:.2f})"
