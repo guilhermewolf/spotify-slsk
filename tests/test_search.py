@@ -158,7 +158,7 @@ class TestCleanFilename:
 
 
 class TestExtractCandidates:
-    def _search_result(self, filename, bitrate=None, size=5_000_000, length=180, upload_speed=10000):
+    def _search_result(self, filename, bitrate=None, size=25_000_000, length=180, upload_speed=10000):
         return [{
             "username": "user1",
             "uploadSpeed": upload_speed,
@@ -745,9 +745,9 @@ class TestBlocklistFiltering:
     def _results(self):
         return [
             {"username": "bad", "uploadSpeed": 1, "files": [{
-                "filename": "Eminem - Lose Yourself.flac", "size": 1, "bitrate": 1411, "length": 300}]},
+                "filename": "Eminem - Lose Yourself.flac", "size": 30_000_000, "bitrate": 1411, "length": 300}]},
             {"username": "good", "uploadSpeed": 1, "files": [{
-                "filename": "Eminem - Lose Yourself.flac", "size": 1, "bitrate": 1411, "length": 300}]},
+                "filename": "Eminem - Lose Yourself.flac", "size": 30_000_000, "bitrate": 1411, "length": 300}]},
         ]
 
     def test_blocklisted_file_is_rejected_with_reason(self):
@@ -869,7 +869,7 @@ class TestBlocklistPolicy:
 class TestInteractiveSearch:
     def test_collects_all_queries_accepted_first_and_deduped(self, monkeypatch):
         monkeypatch.setattr(slskd_client, "new_client", lambda: object())
-        good = {"filename": "Eminem - Lose Yourself.flac", "size": 1, "bitrate": 1411, "length": 300}
+        good = {"filename": "Eminem - Lose Yourself.flac", "size": 30_000_000, "bitrate": 1411, "length": 300}
         bad = {"filename": "Eminem - Lose Yourself.wma", "size": 1, "bitrate": 320, "length": 300}
         mp3 = {"filename": "Eminem - Lose Yourself.mp3", "size": 12_000_000, "bitrate": 320, "length": 300}
         calls = []

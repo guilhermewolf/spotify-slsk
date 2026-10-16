@@ -187,3 +187,37 @@ class TestLosslessOnlyCandidates:
         out = evaluate_candidates(results, "Heart To Find", "Mat Joe", lossless_only=True)
         assert [(c["ext"], c["accepted"]) for c in out] == [(".mp3", False), (".flac", True)]
         assert out[0]["reason"].startswith("not lossless")
+
+
+class TestFlacPlausibility:
+    """Metadata-only, before anything is downloaded."""
+
+    def _eval(self, size, length=200, bit_depth=None, sample_rate=None):
+        from spotify_slsk.matching.candidates import evaluate_candidates
+
+        f = {"filename": "Mat Joe - Heart To Find.flac", "size": size, "length": length,
+             "bitDepth": bit_depth, "sampleRate": sample_rate}
+        return evaluate_candidates([{"username": "u", "files": [f]}], "Heart To Find", "Mat Joe")[0]
+
+    def test_cd_flac_below_400_kbps_is_rejected(self):
+        c = self._eval(size=7_500_000)  # 300 kbps
+        assert c["accepted"] is False
+        assert c["reason"].startswith("FLAC at 300 kbps is implausibly low for 16-bit/44.1 kHz")
+
+    def test_normal_cd_flac_is_accepted(self):
+        c = self._eval(size=22_000_000, bit_depth=16, sample_rate=44100)  # 880 kbps
+        assert c["accepted"] is True and c["note"] is None
+
+    def test_thin_hi_res_is_demoted_not_rejected(self):
+        thin = self._eval(size=22_500_000, bit_depth=24, sample_rate=96000)  # 900 kbps
+        assert thin["accepted"] is True
+        assert thin["note"].startswith("likely upsampled: 900 kbps for 24-bit/96 kHz")
+        fat = self._eval(size=60_000_000, bit_depth=24, sample_rate=96000)
+        assert fat["note"] is None
+
+    def test_demoted_sorts_after_its_peers(self):
+        from spotify_slsk.matching.candidates import sort_candidates
+
+        thin = dict(self._eval(size=22_500_000, bit_depth=24, sample_rate=96000), user="thin")
+        cd = dict(self._eval(size=22_000_000, bit_depth=16, sample_rate=44100), user="cd")
+        assert [c["user"] for c in sort_candidates([thin, cd])] == ["cd", "thin"]

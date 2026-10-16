@@ -749,6 +749,12 @@ class TestInteractiveSearchUI:
         assert r.data.count(b'class="actions-col"') == 3
         assert b"Artist - Song.flac" in client.get("/track/pid1/t1").data
 
+    def test_plausibility_note_is_shown_for_accepted_results(self, app_tmp, client, monkeypatch):
+        note = "likely upsampled: 900 kbps for 24-bit/96 kHz (< 1200); ranked lower"
+        monkeypatch.setattr(type(self), "CAND_OK", dict(self.CAND_OK, note=note))
+        self._search(app_tmp, client, monkeypatch)
+        assert b"likely upsampled: 900 kbps for 24-bit/96 kHz" in client.get("/track/pid1/t1/search").data
+
     def test_grab_accepted_queues_for_daemon_and_wakes(self, app_tmp, client, monkeypatch):
         from spotify_slsk import runtime_state
         self._search(app_tmp, client, monkeypatch)
