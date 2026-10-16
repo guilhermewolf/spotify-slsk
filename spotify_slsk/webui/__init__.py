@@ -28,7 +28,7 @@ import threading
 from flask import Flask, abort, g, request, session
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from .. import db
+from .. import db, runtime_state
 from ..utils import fmt_duration
 from . import auth, health, library, playlists, queue, settings, system, tracks, wanted
 from .helpers import fmt_age, fmt_interval, fmt_ts, health_snapshot, human_bytes
@@ -200,7 +200,13 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
     def _inject_health():
         # Every page shows the daemon's status in the header, so it must not
         # depend on a single route remembering to pass it.
-        return {"health": health_snapshot(), "auth_user": auth.current_user()}
+        # The sidebar also shows what the daemon is doing (static/shell.js
+        # keeps it fresh from /activity.json); an in-process dict read.
+        return {
+            "health": health_snapshot(),
+            "auth_user": auth.current_user(),
+            "shell_activity": runtime_state.get_activity(),
+        }
 
     return app
 
