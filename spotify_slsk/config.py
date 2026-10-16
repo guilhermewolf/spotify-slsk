@@ -25,6 +25,7 @@ import re
 import sqlite3
 
 from .db import delete_setting, get_setting, list_settings, set_setting
+from .library import naming
 from .matching.quality import (
     QualityProfile,
     parse_profile,
@@ -148,6 +149,8 @@ IGNORED_TERMS: Terms = _env_terms("IGNORED_TERMS")
 LIBRARY_SCAN_INTERVAL_HOURS = int(os.getenv("LIBRARY_SCAN_INTERVAL_HOURS", "0"))
 # Embed the Spotify album cover when tagging (importer.tags).
 EMBED_COVER_ART = os.getenv("EMBED_COVER_ART", "1") == "1"
+# Basename template for newly imported files (library.naming).
+FILE_NAME_TEMPLATE = os.getenv("FILE_NAME_TEMPLATE", naming.DEFAULT_TEMPLATE)
 
 
 def reload(conn: sqlite3.Connection) -> None:
@@ -163,7 +166,7 @@ def reload(conn: sqlite3.Connection) -> None:
     global MAX_DURATION_DIFF_SECONDS
     global LOSSLESS_CHECK_ENABLED, LOSSLESS_FAKE_CUTOFF_HZ, LOSSLESS_MIN_DROP_DB
     global LIBRARY_SCAN_INTERVAL_HOURS, REQUIRED_TERMS, IGNORED_TERMS
-    global EMBED_COVER_ART
+    global EMBED_COVER_ART, FILE_NAME_TEMPLATE
     try:
         MIN_MATCH_SCORE = float(get_setting(conn, "MIN_MATCH_SCORE", "0.62"))
     except (TypeError, ValueError) as e:
@@ -202,6 +205,12 @@ def reload(conn: sqlite3.Connection) -> None:
         logging.warning(f"Bad numeric setting during refresh; using previous values: {e}")
     LOSSLESS_CHECK_ENABLED = get_setting(conn, "LOSSLESS_CHECK_ENABLED", "1") == "1"
     EMBED_COVER_ART = get_setting(conn, "EMBED_COVER_ART", "1") == "1"
+    template = get_setting(conn, "FILE_NAME_TEMPLATE", naming.DEFAULT_TEMPLATE) or naming.DEFAULT_TEMPLATE
+    error = naming.validate_template(template)
+    if error:
+        logging.warning(f"Bad FILE_NAME_TEMPLATE in DB ({error}); keeping previous")
+    else:
+        FILE_NAME_TEMPLATE = template
     try:
         LOSSLESS_FAKE_CUTOFF_HZ = int(get_setting(conn, "LOSSLESS_FAKE_CUTOFF_HZ", "19500"))
         LOSSLESS_MIN_DROP_DB = int(get_setting(conn, "LOSSLESS_MIN_DROP_DB", "15"))
@@ -278,6 +287,7 @@ SETTINGS_SPEC = [
     ("REQUIRED_TERMS", "", "A file's full peer path must contain at least one of these (comma-separated, case-insensitive; /regex/ allowed). Empty = no requirement", "terms"),
     ("IGNORED_TERMS", "", "Reject a file whose full peer path contains any of these, even when the title matches (comma-separated, case-insensitive; /regex/ allowed). Common: karaoke, instrumental, nightcore, sped up, 8d audio, /\\bcover\\b/. Plain terms match inside words ('live' matches 'Oliver'): use a /\\b...\\b/ regex for whole words", "terms"),
     ("EMBED_COVER_ART", "1", "Embed the Spotify album cover (largest size, cached under data/artwork) when tagging imported or re-tagged files (1 = on, 0 = off). A failed fetch never fails the import", "bool"),
+    ("FILE_NAME_TEMPLATE", naming.DEFAULT_TEMPLATE, "Name for newly imported files (existing files keep their names until you apply a rename on Library -> Rename). Tokens: " + " ".join(f"{{{t}}}" for t in naming.TOKENS) + "; numbers take a zero-pad width, e.g. {track:02} {playlist_index:03}. The extension is the file's own. {original_filename} (the default) keeps the peer's file name. Unsafe characters are replaced, Windows-reserved names avoided and names capped at 200 bytes; an existing file is never overwritten (' (2)' is added)", "template"),
     ("LIBRARY_SCAN_INTERVAL_HOURS", "0", "Re-verify every library file (tags, duration, ISRC, lossless check) this often; report-only, a few hundred files per cycle. 0 = only when you press Scan library", "int0"),
 ]
 
@@ -310,6 +320,10 @@ def validate_setting(kind: str, value: str) -> tuple[str | None, str | None]:
         if lowered in ("0", "false", "no", "off"):
             return "0", None
         return None, "must be 1 (on) or 0 (off)"
+
+    if kind == "template":
+        error = naming.validate_template(value)
+        return (None, error) if error else (value, None)
 
     if kind == "terms":
         terms, error = parse_terms(value)

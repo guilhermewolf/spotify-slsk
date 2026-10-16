@@ -26,7 +26,7 @@
    ['LOSSLESS_CHECK_ENABLED', 'LOSSLESS_FAKE_CUTOFF_HZ', 'LOSSLESS_MIN_DROP_DB',
     'LIBRARY_SCAN_INTERVAL_HOURS']),
   ('Library', 'How imported files are tagged, named and organised',
-   ['EMBED_COVER_ART']),
+   ['EMBED_COVER_ART', 'FILE_NAME_TEMPLATE']),
   ('Search & transfers', 'How the daemon talks to slskd',
    ['SLSKD_MIN_PEER_UPLOAD_SPEED', 'SLSKD_EARLY_STOP_RESPONSES', 'SLSKD_WAIT_TIMEOUT',
     'UPGRADE_CHECK_INTERVAL_HOURS', 'HISTORY_RETENTION_DAYS'])
@@ -56,6 +56,10 @@
           {%- if overrides.get(key) %} (overridden here)
           {%- else %} (default <code>{{ default }}</code>){% endif %}
         </span>
+        {% if key == 'FILE_NAME_TEMPLATE' %}
+        <span class="effective">Example: <code>{{ name_example }}</code>
+          (for {{ name_example_source }})</span>
+        {% endif %}
       </div>
       {% endif %}
     {% endfor %}

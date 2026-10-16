@@ -23,12 +23,13 @@ from ..db import (
     set_track_quality,
     update_download_status,
 )
+from ..library.naming import file_name
 from ..matching.candidates import _duration_off, filename_match
 from ..matching.normalize import version_mismatch, version_tier
 from ..matching.quality import quality_of_file
 from ..matching.tracks import find_closest_match, score_track_match
 from ..models import Candidate, Track
-from ..utils import fmt_duration
+from ..utils import fmt_duration, free_path
 from . import artwork
 from .audio_check import (
     BLOCKLIST_VERDICTS,
@@ -273,14 +274,17 @@ def process_downloaded_file(
         already_in_library = False
 
     final_path: str | None
+    quality = quality_of_file(file_path)
     if already_in_library:
         final_path = file_path
     else:
-        final_path = move_track_to_playlist_folder(file_path, playlist_name)
+        # FILE_NAME_TEMPLATE applies to newly imported files only.
+        name = file_name(config.FILE_NAME_TEMPLATE, row, os.path.basename(file_path), quality)
+        final_path = move_track_to_playlist_folder(file_path, playlist_name, name)
 
     if final_path:
         update_download_status(conn, track_id, playlist_name, success=True, file_path=final_path)
-        set_track_quality(conn, playlist_name, track_id, quality_of_file(final_path))
+        set_track_quality(conn, playlist_name, track_id, quality)
         if not reconcile:
             record_history(
                 conn, "imported", table_name=playlist_name, track_id=track_id,
@@ -393,20 +397,20 @@ def _reject_and_log(file_path, playlist_name, conn, track_id=None, reason="unkno
         )
 
 
-def move_track_to_playlist_folder(track_path: str, playlist_name: str) -> str | None:
+def move_track_to_playlist_folder(
+    track_path: str, playlist_name: str, name: str | None = None
+) -> str | None:
+    """Move a download to <playlists_root>/<table>/<name> (default: its own
+    basename). Never overwrites: a taken name gets " (2)", " (3)"..."""
     try:
-        # Use the correct base path
         base_dir = os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists")
         dest_dir = os.path.join(base_dir, playlist_name)
         os.makedirs(dest_dir, exist_ok=True)
 
-        # Final destination path
-        filename = os.path.basename(track_path)
-        destination = os.path.join(dest_dir, filename)
-
         if not os.path.exists(track_path):
             logging.error(f"Source file does not exist: {track_path}")
             return None
+        destination = free_path(dest_dir, name or os.path.basename(track_path))
 
         # Attempt to move, fallback to copy
         try:

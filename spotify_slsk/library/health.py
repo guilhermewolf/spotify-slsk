@@ -52,7 +52,7 @@ from ..matching.candidates import _duration_off, filename_match
 from ..matching.normalize import version_mismatch, version_tier
 from ..matching.quality import quality_of_file
 from ..matching.tracks import score_track_match
-from ..utils import fmt_duration
+from ..utils import fmt_duration, free_path
 
 # Bump when the identity rules below change: every file is re-verified once.
 RULES_VERSION = 1
@@ -236,16 +236,6 @@ def scan_step(
     return checked, True
 
 
-def _free_path(directory: str, basename: str) -> str:
-    """`directory/basename`, or "name (2).ext" ... if that is taken."""
-    stem, ext = os.path.splitext(basename)
-    candidate, n = os.path.join(directory, basename), 1
-    while os.path.lexists(candidate):
-        n += 1
-        candidate = os.path.join(directory, f"{stem} ({n}){ext}")
-    return candidate
-
-
 def _inside(path: str, root: str) -> bool:
     try:
         real, real_root = os.path.realpath(path), os.path.realpath(root)
@@ -298,7 +288,7 @@ def quarantine_track(
         qdir = os.path.join(root, QUARANTINE_DIR, table_name)
         try:
             os.makedirs(qdir, exist_ok=True)
-            dest = _free_path(qdir, os.path.basename(path))
+            dest = free_path(qdir, os.path.basename(path))
             shutil.move(path, dest)
         except OSError as e:
             logging.error(f"[quarantine] Could not move {path}: {e}; row left as is")
@@ -333,7 +323,7 @@ def retire_replaced_file(
     qdir = os.path.join(root, QUARANTINE_DIR, table_name, REPLACED_SUBDIR)
     try:
         os.makedirs(qdir, exist_ok=True)
-        dest = _free_path(qdir, os.path.basename(old_path))
+        dest = free_path(qdir, os.path.basename(old_path))
         shutil.move(old_path, dest)
     except OSError as e:
         logging.warning(f"[replace] Could not move replaced file {old_path}: {e}")
