@@ -243,25 +243,56 @@ def _free_path(directory: str, basename: str) -> str:
     return candidate
 
 
-def quarantine_track(conn: sqlite3.Connection, table_name: str, track_id: str) -> bool:
+def _inside(path: str, root: str) -> bool:
+    try:
+        real, real_root = os.path.realpath(path), os.path.realpath(root)
+        return os.path.commonpath([real, real_root]) == real_root
+    except ValueError:  # different drives / relative vs absolute
+        return False
+
+
+def _skip_quarantine(conn, table_name, track_id, path, reason) -> bool:
+    logging.warning(f"[quarantine] Skipped {track_id} ({path}): {reason}")
+    record_history(
+        conn, "quarantine_skipped", table_name=table_name, track_id=track_id,
+        path=path, reason=reason,
+    )
+    return False
+
+
+def quarantine_track(
+    conn: sqlite3.Connection, table_name: str, track_id: str, expected_path: str | None
+) -> bool:
     """Move a library file to <playlists_root>/.quarantine/<table>/ (never
     delete it) and put the row back to pending so the normal cycle
     downloads it again. The file's name goes to the track's _tried list so
     the same peer file is not simply fetched again. A missing file only
     resets the row. Daemon thread only. Returns False when nothing was done.
 
+    `expected_path` is the file the operator saw flagged. If the row points
+    elsewhere by now (re-downloaded, upgraded), or the file is outside the
+    playlists root, nothing happens and history records quarantine_skipped.
+
     To purge: inspect and delete <playlists_root>/.quarantine by hand.
     """
     row = get_track(conn, table_name, track_id)
     if not row or not row["downloaded"]:
         return False
-    check = get_file_check(conn, table_name, track_id) or {}
     path = row["path"]
+    if path != expected_path:
+        return _skip_quarantine(
+            conn, table_name, track_id, path,
+            f"file changed since it was flagged (was {expected_path})",
+        )
+    root = os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists")
+    check = get_file_check(conn, table_name, track_id) or {}
     dest = None
     if path and os.path.isfile(path):
-        qdir = os.path.join(
-            os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists"), QUARANTINE_DIR, table_name
-        )
+        if not _inside(path, root):
+            return _skip_quarantine(
+                conn, table_name, track_id, path, "file is outside the playlists folder"
+            )
+        qdir = os.path.join(root, QUARANTINE_DIR, table_name)
         try:
             os.makedirs(qdir, exist_ok=True)
             dest = _free_path(qdir, os.path.basename(path))

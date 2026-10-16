@@ -39,7 +39,7 @@ and CI all agree; the Makefile defaults to `python3.12`). Individual targets:
   findings rather than adding ignores.
 - `make typecheck` — mypy over `spotify_slsk/` (`ignore_missing_imports`,
   `check_untyped_defs`). Every public function is annotated; keep it that way.
-- `make test` — 630 tests. Fast (~5s); no network, no external services. The
+- `make test` — 638 tests. Fast (~5s); no network, no external services. The
   real-FLAC decode tests need the `flac` CLI (CI apt-installs it) and skip with
   a reason without it.
 - `make audit` — `pip-audit` against the pinned `requirements.txt`. Advisories
@@ -286,7 +286,11 @@ unnormalised.
     attempts or pause, its basename joins `_tried`, its `file_checks` row is
     dropped and history records `quarantined`. The quarantine dir is outside
     every `<root>/<table>` that `startup_check` indexes and the scan walks DB
-    rows, so nothing re-imports it. Purging is manual (README).
+    rows, so nothing re-imports it. Purging is manual (README). The request
+    carries the path the operator saw flagged: if the row points at another
+    file by the time the daemon runs, or the file resolves (realpath +
+    commonpath) outside the playlists root, nothing moves and history records
+    `quarantine_skipped` with the reason.
 
 Files enter via the shared `/downloads` volume, then move to `/playlists/<table>/` after tagging.
 

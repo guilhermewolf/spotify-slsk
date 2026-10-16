@@ -281,12 +281,12 @@ def _process_manual_grabs(conn):
 def _process_quarantines(conn: sqlite3.Connection) -> None:
     """Quarantine library files the operator flagged on /library-health.
     Runs before the playlists so the reset rows re-download this cycle."""
-    for table_name, track_id in runtime_state.pop_quarantines():
+    for table_name, track_id, path in runtime_state.pop_quarantines():
         if _shutdown.is_set():
             return
         _touch_heartbeat()
         try:
-            health.quarantine_track(conn, table_name, track_id)
+            health.quarantine_track(conn, table_name, track_id, path)
         except Exception:
             logging.exception(f"Quarantine failed for {track_id} in {table_name}")
 

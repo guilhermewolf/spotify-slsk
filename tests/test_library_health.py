@@ -215,7 +215,7 @@ class TestQuarantine:
         qdir.mkdir(parents=True)
         (qdir / "Wrong Song.mp3").write_bytes(b"older")
 
-        assert health.quarantine_track(conn, "pl_x", "t1") is True
+        assert health.quarantine_track(conn, "pl_x", "t1", str(f)) is True
 
         assert not f.exists()
         assert (qdir / "Wrong Song (2).mp3").read_bytes() == b"audio"
@@ -231,29 +231,48 @@ class TestQuarantine:
     def test_missing_file_only_resets(self, conn, sandbox_dirs):
         db.insert_track(conn, "pl_x", ("t1", "S", "A", "Alb"))
         db.update_download_status(conn, "t1", "pl_x", success=True, file_path="/nope/x.mp3")
-        assert health.quarantine_track(conn, "pl_x", "t1") is True
+        assert health.quarantine_track(conn, "pl_x", "t1", "/nope/x.mp3") is True
         assert db.get_track(conn, "pl_x", "t1")["status"] == "pending"
 
     def test_pending_row_and_failed_move_change_nothing(self, conn, sandbox_dirs, monkeypatch):
         _, pl = sandbox_dirs
         db.insert_track(conn, "pl_x", ("p1", "S", "A", "Alb"))
-        assert health.quarantine_track(conn, "pl_x", "p1") is False
+        assert health.quarantine_track(conn, "pl_x", "p1", None) is False
         f = _add(conn, pl, "t1", "S", "A", "x.mp3")
 
         def _fail(*a):
             raise OSError("read-only")
 
         monkeypatch.setattr(health.shutil, "move", _fail)
-        assert health.quarantine_track(conn, "pl_x", "t1") is False
+        assert health.quarantine_track(conn, "pl_x", "t1", str(f)) is False
         assert f.exists() and db.get_track(conn, "pl_x", "t1")["downloaded"] is True
+
+    def test_row_changed_since_flagged_is_skipped(self, conn, sandbox_dirs):
+        _, pl = sandbox_dirs
+        new = _add(conn, pl, "t1", "S", "A", "new.mp3")  # re-downloaded meanwhile
+        assert health.quarantine_track(conn, "pl_x", "t1", str(pl / "old.mp3")) is False
+        assert new.exists() and db.get_track(conn, "pl_x", "t1")["downloaded"] is True
+        skipped = db.list_history(conn, event="quarantine_skipped")[0]["data"]
+        assert skipped["reason"].startswith("file changed since it was flagged")
+
+    def test_file_outside_the_playlists_root_is_never_moved(self, conn, sandbox_dirs, tmp_path):
+        outside = tmp_path / "elsewhere.mp3"
+        outside.write_bytes(b"audio")
+        db.insert_track(conn, "pl_x", ("t1", "S", "A", "Alb"))
+        db.update_download_status(conn, "t1", "pl_x", success=True, file_path=str(outside))
+        assert health.quarantine_track(conn, "pl_x", "t1", str(outside)) is False
+        assert outside.exists() and db.get_track(conn, "pl_x", "t1")["downloaded"] is True
+        assert db.list_history(conn, event="quarantine_skipped")[0]["data"]["reason"] == (
+            "file is outside the playlists folder"
+        )
 
     def test_daemon_drains_the_ui_queue(self, conn, sandbox_dirs):
         from spotify_slsk import runtime_state
 
         _, pl = sandbox_dirs
         f = _add(conn, pl, "t1", "S", "A", "x.mp3")
-        runtime_state.enqueue_quarantine("pl_x", "t1")
-        runtime_state.enqueue_quarantine("pl_x", "t1")  # double click
+        runtime_state.enqueue_quarantine("pl_x", "t1", str(f))
+        runtime_state.enqueue_quarantine("pl_x", "t1", str(f))  # double click
         daemon._process_quarantines(conn)
         assert not f.exists()
         assert runtime_state.pop_quarantines() == []

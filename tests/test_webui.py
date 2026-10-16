@@ -939,10 +939,11 @@ class TestLibraryHealthPage:
         self._seed(app_tmp, tmp_path)
         runtime_state.pop_quarantines()
         post(client, "/library-health/quarantine", {"only": "pid1:t1"})
-        assert runtime_state.pop_quarantines() == [("pl_x", "t1")]
+        flagged = str(tmp_path / "x.flac")
+        assert runtime_state.pop_quarantines() == [("pl_x", "t1", flagged)]
         assert (tmp_path / "x.flac").exists()
         post(client, "/library-health/quarantine", {"tracks": ["pid1:t1", "bogus:t9"]})
-        assert runtime_state.pop_quarantines() == [("pl_x", "t1")]
+        assert runtime_state.pop_quarantines() == [("pl_x", "t1", flagged)]
         r = post(client, "/library-health/quarantine", {}, follow_redirects=True)
         assert b"No tracks selected" in r.data
 

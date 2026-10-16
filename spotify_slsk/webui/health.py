@@ -117,7 +117,13 @@ def _targets() -> list[tuple[str, str]]:
 def library_quarantine() -> ResponseReturnValue:
     targets = _targets()
     for table_name, track_id in targets:
-        runtime_state.enqueue_quarantine(table_name, track_id)
+        # The path the operator saw flagged: the daemon refuses to act if the
+        # row points at another file by the time it runs.
+        check = db.get_file_check(g.conn, table_name, track_id)
+        track = db.get_track(g.conn, table_name, track_id) or {}
+        runtime_state.enqueue_quarantine(
+            table_name, track_id, check["path"] if check else track.get("path")
+        )
     if targets:
         wake_daemon()
         flash(
