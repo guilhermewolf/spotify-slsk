@@ -39,23 +39,43 @@ bp = Blueprint("queue", __name__)
 QUEUE_HTTP_TIMEOUT = 5.0
 
 
-def _track_index() -> dict[tuple[str, str], tuple[str, str]]:
-    """(username, peer filename) -> (playlist_id, track_id), from the
-    daemon's current transfer and recent grab/failure history."""
-    index: dict[tuple[str, str], tuple[str, str]] = {}
+def _keys(username: str | None, filename: str | None, size: Any = None) -> list[tuple]:
+    """Lookup keys for one transfer, most specific first: the full peer path
+    (separators and case folded - slskd and the search response need not
+    agree on either), then basename + size."""
+    user = (username or "").casefold()
+    path = (filename or "").replace("/", "\\").casefold()
+    keys: list[tuple] = [(user, path)]
+    if size:
+        keys.append((user, remote_basename(path), int(size)))
+    return keys
+
+
+def _track_index() -> dict[tuple, tuple[str, str]]:
+    """Transfer key (see _keys) -> (table_name, track_id), from the daemon's
+    own enqueues (current and recent, this process) and from grab/failure
+    history (any process, survives restarts). Later sources win."""
+    tables = {p["playlist_id"]: p["table_name"] for p in db.list_playlists(g.conn)}
+    index: dict[tuple, tuple[str, str]] = {}
     for event in ("download_failed", "grabbed"):  # grabbed wins
         for h in reversed(db.list_history(g.conn, event=event, limit=500)):
-            user, filename = h["data"].get("username"), h["data"].get("filename")
-            if user and filename and h["playlist_id"] and h["track_id"]:
-                index[(user, filename)] = (h["playlist_id"], h["track_id"])
+            d = h["data"]
+            table = tables.get(h["playlist_id"] or "")
+            if d.get("username") and d.get("filename") and table and h["track_id"]:
+                for key in _keys(d["username"], d["filename"], d.get("size")):
+                    index[key] = (table, h["track_id"])
     current = runtime_state.get_current_transfer()
-    if current:
-        pid = {p["table_name"]: p["playlist_id"] for p in db.list_playlists(g.conn)}.get(
-            current["table_name"]
-        )
-        if pid:
-            index[(current["username"], current["filename"])] = (pid, current["track_id"])
+    for t in runtime_state.recent_transfers() + ([current] if current else []):
+        for key in _keys(t.get("username"), t.get("filename"), t.get("size")):
+            index[key] = (t["table_name"], t["track_id"])
     return index
+
+
+def _lookup(index: dict[tuple, tuple[str, str]], t: Transfer) -> tuple[str, str] | None:
+    for key in _keys(t.username, t.filename, t.size):
+        if key in index:
+            return index[key]
+    return None
 
 
 def _transfers() -> tuple[list[dict[str, Any]], str | None]:
@@ -64,7 +84,7 @@ def _transfers() -> tuple[list[dict[str, Any]], str | None]:
     except Exception as e:
         logging.debug("Queue page could not read slskd", exc_info=True)
         return [], f"slskd unavailable ({type(e).__name__})"
-    playlists = {p["playlist_id"]: p for p in db.list_playlists(g.conn)}
+    playlists = {p["table_name"]: p for p in db.list_playlists(g.conn)}
     index = _track_index()
     rows = []
     for t in Transfer.list_from_all_json(raw):
@@ -75,11 +95,11 @@ def _transfers() -> tuple[list[dict[str, Any]], str | None]:
             "percent": t.percent_complete or 0,
             "eta": t.eta_seconds,
         }
-        link = index.get((t.username or "", t.filename))
+        link = _lookup(index, t)
         if link and link[0] in playlists:
             pl = playlists[link[0]]
-            track = db.get_track(g.conn, pl["table_name"], link[1])
-            row.update(playlist_id=link[0], playlist_name=pl["name"], track_id=link[1],
+            track = db.get_track(g.conn, link[0], link[1])
+            row.update(playlist_id=pl["playlist_id"], playlist_name=pl["name"], track_id=link[1],
                        track_name=f"{track['name']} — {track['artists']}" if track else link[1])
         rows.append(row)
     # Active first, then by state (InProgress before Queued), newest-looking last.
@@ -163,7 +183,7 @@ def queue_cancel() -> ResponseReturnValue:
         return _after_action()
     name = remote_basename(transfer.filename) or transfer_id
     if blocklist and transfer.filename:
-        link = _track_index().get((username, transfer.filename))
+        link = _lookup(_track_index(), transfer)
         db.add_blocklist(
             g.conn, username, transfer.filename, transfer.size,
             "cancelled and blocklisted from the queue page", link[1] if link else None,

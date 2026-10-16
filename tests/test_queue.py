@@ -148,7 +148,8 @@ def test_grab_publishes_the_current_transfer_only_while_it_runs(monkeypatch, tmp
     cand = {"user": "peer1", "filename": FILE, "size": 1}
     assert transfers.grab_candidate(cand, conn, "pl_x", "t1") is None
     conn.close()
-    assert seen == [{"username": "peer1", "filename": FILE, "table_name": "pl_x", "track_id": "t1"}]
+    assert seen == [{"username": "peer1", "filename": FILE, "size": 1,
+                     "table_name": "pl_x", "track_id": "t1"}]
     assert runtime_state.get_current_transfer() is None
 
 
@@ -165,3 +166,34 @@ def test_cancel_only_a_transfer_slskd_lists_for_that_user(client, fake):  # noqa
     assert b"no longer in slskd" in r.data
     post(client, "/queue/cancel", {"username": "someone-else", "id": TX})
     assert fake.cancelled == []
+
+
+def test_daemon_enqueues_are_joined_after_the_wait_ended(seeded, client, fake):  # noqa: F811
+    """Live: the Track column showed "—" for the daemon's own transfers.
+    The daemon's enqueue is remembered after its wait ends, and the join
+    tolerates separator/case differences between slskd and the search."""
+    runtime_state.set_current_transfer({
+        "username": "Peer1", "filename": FILE.replace("\\", "/").upper(),
+        "size": 40_000_000, "table_name": "pl_x", "track_id": "t1",
+    })
+    runtime_state.set_current_transfer(None)  # grab_candidate returned
+    try:
+        assert "Song — Artist" in client.get("/queue").data.decode()
+    finally:
+        runtime_state._recent_transfers.clear()
+
+
+def test_history_join_falls_back_to_basename_and_size(seeded, client, fake):  # noqa: F811
+    conn = db.create_connection(seeded.config["DB_PATH"])
+    db.record_history(conn, "grabbed", table_name="pl_x", track_id="t1", username="peer1",
+                      filename="Other\\Folder\\01 - Song.flac", size=40_000_000)
+    conn.close()
+    assert "Song — Artist" in client.get("/queue").data.decode()
+
+
+def test_unrelated_transfer_stays_unlinked(seeded, client, fake):  # noqa: F811
+    conn = db.create_connection(seeded.config["DB_PATH"])
+    db.record_history(conn, "grabbed", table_name="pl_x", track_id="t1", username="peer1",
+                      filename="Other\\01 - Song.flac", size=123)  # same name, other size
+    conn.close()
+    assert "Song — Artist" not in client.get("/queue").data.decode()

@@ -88,7 +88,7 @@ def grab_candidate(
     )
     runtime_state.set_current_transfer({
         "username": candidate["user"], "filename": candidate["filename"],
-        "table_name": playlist_name, "track_id": track_id,
+        "size": candidate.get("size"), "table_name": playlist_name, "track_id": track_id,
     })
     try:
         slskd_client.get_client().transfers.enqueue(

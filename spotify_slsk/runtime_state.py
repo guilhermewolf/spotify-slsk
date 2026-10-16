@@ -398,10 +398,23 @@ _transfer_lock = threading.Lock()
 _current_transfer: dict | None = None
 
 
+# Every enqueue the daemon made recently (newest last), so a transfer that
+# finished or was left queued in slskd can still be named after the daemon
+# moved on. Bounded; per-process like the rest of this module.
+_recent_transfers: deque = deque(maxlen=500)
+
+
 def set_current_transfer(info: dict | None) -> None:
     global _current_transfer
     with _transfer_lock:
         _current_transfer = dict(info) if info else None
+        if info:
+            _recent_transfers.append(dict(info))
+
+
+def recent_transfers() -> list[dict]:
+    with _transfer_lock:
+        return [dict(t) for t in _recent_transfers]
 
 
 def get_current_transfer() -> dict | None:
