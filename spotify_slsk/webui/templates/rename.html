@@ -11,8 +11,8 @@
       their names until you rename them here. Preview only — nothing changes until you
       apply. Files stay in their playlist folder and are never overwritten.
     </p>
-    <p>Template: <code>{{ template }}</code>
-      · <a href="{{ url_for('settings.settings') }}#FILE_NAME_TEMPLATE">change it on Settings</a></p>
+    <p class="subtle">Template <code>{{ template }}</code>.
+      <a href="{{ url_for('settings.settings') }}#FILE_NAME_TEMPLATE">Change it on Settings</a></p>
     {% if queued %}<p class="subtle">{{ queued }} rename(s) waiting for the daemon.</p>{% endif %}
   </div>
 </div>
@@ -40,14 +40,14 @@
   <article>
     <header>
       <strong>{{ pl.name }}</strong>
-      <span class="subtle">{{ pl.renames|length }} to rename{% if pl.skipped %} · {{ pl.skipped }} skipped (missing or outside the playlists folder){% endif %}</span>
+      <div class="subtle">{{ pl.renames|length }} to rename{% if pl.skipped %}, {{ pl.skipped }} skipped (missing or outside the playlists folder){% endif %}</div>
     </header>
     {% if pl.renames %}
     <div class="table-wrap">
       <table class="track-table">
         <thead>
           <tr>
-            <th scope="col"><span class="visually-hidden">Select</span></th>
+            <th scope="col" class="col-check"><span class="visually-hidden">Select</span></th>
             <th scope="col">Current name</th>
             <th scope="col">New name</th>
           </tr>
@@ -57,8 +57,8 @@
           <tr>
             <td><input type="checkbox" name="tracks" value="{{ pl.playlist_id }}:{{ item.id }}" checked
                        aria-label="Rename {{ item.name }}"></td>
-            <td><code>{{ item.old_name }}</code></td>
-            <td><code>{{ item.new_name }}</code>
+            <td class="wrap-anywhere"><code>{{ item.old_name }}</code></td>
+            <td class="wrap-anywhere"><code>{{ item.new_name }}</code>
               {% if item.collision %}<div class="subtle">name taken or planned twice: will get a " (2)" suffix</div>{% endif %}</td>
           </tr>
         {% endfor %}
@@ -70,8 +70,8 @@
     {% endif %}
   </article>
   {% endfor %}
-  <button type="submit" style="width:auto">Apply rename…</button>
-  <small class="subtle">You confirm on the next page.</small>
+  <div class="save-bar"><small class="subtle">Only ticked files are renamed. You confirm on the next page.</small>
+  <button type="submit">Apply rename…</button></div>
 </form>
 {% endif %}
 

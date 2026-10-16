@@ -4,18 +4,18 @@
 {% block content %}
 
 {% set activity = activity if activity is defined else None %}
-<div class="page-head"><div><h1>Live logs</h1></div></div>
-<p class="subtle">In-memory ring buffer (last {{ entries|length }} of up to 2000). Polls every 2 seconds.</p>
+<div class="page-head"><div><h1>Live logs</h1>
+<p class="subtle">In-memory ring buffer (last {{ entries|length }} of up to 2000). Polls every 2 seconds.</p></div></div>
 
 <div class="log-controls">
   <label>
-    <input type="checkbox" id="log-autoscroll" checked> auto-scroll
+    <input type="checkbox" id="log-autoscroll" checked> Auto-scroll
   </label>
   <label>
-    <input type="checkbox" id="log-pause"> pause
+    <input type="checkbox" id="log-pause"> Pause
   </label>
   <label>
-    Filter:
+    Level
     <select id="log-filter">
       <option value="">all</option>
       <option value="DEBUG">debug</option>

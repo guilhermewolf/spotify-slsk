@@ -48,9 +48,9 @@
           <div class="subtle">{{ r.playlist_name }}</div>
           {% else %}<span class="subtle">—</span>{% endif %}
         </td>
-        <td class="nowrap">{{ t.state }}</td>
+        <td class="nowrap"><span class="badge badge-{{ 'downloaded' if 'Succeeded' in t.state else ('failed' if r.done else ('active' if 'InProgress' in t.state else 'pending')) }}">{{ t.state }}</span></td>
         <td class="num">
-          <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+          <div class="progress thin{{ ' is-active' if not r.done }}" role="progressbar" aria-valuemin="0" aria-valuemax="100"
                aria-valuenow="{{ r.percent | round | int }}" aria-label="{{ r.basename }} progress">
             <div class="progress-bar" style="width: {{ r.percent | round | int }}%"></div>
           </div>
@@ -77,7 +77,7 @@
               <input type="hidden" name="username" value="{{ t.username }}">
               <input type="hidden" name="id" value="{{ t.id }}">
               <input type="hidden" name="blocklist" value="1">
-              <button type="submit" class="secondary outline">Cancel + blocklist</button>
+              <button type="submit" class="secondary outline danger" title="Cancel and blocklist this peer file so it is never tried again">Cancel + block</button>
             </form>
           </div>
           {% endif %}
@@ -90,9 +90,9 @@
 {% endif %}
 
 {% for label, items in pending.items() if items %}
-<article>
-  <header><strong>{{ label }}</strong> <span class="subtle">· {{ items | length }} waiting for the daemon</span></header>
-  <ul>
+<article class="section">
+  <header><strong>{{ label }}</strong> <div class="subtle">{{ items | length }} waiting for the daemon</div></header>
+  <ul class="plain-list">
     {% for item in items[:50] %}
     <li>{{ item.track }}{% if item.detail %} <span class="subtle">— {{ item.detail }}</span>{% endif %}</li>
     {% endfor %}

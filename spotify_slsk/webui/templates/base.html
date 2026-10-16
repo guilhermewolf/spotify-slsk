@@ -4,106 +4,131 @@
   <meta charset="utf-8">
   <title>{% block title %}spotify-slsk{% endblock %}</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" href="data:,">
   <!-- Self-hosted (Pico 2.0.6, htmx 1.9.12): a compromised CDN would get to
        drive this UI's unauthenticated mutating routes, and self-hosting is
        what lets the CSP stay at script-src 'self'. -->
   <link rel="stylesheet" href="{{ url_for('static', filename='pico.classless.min.css') }}">
   <script src="{{ url_for('static', filename='htmx.min.js') }}" defer></script>
   <script src="{{ url_for('static', filename='toast.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='shell.js') }}" defer></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
   <!-- Not deferred: applies the stored theme before first paint. -->
   <script src="{{ url_for('static', filename='theme.js') }}"></script>
 </head>
-<body>
+<body class="{% block body_class %}{% endblock %}">
   <!-- Keyboard users shouldn't have to tab through the nav on every page. -->
   <a class="skip-link" href="#main">Skip to content</a>
 
-  <header class="site-header">
-    <nav class="site-nav" aria-label="Primary">
-      <a class="brand" href="{{ url_for('playlists.dashboard') }}">
-        <span class="brand-mark" aria-hidden="true"></span>spotify-slsk
-      </a>
-      <ul class="nav-links">
-        <li>
-          <a href="{{ url_for('playlists.dashboard') }}"
-             {% if active_page == 'dashboard' %}aria-current="page"{% endif %}>Dashboard</a>
-        </li>
-        <li>
-          <a href="{{ url_for('wanted.wanted_page') }}"
-             {% if active_page == 'wanted' %}aria-current="page"{% endif %}>Wanted</a>
-        </li>
-        <li>
-          <a href="{{ url_for('queue.queue_page') }}"
-             {% if active_page == 'queue' %}aria-current="page"{% endif %}>Queue</a>
-        </li>
-        <li>
-          <a href="{{ url_for('wanted.history_page') }}"
-             {% if active_page == 'history' %}aria-current="page"{% endif %}>History</a>
-        </li>
-        <li>
-          <a href="{{ url_for('wanted.blocklist_page') }}"
-             {% if active_page == 'blocklist' %}aria-current="page"{% endif %}>Blocklist</a>
-        </li>
-        <li>
-          <a href="{{ url_for('health.library_health') }}"
-             {% if active_page == 'health' %}aria-current="page"{% endif %}>Library health</a>
-        </li>
-        <li>
-          <a href="{{ url_for('library.rename_page') }}"
-             {% if active_page == 'rename' %}aria-current="page"{% endif %}>Rename</a>
-        </li>
-        <li>
-          <a href="{{ url_for('system.logs_page') }}"
-             {% if active_page == 'logs' %}aria-current="page"{% endif %}>Logs</a>
-        </li>
-        <li>
-          <a href="{{ url_for('system.status_page') }}"
-             {% if active_page == 'system' %}aria-current="page"{% endif %}>System</a>
-        </li>
-        <li>
-          <a href="{{ url_for('settings.settings') }}"
-             {% if active_page == 'settings' %}aria-current="page"{% endif %}>Settings</a>
-        </li>
-        {% if auth_user %}
-        <li>
-          <form method="POST" action="{{ url_for('auth.logout') }}" class="inline-form">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="secondary outline" title="Logged in as {{ auth_user }}">Log out</button>
-          </form>
-        </li>
+{% block body %}
+  {# Navigation: (group, [(label, endpoint, is_current)]). #}
+  {% set page = active_page if active_page is defined else '' %}
+  {% set tab = system_tab if system_tab is defined else '' %}
+  {% set nav = [
+    ('Library', [
+      ('Dashboard', 'playlists.dashboard', page == 'dashboard'),
+      ('Wanted', 'wanted.wanted_page', page == 'wanted'),
+      ('Library health', 'health.library_health', page == 'health'),
+      ('Rename files', 'library.rename_page', page == 'rename'),
+    ]),
+    ('Activity', [
+      ('Queue', 'queue.queue_page', page == 'queue'),
+      ('History', 'wanted.history_page', page == 'history'),
+      ('Blocklist', 'wanted.blocklist_page', page == 'blocklist'),
+    ]),
+    ('System', [
+      ('Status', 'system.status_page', page == 'system' and tab != 'tasks'),
+      ('Tasks', 'system.tasks_page', page == 'system' and tab == 'tasks'),
+      ('Logs', 'system.logs_page', page == 'logs'),
+      ('Settings', 'settings.settings', page == 'settings'),
+    ]),
+  ] %}
+  {# Mobile menu, no JS: "Menu" targets this fixed (so the page never jumps)
+     anchor and CSS opens the menu with #menu:target ~ .shell. #}
+  <span id="menu" class="menu-anchor" aria-hidden="true"></span>
+  <div class="shell">
+    <header class="sidebar">
+      <div class="sidebar-top">
+        <a class="brand" href="{{ url_for('playlists.dashboard') }}">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>spotify-slsk
+        </a>
+        {% if shell_health is defined and shell_health %}
+        <a class="health health-compact health-{{ shell_health.level }}"
+           href="{{ url_for('system.status_page') }}" title="{{ shell_health.title }}">
+          <span class="dot" aria-hidden="true"></span>
+          <span class="visually-hidden">{{ shell_health.label }}</span>
+        </a>
         {% endif %}
-        <li>
-          <button type="button" class="theme-toggle" id="theme-toggle"
-                  title="Toggle dark mode" aria-label="Toggle dark mode">🌓</button>
-        </li>
-      </ul>
-      {% if health is defined and health %}
-      <a class="health health-{{ 'ok' if health.ok else 'bad' }}"
-         href="{{ url_for('system.healthz') }}"
-         title="{{ health.reason }}">
-        <span class="dot" aria-hidden="true"></span>
-        <span>{{ 'Healthy' if health.ok else 'Degraded' }}</span>
-      </a>
-      {% endif %}
-    </nav>
-  </header>
+        <a class="menu-toggle" href="#menu" aria-controls="site-menu">Menu</a>
+      </div>
 
-  {% with messages = get_flashed_messages(with_categories=true) %}
-    {% if messages %}
-    <!-- role=status so a screen reader announces the result of an action. -->
-    <div class="flashes" role="status" aria-live="polite">
-      {% for category, message in messages %}
-        <p class="flash flash-{{ category }}">{{ message }}</p>
-      {% endfor %}
+      <div class="site-menu" id="site-menu">
+        <a class="menu-close" href="#">Close menu</a>
+        <nav class="site-nav" aria-label="Primary">
+          {% for group, items in nav %}
+          <div class="nav-group">
+            <p class="nav-heading" id="nav-{{ group|lower }}">{{ group }}</p>
+            <ul aria-labelledby="nav-{{ group|lower }}">
+              {% for label, endpoint, current in items %}
+              <li><a href="{{ url_for(endpoint) }}"{% if current %} aria-current="page"{% endif %}>{{ label }}</a></li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endfor %}
+        </nav>
+
+        <div class="shell-status">
+          {% if shell_health is defined and shell_health %}
+          <a class="health health-{{ shell_health.level }}"
+             href="{{ url_for('system.status_page') }}" title="{{ shell_health.title }}">
+            <span class="dot" aria-hidden="true"></span>
+            <span>{{ shell_health.label }}</span>
+          </a>
+          {% endif %}
+          {% if shell_activity is defined and shell_activity %}
+          <p class="shell-activity" id="shell-activity" data-phase="{{ shell_activity.phase }}"
+             data-src="{{ url_for('system.activity_json') }}" data-labels="{{ PHASE_LABELS|tojson|forceescape }}">
+            <span class="dot" aria-hidden="true"></span>
+            <span class="text" title="{{ shell_activity.detail or '' }}">
+              {{- shell_activity.phase|phase_label -}}
+              {%- if shell_activity.playlist_name %}: {{ shell_activity.playlist_name }}{% endif -%}
+            </span>
+          </p>
+          {% endif %}
+          <div class="shell-tools">
+            <button type="button" class="theme-toggle" id="theme-toggle"
+                    title="Toggle dark mode" aria-label="Toggle dark mode">Theme</button>
+            {% if auth_user %}
+            <form method="POST" action="{{ url_for('auth.logout') }}" class="inline-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" class="secondary outline small" title="Logged in as {{ auth_user }}">Log out</button>
+            </form>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <div class="content">
+      <main id="main">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+          {% if messages %}
+          <!-- role=status so a screen reader announces the result of an action. -->
+          <div class="flashes" role="status" aria-live="polite">
+            {% for category, message in messages %}
+              <p class="flash flash-{{ category }}">{{ message }}</p>
+            {% endfor %}
+          </div>
+          {% endif %}
+        {% endwith %}
+        {% block content %}{% endblock %}
+      </main>
     </div>
-    {% endif %}
-  {% endwith %}
+  </div>
+{% endblock %}
 
   <!-- Toasts for htmx actions (static/toast.js); classic POSTs use the flashes above. -->
   <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
-
-  <main id="main">
-    {% block content %}{% endblock %}
-  </main>
 </body>
 </html>

@@ -4,7 +4,7 @@
    selected banner removed hx-trigger, so the banner froze after 5s. #}
 <div hx-get="{{ url_for('playlists.dashboard') }}" hx-trigger="every 5s" hx-swap="innerHTML" hx-select="#activity-banner">
 <div id="activity-banner" class="activity {{ activity.phase }}">
-  <span class="phase">{{ activity.phase|replace('_', ' ') }}</span>
+  <span class="phase">{{ activity.phase|phase_label }}</span>
   {% if activity.playlist_name %}
     <a href="{{ url_for('playlists.playlist_detail', playlist_id=activity.playlist_id) }}"><strong>{{ activity.playlist_name }}</strong></a>
   {% endif %}

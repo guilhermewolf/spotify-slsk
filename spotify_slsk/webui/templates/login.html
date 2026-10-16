@@ -1,16 +1,29 @@
 {% extends "base.html" %}
 {% block title %}Log in · spotify-slsk{% endblock %}
-{% block content %}
-<article class="login-card">
-  <header><strong>Log in</strong></header>
-  <form method="POST" action="{{ url_for('auth.login') }}">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <input type="hidden" name="next" value="{{ next }}">
-    <label for="username">Username</label>
-    <input type="text" id="username" name="username" autocomplete="username" required autofocus>
-    <label for="password">Password</label>
-    <input type="password" id="password" name="password" autocomplete="current-password" required>
-    <button type="submit">Log in</button>
-  </form>
-</article>
+{% block body_class %}login-page{% endblock %}
+{# No sidebar: nothing behind the login is reachable yet. #}
+{% block body %}
+<main id="main" class="login-wrap">
+  <article class="login-card">
+    <span class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>spotify-slsk</span>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+      <div class="flashes" role="status" aria-live="polite">
+        {% for category, message in messages %}
+          <p class="flash flash-{{ category }}">{{ message }}</p>
+        {% endfor %}
+      </div>
+      {% endif %}
+    {% endwith %}
+    <form method="POST" action="{{ url_for('auth.login') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="next" value="{{ next }}">
+      <label for="username">Username</label>
+      <input type="text" id="username" name="username" autocomplete="username" required autofocus>
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" autocomplete="current-password" required>
+      <button type="submit">Log in</button>
+    </form>
+  </article>
+</main>
 {% endblock %}

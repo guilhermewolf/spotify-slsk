@@ -15,11 +15,11 @@
 
 <form class="filter-form" method="POST" action="{{ url_for('wanted.blocklist_ban_user') }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-  <input type="text" name="username" required maxlength="200" style="flex:1"
+  <input type="text" name="username" required maxlength="200"
          aria-label="Soulseek username" placeholder="Soulseek username to ban">
-  <input type="text" name="reason" maxlength="200" style="flex:1"
+  <input type="text" name="reason" maxlength="200"
          aria-label="Reason (optional)" placeholder="Reason (optional)">
-  <button type="submit" class="secondary outline">Ban user</button>
+  <button type="submit" class="secondary outline danger">Ban user</button>
 </form>
 
 {% if entries %}
@@ -31,22 +31,22 @@
         <th scope="col">File</th>
         <th scope="col">Reason</th>
         <th scope="col">Added</th>
-        <th scope="col">Actions</th>
+        <th scope="col" class="actions-col"><span class="visually-hidden">Actions</span></th>
       </tr>
     </thead>
     <tbody>
     {% for e in entries %}
       <tr>
         <td class="nowrap">{{ e.username }}</td>
-        <td>
+        <td class="file-cell" title="{{ e.filename or '' }}">
           {% if e.filename %}<code>{{ e.filename }}</code>
           {% if e.size %}<div class="subtle">{{ e.size|human_bytes }}</div>{% endif %}
           {% else %}<span class="badge badge-suspended">whole user</span>{% endif %}
         </td>
         <td>{{ e.reason or '—' }}</td>
         <td class="nowrap subtle">{{ e.created_at }}</td>
-        <td class="nowrap">
-          <form method="POST" action="{{ url_for('wanted.blocklist_delete', entry_id=e.id) }}">
+        <td class="actions-col">
+          <form class="inline-form" method="POST" action="{{ url_for('wanted.blocklist_delete', entry_id=e.id) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="secondary outline">Remove</button>
           </form>

@@ -28,10 +28,20 @@ import threading
 from flask import Flask, abort, g, request, session
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from .. import db
+from .. import db, runtime_state
 from ..utils import fmt_duration
 from . import auth, health, library, playlists, queue, settings, system, tracks, wanted
-from .helpers import fmt_age, fmt_interval, fmt_ts, health_snapshot, human_bytes
+from .helpers import (
+    PHASE_LABELS,
+    fmt_age,
+    fmt_interval,
+    fmt_ts,
+    group_by_reason,
+    health_snapshot,
+    human_bytes,
+    phase_label,
+    shell_health,
+)
 
 # Reserved settings key holding the generated Flask secret. It is not in
 # SETTINGS_SPEC, so it never appears on the settings page.
@@ -141,6 +151,9 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
     app.jinja_env.filters["ts"] = fmt_ts
     app.jinja_env.filters["interval"] = fmt_interval
     app.jinja_env.filters["age"] = fmt_age
+    app.jinja_env.filters["by_reason"] = group_by_reason
+    app.jinja_env.filters["phase_label"] = phase_label
+    app.jinja_env.globals["PHASE_LABELS"] = PHASE_LABELS
     app.jinja_env.filters["duration_ms"] = (
         lambda ms: fmt_duration(ms / 1000) if ms else "—"
     )
@@ -200,7 +213,15 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
     def _inject_health():
         # Every page shows the daemon's status in the header, so it must not
         # depend on a single route remembering to pass it.
-        return {"health": health_snapshot(), "auth_user": auth.current_user()}
+        # The sidebar also shows what the daemon is doing (static/shell.js
+        # keeps it fresh from /activity.json); an in-process dict read.
+        snapshot = health_snapshot()
+        return {
+            "health": snapshot,
+            "shell_health": shell_health(snapshot),
+            "auth_user": auth.current_user(),
+            "shell_activity": runtime_state.get_activity(),
+        }
 
     return app
 

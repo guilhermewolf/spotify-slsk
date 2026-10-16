@@ -7,7 +7,7 @@ import time
 
 from flask import current_app, flash, g, request
 
-from .. import db
+from .. import db, healthchecks
 
 
 def dir_size(path: str) -> int:
@@ -63,6 +63,66 @@ def human_bytes(n: float) -> str:
         if n < 1024:
             return f"{n:.1f} {unit}"
     return f"{n:.1f} PiB"
+
+
+# Daemon phases (runtime_state.set_activity) as people read them. The
+# sidebar's shell.js gets this same map via a data attribute.
+PHASE_LABELS = {
+    "starting": "Starting",
+    "waiting_slskd": "Waiting for slskd",
+    "reconciling": "Matching files on disk",
+    "idle": "Idle",
+    "syncing": "Syncing from Spotify",
+    "downloading": "Downloading",
+    "upgrading": "Looking for upgrades",
+    "scanning": "Scanning library",
+    "task": "Running a task",
+    "shutting_down": "Shutting down",
+}
+
+
+def phase_label(phase: str | None) -> str:
+    """'waiting_slskd' -> 'Waiting for slskd'; an unknown phase keeps its
+    wording ('some_phase' -> 'Some phase'), never title case."""
+    phase = phase or "idle"
+    return PHASE_LABELS.get(phase) or phase.replace("_", " ").capitalize()
+
+
+def shell_health(snapshot: dict) -> dict:
+    """The sidebar badge: the worst of the structured checks (the same list
+    as /system/status), with a stale heartbeat or wrong schema from
+    `snapshot` counted as an error. Cheap: local checks are a stat() or a
+    settings read each, and the slskd/Spotify results are the daemon's
+    cached ones - nothing remote happens per request."""
+    try:
+        checks = healthchecks.collect(g.conn)
+    except Exception as e:  # a broken check must not take the page down
+        checks = [{"name": "checks", "status": healthchecks.ERROR, "message": type(e).__name__}]
+    bad = [c for c in checks if c["status"] != healthchecks.OK]
+    if not snapshot.get("ok") and not any(c["name"] == "heartbeat" for c in bad):
+        bad.append({"name": "daemon", "status": healthchecks.ERROR,
+                    "message": snapshot.get("reason", "")})
+    if any(c["status"] == healthchecks.ERROR for c in bad):
+        level, word = "error", "Problem"
+    elif bad:
+        level, word = "warn", "Attention"
+    else:
+        level, word = "ok", "Healthy"
+    return {
+        "level": level,
+        "label": f"{word} ({len(bad)})" if bad else word,
+        "title": "; ".join(f"{c['name']}: {c['message']}" for c in bad)
+        or snapshot.get("reason", ""),
+    }
+
+
+def group_by_reason(candidates: list[dict]) -> list[tuple[str, list[dict]]]:
+    """Rejected search results as (reason, files), biggest group first, so
+    142 "format not allowed: .mp3" rows read as one line, not 142."""
+    groups: dict[str, list[dict]] = {}
+    for c in candidates:
+        groups.setdefault(c.get("reason") or "rejected", []).append(c)
+    return sorted(groups.items(), key=lambda kv: -len(kv[1]))
 
 
 def fmt_ts(epoch: float | None) -> str:

@@ -1,35 +1,6 @@
 {% extends "base.html" %}
 {% set active_page = 'system' %}
-{% block title %}Status · spotify-slsk<article id="backups">
-  <header>
-    <strong>Backups</strong>
-    <div class="subtle"><code>{{ backup_dir }}</code> · daily, newest first; retention is BACKUP_RETENTION on Settings</div>
-  </header>
-  <form method="POST" action="{{ url_for('system.task_run', name='db_backup') }}"
-        hx-post="{{ url_for('system.task_run', name='db_backup') }}" hx-target="#backups"
-        hx-select="#backups" hx-swap="outerHTML">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <input type="hidden" name="next" value="status">
-    <button type="submit" class="secondary outline" style="width:auto" {% if backup_queued %}disabled{% endif %}>
-      {{ 'Backup queued' if backup_queued else 'Backup now' }}
-    </button>
-  </form>
-  {% if backups %}
-  <div class="table-wrap">
-    <table class="track-table">
-      <thead><tr><th scope="col">File</th><th scope="col">Taken</th><th scope="col" class="num">Size</th></tr></thead>
-      <tbody>
-      {% for b in backups %}
-        <tr><td><code>{{ b.name }}</code></td><td>{{ b.mtime | ts }}</td><td class="num">{{ b.size | human_bytes }}</td></tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </div>
-  {% else %}
-  <p class="subtle">No backups yet.</p>
-  {% endif %}
-</article>
-{% endblock %}
+{% block title %}Status · spotify-slsk{% endblock %}
 {% block content %}
 
 <div class="page-head">
@@ -45,7 +16,8 @@
 {% include "_system_tabs.html" %}
 
 <article>
-  <header><strong>Health checks</strong></header>
+  <header><strong>Health checks</strong>
+    <div class="subtle">{{ checks|rejectattr('status', 'equalto', 'ok')|list|length }} of {{ checks|length }} need attention</div></header>
   <div class="table-wrap">
     <table class="track-table">
       <thead>
@@ -64,13 +36,14 @@
   </div>
 </article>
 
+<div class="two-col">
 <article>
   <header><strong>About</strong></header>
   <dl class="detail-grid">
     <dt>Version</dt><dd>{{ version }} (Python {{ python_version }})</dd>
     <dt>Uptime</dt><dd>{{ uptime | age }}</dd>
     <dt>Schema version</dt><dd>{{ schema_version }}</dd>
-    <dt>Database</dt><dd><code>{{ db_path }}</code> · {{ db_size | human_bytes }} (with WAL)</dd>
+    <dt>Database</dt><dd><code>{{ db_path }}</code><div class="subtle">{{ db_size | human_bytes }} including the WAL</div></dd>
   </dl>
 </article>
 
@@ -86,7 +59,7 @@
       {% for v in volumes %}
         <tr>
           <td>{{ v.label }}</td>
-          <td><code>{{ v.path }}</code></td>
+          <td class="file-cell" title="{{ v.path }}"><code>{{ v.path }}</code></td>
           <td class="num">{{ v.free | human_bytes if v.free is not none else '—' }}</td>
           <td class="num">{{ v.total | human_bytes if v.total is not none else '—' }}</td>
         </tr>
@@ -95,17 +68,18 @@
     </table>
   </div>
 </article>
+</div>
 <article id="backups">
   <header>
     <strong>Backups</strong>
     <div class="subtle"><code>{{ backup_dir }}</code> · daily, newest first; retention is BACKUP_RETENTION on Settings</div>
   </header>
-  <form method="POST" action="{{ url_for('system.task_run', name='db_backup') }}"
+  <form class="action-row" method="POST" action="{{ url_for('system.task_run', name='db_backup') }}"
         hx-post="{{ url_for('system.task_run', name='db_backup') }}" hx-target="#backups"
         hx-select="#backups" hx-swap="outerHTML">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="next" value="status">
-    <button type="submit" class="secondary outline" style="width:auto" {% if backup_queued %}disabled{% endif %}>
+    <button type="submit" class="secondary outline" {% if backup_queued %}disabled{% endif %}>
       {{ 'Backup queued' if backup_queued else 'Backup now' }}
     </button>
   </form>

@@ -39,7 +39,7 @@ and CI all agree; the Makefile defaults to `python3.12`). Individual targets:
   findings rather than adding ignores.
 - `make typecheck` — mypy over `spotify_slsk/` (`ignore_missing_imports`,
   `check_untyped_defs`). Every public function is annotated; keep it that way.
-- `make test` — 954 tests. Fast (~10s); no network, no external services. The
+- `make test` — 960 tests. Fast (~10s); no network, no external services. The
   real-FLAC decode tests need the `flac` CLI (CI apt-installs it) and skip with
   a reason without it.
 - `make audit` — `pip-audit` against the pinned `requirements.txt`. Advisories
@@ -188,13 +188,43 @@ Docker `HEALTHCHECK` compares `HEARTBEAT_FILE` mtime against `HEARTBEAT_STALE_SE
 Flask + Jinja2 + Pico.css + htmx. **Assets are self-hosted** in `spotify_slsk/webui/static/`
 (Pico 2.0.6, htmx 1.9.12) — not on a CDN. A compromised CDN could drive the
 unauthenticated mutating routes, and self-hosting is what allows the CSP to stay
-at `script-src 'self'`. `spotify_slsk/webui/static/app.css` is the small design layer on top
-of Pico. Note the classless Pico build ships **no** `.secondary`/`.outline`
-classes; `app.css` defines them.
+at `script-src 'self'`. No web fonts either: the type is a system-UI stack.
+
+**Design system** — `spotify_slsk/webui/static/app.css` ("booth at night": slate
+surfaces, warm off-white text, one waveform-cyan accent for what you can act on).
+Section 1 holds every token: colours as `--c-*` for light (`:root:not([data-theme=dark])`)
+and dark (`prefers-color-scheme` *and* `:root[data-theme=dark]`, so the
+`static/theme.js` toggle and the OS setting agree), spacing `--s-1..7`, type
+`--t-xs..2xl`, radii `--r-*`; Pico's `--pico-*` variables are re-pointed at them.
+Never hard-code a colour in a template or a later section — add a token.
+Component conventions:
+- Status pills: `.badge badge-<state>` (downloaded/ok, pending/queued, retrying/suspect/warn,
+  suspended/fake/failed/rejected, quarantined/info, active = pulsing). Sentence case, dot + word.
+- Tables: wrap in `.table-wrap` (`.scroll-y` adds a sticky header); `.track-table`, `.num` for
+  right-aligned tabular numbers, `.file-cell`/`.path` cut long paths (put the full one in `title`),
+  `.actions-col` pins the action column with an opaque background.
+- Progress is the segmented level meter `.progress > .progress-bar` (`.is-active`, `.thin`).
+- Destructive or bulk actions use the no-JS confirm `<details class="confirm">` with
+  `<summary role="button">` and the real submit inside.
+- Page header: `.page-head` (title + `.subtle`) with `.page-actions` on the right;
+  toolbars are `.filter-form`; sub-pages use `.tabs`, filter chips `.filters`.
+- Classless Pico ships **no** `.secondary`/`.outline`; `app.css` defines them, and
+  also neutralises Pico's full-width submit buttons and `[role=search]` pill groups.
+
+**Navigation** (`base.html`): a left sidebar grouped Library (Dashboard, Wanted,
+Library health, Rename files) · Activity (Queue, History, Blocklist) · System
+(Status, Tasks, Logs, Settings). Templates mark the current item with
+`{% set active_page = ... %}` (plus `system_tab` for Status/Tasks). The sidebar
+foot shows the health badge (`helpers.shell_health`: the worst of the `/system/status` checks, cached remote results only, plus a stale heartbeat as an error; "Healthy" / "Attention (n)" / "Problem (n)", links to `/system/status`), what the daemon is doing
+(`shell_activity` from the context processor, refreshed by `static/shell.js`
+from `/activity.json`), the theme toggle and Log out. Below 52rem it becomes a top
+bar; "Menu" targets the fixed `#menu` anchor and CSS opens the panel with
+`#menu:target ~ .shell` — no JS, no scroll jump. `login.html` overrides
+`{% block body %}` to render without the shell.
 
 `webui/__init__.py::create_app` owns everything cross-cutting (secret key,
 cookie flags, CSRF guard, security headers/CSP, per-request DB connection, the
-header health badge) and registers one blueprint per area: `playlists`
+sidebar health badge and activity) and registers one blueprint per area: `playlists`
 (dashboard, playlist page, playlist mutations), `tracks` (track page,
 retry/re-tag, interactive search/grab), `wanted` (wanted, history, blocklist),
 `health` (library health report, scan/quarantine/ignore), `library` (rename preview/apply),
@@ -205,7 +235,7 @@ not `url_for('dashboard')`. URLs are pinned by
 `test_url_map_is_unchanged_by_the_blueprint_split`.
 
 Routes:
-- `GET /` — dashboard: library totals + playlist cards (htmx-refreshed every 15s as one swap)
+- `GET /` — dashboard: library totals, playlist rows with level meters, health summary (the `/system/status` checks) and recent cycles (htmx-refreshed every 15s as one swap); with no playlists the empty state is the add-playlist form
 - `GET /playlist/<id>` — track list with status filter + `?q=` search
 - `GET /track/<pid>/<tid>` — per-track state, search history with rejection reasons, persistent history, rejected filenames, interactive search
 - `POST /track/<pid>/<tid>/search` · `GET /track/<pid>/<tid>/search` (htmx partial, polls while running) · `POST /track/<pid>/<tid>/grab` — interactive search and manual grab. A grab must name a result of that track's own search; grabbing a rejected one renders `grab_confirm.html` and needs `force=1`
@@ -238,7 +268,7 @@ makes (own `new_client`, 5 s timeout).
 
 **Two constraints any new UI code must respect:**
 1. **Every POST needs `csrf_token()` in its form** — the app-level `before_request` guard (it covers every blueprint) rejects tokenless requests with 400.
-2. **No inline `<script>`** — the CSP is `script-src 'self'`. The theme toggle, the log tail and toasts live in `static/theme.js`, `static/logs.js` and `static/toast.js` for exactly this reason. Inline handlers fail silently in the browser, not in tests.
+2. **No inline `<script>`** — the CSP is `script-src 'self'`. The theme toggle, the log tail, toasts and the sidebar activity line live in `static/theme.js`, `static/logs.js`, `static/toast.js` and `static/shell.js` for exactly this reason. Inline handlers fail silently in the browser, not in tests.
 
 Feedback: `helpers.notify_user(message, category)` — an htmx request gets a
 toast (`HX-Trigger: {"toast": {"items": [...]}}`, added in `create_app`'s

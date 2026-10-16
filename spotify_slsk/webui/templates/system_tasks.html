@@ -26,7 +26,7 @@
         <th scope="col" class="num">Took</th>
         <th scope="col">Result</th>
         <th scope="col">Next</th>
-        <th scope="col">Actions</th>
+        <th scope="col" class="actions-col"><span class="visually-hidden">Actions</span></th>
       </tr>
     </thead>
     <tbody>
@@ -37,7 +37,7 @@
         <td class="nowrap">{{ t.last_run | ts if t.last_run else 'never' }}</td>
         <td class="num">{{ '%.1fs' % t.last_duration if t.last_duration is not none else '—' }}</td>
         <td>
-          {% if t.last_ok == false %}<span class="badge badge-suspended">failed</span>{% endif %}
+          {% if t.last_ok == false %}<span class="badge badge-failed">failed</span>{% endif %}
           {{ t.last_result or '' }}
         </td>
         <td class="nowrap">
@@ -45,7 +45,7 @@
           {% elif t.next_due %}{{ t.next_due | ts }}
           {% else %}—{% endif %}
         </td>
-        <td>
+        <td class="actions-col">
           <form method="POST" action="{{ url_for('system.task_run', name=t.name) }}" class="inline-form"
                 hx-post="{{ url_for('system.task_run', name=t.name) }}" hx-target="#tasks"
                 hx-select="#tasks" hx-swap="outerHTML">

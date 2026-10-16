@@ -736,10 +736,22 @@ class TestInteractiveSearchUI:
         assert b"Artist - Song.flac" in r.data
         assert b"format not allowed: .wma" in r.data
         assert b"hx-trigger" not in r.data, "finished search must stop polling"
-        # The filename cell wraps (full path in title); Grab column is pinned.
+        # The filename cell is cut (full path in title). Accepted and rejected
+        # results are separate tables (rejected grouped by reason), so the
+        # actions column appears in two headers plus one per row.
         assert b'class="file-cell" title="Artist - Song.flac"' in r.data
-        assert r.data.count(b'class="actions-col"') == 3
+        assert r.data.count(b'class="actions-col"') == 4
+        page = r.data.decode()
+        assert page.index("Artist - Song.flac") < page.index("format not allowed: .wma")
         assert b"Artist - Song.flac" in client.get("/track/pid1/t1").data
+
+    def test_rejections_group_by_reason_biggest_first(self):
+        from spotify_slsk.webui.helpers import group_by_reason
+
+        rows = [{"reason": "format not allowed: .mp3"}] * 3 + [{"reason": "blocklisted"}, {}]
+        groups = group_by_reason(rows)
+        assert [(r, len(f)) for r, f in groups] == [
+            ("format not allowed: .mp3", 3), ("blocklisted", 1), ("rejected", 1)]
 
     def test_quality_and_profile_reason_are_shown(self, app_tmp, client, monkeypatch):
         bad = dict(self.CAND_BAD, ext=".mp3", quality="MP3_LOW", quality_label="MP3 256",
@@ -1109,3 +1121,49 @@ class TestQualityProfileForm:
     def test_requires_csrf(self, client):
         assert client.post("/settings/quality", data={"allowed": ["FLAC_16"],
                                                        "cutoff": "FLAC_16"}).status_code == 400
+
+
+class TestSidebarHealthBadge:
+    """The badge said "Healthy" while the dashboard listed six failing
+    checks: it read only the heartbeat. It now shows the worst check."""
+
+    def _page(self, client, monkeypatch, checks):
+        from spotify_slsk import healthchecks
+        monkeypatch.setattr(healthchecks, "collect", lambda conn: checks)
+        return client.get("/system/tasks").data.decode()
+
+    def test_error_check_wins(self, client, monkeypatch):
+        page = self._page(client, monkeypatch, [
+            {"name": "slskd", "status": "error", "message": "SLSKD_API_KEY is not set"},
+            {"name": "ui_auth", "status": "warn", "message": "open"},
+            {"name": "flac_binary", "status": "ok", "message": "fine"}])
+        assert "health-error" in page and "Problem (2)" in page
+        assert "Healthy" not in page
+
+    def test_warn_only_is_attention(self, client, monkeypatch):
+        page = self._page(client, monkeypatch, [{"name": "ui_auth", "status": "warn", "message": "open"}])
+        assert "health-warn" in page and "Attention (1)" in page
+
+    def test_all_ok_is_healthy(self, client, monkeypatch):
+        page = self._page(client, monkeypatch, [{"name": "flac_binary", "status": "ok", "message": "fine"}])
+        assert "health-ok" in page and ">Healthy<" in page
+
+    def test_stale_heartbeat_is_an_error(self, client, monkeypatch, tmp_path):
+        hb = tmp_path / "hb"
+        hb.write_text("")
+        os.utime(hb, (0, 0))
+        monkeypatch.setenv("HEARTBEAT_FILE", str(hb))
+        page = self._page(client, monkeypatch, [])
+        assert "health-error" in page and "Problem (1)" in page
+
+
+def test_activity_phase_uses_readable_labels(client):
+    """The banner rendered 'Waiting Slskd'; phases come from a label map."""
+    from spotify_slsk import runtime_state
+    from spotify_slsk.webui.helpers import phase_label
+
+    assert phase_label("waiting_slskd") == "Waiting for slskd"
+    assert phase_label("some_new_phase") == "Some new phase"
+    runtime_state.set_activity("waiting_slskd", detail="x")
+    page = client.get("/").data.decode()
+    assert "Waiting for slskd" in page and "Waiting Slskd" not in page

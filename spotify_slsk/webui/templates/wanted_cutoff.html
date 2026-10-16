@@ -13,7 +13,7 @@
       A suspect/fake "lossless" file counts as the lossy quality it most likely came from.
     </p>
     {% if not profile.upgrades_allowed %}
-    <p class="flash flash-error">
+    <p class="flash flash-warning">
       Quality upgrades are off in the <a href="{{ url_for('settings.settings') }}#quality">quality profile</a>:
       a search here only looks for a better version (Extended/Original Mix) or a lossless copy of a suspect file.
     </p>
@@ -23,12 +23,12 @@
     {% endif %}
   </div>
   {% if total %}
-  <form method="POST" action="{{ url_for('wanted.cutoff_search') }}">
+  <form class="page-actions" method="POST" action="{{ url_for('wanted.cutoff_search') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <details class="confirm">
       <summary role="button" class="secondary outline">Search all…</summary>
       <p>Queues an upgrade search for all {{ total }} tracks now, ignoring the upgrade interval. Replaced files are moved to <code>.quarantine/&lt;playlist&gt;/replaced/</code>, never deleted.</p>
-      <button type="submit" name="all" value="1" style="width:auto">Yes, search all {{ total }}</button>
+      <button type="submit" name="all" value="1">Yes, search all {{ total }}</button>
     </details>
   </form>
   {% endif %}
@@ -36,7 +36,7 @@
 
 {% include "_wanted_tabs.html" %}
 
-<form class="filter-form" method="GET" role="search" action="{{ url_for('wanted.cutoff_page') }}">
+<form class="filter-form" method="GET" aria-label="Filter tracks" action="{{ url_for('wanted.cutoff_page') }}">
   <select name="playlist" aria-label="Playlist">
     <option value="">All playlists</option>
     {% for p in playlists %}
@@ -53,7 +53,7 @@
     <table class="track-table">
       <thead>
         <tr>
-          <th scope="col"><span class="visually-hidden">Select</span></th>
+          <th scope="col" class="col-check"><span class="visually-hidden">Select</span></th>
           <th scope="col">Track</th>
           <th scope="col">Playlist</th>
           <th scope="col">Quality</th>
@@ -84,7 +84,8 @@
       </tbody>
     </table>
   </div>
-  <p><button type="submit" style="width:auto">Search selected</button></p>
+  <div class="bulk-bar"><button type="submit">Search selected</button>
+    <small class="subtle">Tick tracks above, then search them now instead of waiting for the next cycle.</small></div>
 </form>
 {% else %}
 <div class="empty">
