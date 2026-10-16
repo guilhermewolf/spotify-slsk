@@ -19,6 +19,7 @@ from .db import get_setting, list_task_rows
 from .library.health import SCAN_PENDING_KEY
 
 DAY = 86400
+HEALTH_CHECK_INTERVAL = 300
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,8 @@ TASKS: tuple[Task, ...] = (
     Task("quality_backfill", "Quality backfill", lambda: 0, cadence="every cycle"),
     Task("recycle_purge", "Recycle bin purge",
          lambda: DAY if config.RECYCLE_BIN_RETENTION_DAYS > 0 else 0),
+    Task("db_integrity", "Database integrity check", lambda: DAY),
+    Task("health_checks", "Health checks", lambda: HEALTH_CHECK_INTERVAL),
 )
 BY_NAME = {t.name: t for t in TASKS}
 

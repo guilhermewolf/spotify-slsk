@@ -17,7 +17,7 @@ from collections.abc import Callable
 
 import spotipy
 
-from . import config, runtime_state, tasks
+from . import config, healthchecks, runtime_state, tasks
 from .db import (
     clear_tried_entries,
     create_connection,
@@ -31,6 +31,7 @@ from .db import (
     mark_upgrade_checked,
     pop_queued_tasks,
     prune_history,
+    queue_task,
     record_cycle,
     record_task_run,
     set_setting,
@@ -444,10 +445,32 @@ def _purge_recycle_bin(conn: sqlite3.Connection) -> str:
     return f"purged {purged} file(s) older than {days} day(s)"
 
 
+# The daemon's Spotify client, for the health checks (set by main()).
+_spotify: spotipy.Spotify | None = None
+
+
+def _db_integrity(conn: sqlite3.Connection) -> str:
+    """Daily PRAGMA quick_check. Raises on a problem so the task records a
+    failure, which the db_integrity health check reports."""
+    ok, message = healthchecks.integrity_check(conn)
+    if not ok:
+        raise RuntimeError(message)
+    return message
+
+
+def _health_checks(conn: sqlite3.Connection) -> str:
+    """Refresh the remote checks (slskd, Spotify) for /healthz and the
+    status page."""
+    healthchecks.refresh_remote(_spotify)
+    return healthchecks.summary(healthchecks.collect(conn))
+
+
 # What each scheduled task does. Tasks driven by the cycle itself
 # (spotify_sync, library_scan, quality_backfill) are recorded where they run.
 SCHEDULED: dict[str, Callable[[sqlite3.Connection], str]] = {
     "recycle_purge": _purge_recycle_bin,
+    "db_integrity": _db_integrity,
+    "health_checks": _health_checks,
 }
 
 
@@ -513,8 +536,9 @@ def main() -> None:
         logging.error("Failed to connect to the SQLite database.")
         return
 
+    global _spotify
     try:
-        sp = setup_spotify_client()
+        sp = _spotify = setup_spotify_client()
         if sp is not None:
             migrate_env_playlists(conn, sp)
         config.ensure_quality_profile(conn)
@@ -535,11 +559,15 @@ def main() -> None:
                 port=int(os.getenv("UI_PORT", "8000")),
             )
 
+        # A first verdict for /healthz and the status page before the
+        # (possibly long) wait for slskd - that wait is when it is wanted.
+        _run_task(conn, "health_checks", _health_checks)
         runtime_state.set_activity(
             "waiting_slskd", detail=f"Waiting for slskd at {slskd_host_url}"
         )
         if not block_until_slskd_healthy(slskd_host_url, slskd_api_key):
             return  # shutdown requested while waiting
+        queue_task(conn, "health_checks")  # slskd is back: say so promptly
 
         send_ntfy_notification(
             ntfy_url, ntfy_topic, "Spotify Playlist Downloader starting"

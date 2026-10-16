@@ -80,6 +80,19 @@ def fmt_interval(seconds: int | None) -> str:
     return f"{seconds}s"
 
 
+def fmt_age(seconds: float | None) -> str:
+    """Seconds -> "3d 4h", "2h 5m", "4m"."""
+    seconds = int(seconds or 0)
+    days, rest = divmod(seconds, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes = rest // 60
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
 def wake_daemon() -> None:
     """Interrupt the daemon's cycle sleep so a change shows up in seconds."""
     cb = current_app.config.get("WAKE_DAEMON")

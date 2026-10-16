@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import os
+import platform
+import time
 
 from flask import (
     Blueprint,
     abort,
+    current_app,
     flash,
     g,
     jsonify,
@@ -17,7 +20,7 @@ from flask import (
 )
 from flask.typing import ResponseReturnValue
 
-from .. import db, runtime_state, tasks
+from .. import __version__, config, db, healthchecks, runtime_state, tasks
 from ..library.health import SCAN_PENDING_KEY
 from .helpers import health_snapshot, wake_daemon
 
@@ -85,8 +88,53 @@ def activity_json() -> ResponseReturnValue:
 
 @bp.route("/healthz")
 def healthz() -> ResponseReturnValue:
+    """`ok` (schema version + heartbeat) decides the status code, as
+    before; `checks` is informational and never fails the probe."""
     snapshot = health_snapshot()
+    try:
+        snapshot["checks"] = healthchecks.collect(g.conn)
+    except Exception as e:  # a check must never break the probe
+        snapshot["checks"] = [{"name": "checks", "status": "error", "message": str(e)}]
     return jsonify(snapshot), 200 if snapshot["ok"] else 503
+
+
+# ---- status -------------------------------------------------------
+
+def _db_size(path: str) -> int:
+    """The DB plus its WAL and shared-memory files."""
+    total = 0
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            total += os.path.getsize(path + suffix)
+        except OSError:
+            pass
+    return total
+
+
+@bp.route("/system/status")
+def status_page() -> ResponseReturnValue:
+    db_path = current_app.config["DB_PATH"]
+    volumes = []
+    for label, path in (
+        ("Playlists", os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists")),
+        ("Downloads", config.DOWNLOAD_DIR),
+        ("Data", os.path.dirname(os.path.abspath(db_path))),
+    ):
+        usage = healthchecks.disk_usage(path)
+        volumes.append({"label": label, "path": path, "free": usage[0] if usage else None,
+                        "total": usage[1] if usage else None})
+    return render_template(
+        "system_status.html",
+        system_tab="status",
+        checks=healthchecks.collect(g.conn),
+        version=__version__,
+        python_version=platform.python_version(),
+        uptime=time.time() - runtime_state.STARTED_AT,
+        schema_version=g.conn.execute("PRAGMA user_version").fetchone()[0],
+        db_path=db_path,
+        db_size=_db_size(db_path),
+        volumes=volumes,
+    )
 
 
 # ---- scheduled tasks ----------------------------------------------

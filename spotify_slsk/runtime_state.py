@@ -21,6 +21,9 @@ from collections import deque
 
 from . import config
 
+# Process start, for the uptime on /system/status.
+STARTED_AT = time.time()
+
 
 def touch_heartbeat() -> None:
     """Update config.HEARTBEAT_FILE so the Docker HEALTHCHECK can tell a

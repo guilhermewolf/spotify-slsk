@@ -585,3 +585,8 @@ details.confirm[open] { max-width: 22rem; }
 /* A one-button form inside a table cell. */
 .inline-form { margin: 0; }
 .inline-form button { margin: 0; width: auto; padding: 0.25rem 0.6rem; font-size: 0.85rem; }
+
+/* Health check verdicts (/system/status). */
+.badge-check-ok    { background: var(--ss-ok-bg); color: var(--ss-ok); }
+.badge-check-warn  { background: var(--ss-retry-bg); color: var(--ss-retry); }
+.badge-check-error { background: var(--ss-suspended-bg); color: var(--ss-suspended); }

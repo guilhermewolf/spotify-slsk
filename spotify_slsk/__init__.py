@@ -5,3 +5,5 @@ The daemon entrypoint is `spotify_slsk.daemon.main`, reachable as
 must not pull in spotipy, mutagen or slskd_api, so tests and tooling can
 import a single submodule cheaply.
 """
+
+__version__ = "0.1.0"
