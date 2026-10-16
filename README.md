@@ -469,12 +469,67 @@ Delete the `-wal` and `-shm` files when restoring: they belong to the database
 you replaced. To copy the live database by hand instead, copy all three files,
 or run `PRAGMA wal_checkpoint(TRUNCATE);` first.
 
-## Releases
+## Releases & images
 
-Pushes to `main` publish `:main`, `:sha-<short>` and `:latest`. Tagging
-publishes the version tags without moving `:latest`, which is intentional so
-deployments pinned to `:latest` follow `main`:
+Images are published to `ghcr.io/guilhermewolf/spotify-slsk/spotify-slsk`
+for `linux/amd64` and `linux/arm64`, each with an SBOM, SLSA provenance and a
+signed GitHub attestation. Nothing is published unless CI (the full
+`make check`, the container smoke test and a Trivy scan) passed for that exact
+commit.
+
+| Tag | Moves when | Use it for |
+| --- | --- | --- |
+| `:latest`, `:X`, `:X.Y`, `:X.Y.Z` | a stable release `vX.Y.Z` is published | **production** |
+| `:beta` | an RC (`vX.Y.Z-rc.N`) *or* a stable release is published | testers — never older than `:latest` |
+| `:X.Y.Z-rc.N` | that RC is published | pinning a specific RC |
+| `:edge`, `:main` | every commit on `main` that passes CI | bleeding edge |
+| `:sha-<short>` | every published build | pinning an exact build |
+
+**`:latest` no longer tracks `main`.** It only moves when a release is
+published. A deployment on `:latest` stays on the last image `main` pushed
+before this change until the first release-please release is merged; switch
+to `:edge` if you want every commit.
+
+Check what you are running on **System → Status** (the version comes from
+`spotify_slsk/__init__.py`), and verify an image's provenance with
+`gh attestation verify oci://ghcr.io/guilhermewolf/spotify-slsk/spotify-slsk:latest -R guilhermewolf/spotify-slsk`.
+
+### Commit messages
+
+Releases are automated by [release-please](https://github.com/googleapis/release-please)
+from [Conventional Commits](https://www.conventionalcommits.org/) on `main`:
+`feat:` bumps the minor version, `fix:`/`perf:` the patch, and a `!` after the
+type (`feat!:`) or a `BREAKING CHANGE:` footer the major. `feat`, `fix`,
+`perf`, `refactor`, `docs` and `ci` appear in `CHANGELOG.md`; `chore`, `test`,
+`build` and `style` are hidden. PR titles become squash-merge commit messages,
+so give them the same form.
+
+### Cutting a stable release
+
+Every push to `main` updates an open **release PR** ("chore(main): release
+X.Y.Z") with the next version, the changelog and the bumped
+`__version__`. Merge it when you want to ship: that run tags `vX.Y.Z`,
+creates the GitHub release from the changelog, and publishes
+`:X.Y.Z :X.Y :X :latest :beta`.
+
+### Cutting a release candidate
+
+Either let release-please do it, so the version in the image and changelog
+match (preferred):
 
 ```bash
-git tag v1.0.0 && git push origin v1.0.0
+git commit --allow-empty -m "chore: release 3.0.0-rc.1" -m "Release-As: 3.0.0-rc.1"
+# push/merge to main, then merge the release PR it opens
 ```
+
+or push a tag on a commit that is already on `main` (quick, but the app still
+reports the previous version):
+
+```bash
+git tag v3.0.0-rc.1 <sha> && git push origin v3.0.0-rc.1
+```
+
+Both publish `:3.0.0-rc.1` and `:beta` and mark the GitHub release as a
+pre-release; `:latest` does not move. To go final after an RC, use
+`Release-As: 3.0.0` the same way, or the next release PR will compute its
+version from the RC.

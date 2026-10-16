@@ -6,7 +6,7 @@
 # at a virtualenv: make check PYTHON=.venv/bin/python
 PYTHON ?= python3.12
 
-.PHONY: help install compile lint typecheck test audit check docker-build
+.PHONY: help install compile lint typecheck test audit check docker-build smoke
 
 help:
 	@echo "make install       install runtime + dev dependencies"
@@ -17,6 +17,7 @@ help:
 	@echo "make audit         scan pinned dependencies for known CVEs"
 	@echo "make check         compile + lint + typecheck + test + audit (the gate)"
 	@echo "make docker-build  build the container image"
+	@echo "make smoke         build the image, boot it without secrets, probe the UI, stop it"
 
 install:
 	$(PYTHON) -m pip install -r requirements.txt -r requirements-dev.txt
@@ -45,3 +46,8 @@ check: compile lint typecheck test audit
 
 docker-build:
 	docker build -t spotify-slsk:local .
+
+# Boots the image with no secrets and no slskd and checks /healthz, the main
+# pages, uid 1000, numpy/flac and a clean SIGTERM exit. CI runs this too.
+smoke: docker-build
+	scripts/smoke.sh spotify-slsk:local

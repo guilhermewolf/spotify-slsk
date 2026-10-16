@@ -4,13 +4,19 @@ area/docs:
   - changed-files:
       - any-glob-to-any-file:
           - "docs/**/*"
-          - "README.md"
+          - "*.md"
 area/github:
   - changed-files:
       - any-glob-to-any-file: ".github/**/*"
 area/python:
   - changed-files:
-      - any-glob-to-any-file: "*.py,requirement.txt"
+      - any-glob-to-any-file:
+          - "**/*.py"
+          - "requirements*.txt"
+          - "pyproject.toml"
 area/docker:
   - changed-files:
-      - any-glob-to-any-file: "Dockerfile"
+      - any-glob-to-any-file:
+          - "Dockerfile"
+          - ".dockerignore"
+          - "docker-compose*.yaml"

@@ -1,0 +1,41 @@
+# Weekly dependency PRs. Commit prefixes are conventional commits so
+# release-please turns merged bumps into changelog entries: runtime and image
+# bumps are `fix(deps)` (they ship in the image, so they cut a patch release),
+# action bumps are `ci(deps)`.
+version: 2
+updates:
+  # requirements.txt (pinned runtime lock) and requirements-dev.txt.
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "fix(deps)"
+      prefix-development: "chore(deps-dev)"
+    groups:
+      python-minor-patch:
+        update-types: [minor, patch]
+
+  # Workflow actions are pinned to commit SHAs; Dependabot bumps the SHA and
+  # the version comment together.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  # The python:3.12-alpine base image. A 3.13 proposal is a prompt, not an
+  # auto-merge: the minor must also change in requires-python and CI.
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "fix(deps)"
+    ignore:
+      - dependency-name: python
+        update-types: [version-update:semver-major]

@@ -44,8 +44,37 @@ and CI all agree; the Makefile defaults to `python3.12`). Individual targets:
   a reason without it.
 - `make audit` — `pip-audit` against the pinned `requirements.txt`. Advisories
   fail CI, so dependency CVEs surface on a PR rather than in production.
-- CI also builds the image and asserts it runs as uid 1000 and that no
-  `.env` / `data/` / `playlists/` / `slsk_app/` path leaked into it.
+- `make smoke` — builds the image and boots it with **no secrets and no
+  slskd** (`scripts/smoke.sh`): uid 1000, numpy/flac present, no `.env` /
+  `data/` / `playlists/` / `slsk_app/` leaked into it, `/healthz` and the main
+  pages return 200, SIGTERM exits 0 within 15s. Needs Docker.
+- CI additionally runs Trivy on that image: fixable CRITICALs fail, HIGHs are
+  reported to code scanning.
+
+### CI and releases
+
+- `ci.yaml` — `quality-gate` (make check) + `container` (make smoke, Trivy) on
+  PRs and non-main pushes; also a reusable workflow. Superseded runs are
+  cancelled, never on main or tags.
+- `release.yaml` — on push to main / `v*` tags: calls `ci.yaml`, then
+  release-please (main only), then publishes multi-arch images with SBOM,
+  provenance and an attestation. Nothing publishes if CI fails. release-please
+  tags with `GITHUB_TOKEN`, which triggers no workflow, so release images are
+  built in the *same* run from its `release_created`/`tag_name` outputs; a
+  human-pushed tag (RCs) takes the `tags:` path and gets its GitHub release
+  created there.
+- Tags: main → `:main :edge :sha-*`; `vX.Y.Z` → `:X.Y.Z :X.Y :X :latest :beta`;
+  `vX.Y.Z-rc.N` → `:X.Y.Z-rc.N :beta`. `:latest` only moves on stable releases.
+- **Commits on main must be Conventional Commits** — release-please derives
+  the version and CHANGELOG.md from them. Never add a `!`/`BREAKING CHANGE`
+  unless it really is one: it bumps the major.
+- The version is single-sourced in `spotify_slsk/__init__.py`
+  (`# x-release-please-version`); pyproject reads it, /system/status shows it.
+  Config: `release-please-config.json`, `.release-please-manifest.json`.
+- Actions are pinned to commit SHAs with a version comment; Dependabot
+  (`.github/dependabot.yml`) bumps pip, actions and the base image weekly.
+- `labeler.yaml` uses `pull_request_target` (write token): it must never check
+  out or run PR code.
 
 `pyproject.toml` holds project metadata and tool config; `requirements.txt` /
 `requirements-dev.txt` remain the **pinned lock** used by the Dockerfile,
