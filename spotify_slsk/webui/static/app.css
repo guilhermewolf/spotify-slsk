@@ -30,7 +30,6 @@ html:root {
   --pico-form-element-spacing-horizontal: 0.7rem;
   --pico-block-spacing-vertical: 1rem;
   --pico-block-spacing-horizontal: 1rem;
-  --pico-font-weight: 600;
 
   /* spacing scale */
   --s-1: 0.25rem;
@@ -507,6 +506,7 @@ article > header strong, .panel > header strong { font-size: var(--t-md); }
 article > header .subtle { margin-top: 2px; }
 /* A table that is the body of a panel runs edge to edge. */
 article > header + .table-wrap:last-child {
+  max-width: none;
   margin: calc(var(--s-4) * -1);
   margin-top: calc(var(--s-4) * -1);
   border: 0;
@@ -1137,10 +1137,12 @@ tbody tr:hover > td.actions-col { background: var(--c-raised); }
   top: var(--s-4);
   font-size: var(--t-sm);
 }
-.settings-toc ul { list-style: none; margin: 0; padding: 0; }
-.settings-toc li { list-style: none; margin: 0; padding: 0; }
+.settings-toc ul { display: block; list-style: none; margin: 0; padding: 0; }
+.settings-toc li { display: block; list-style: none; margin: 0; padding: 0; }
+.settings-toc li::before { content: none; }
 .settings-toc a {
   display: block;
+  margin: 0;
   padding: 0.25rem var(--s-2);
   color: var(--c-muted);
   text-decoration: none;
@@ -1174,7 +1176,13 @@ tbody tr:hover > td.actions-col { background: var(--c-raised); }
   color: var(--c-muted);
   overflow-wrap: anywhere;
 }
-.setting-field input:not([type="checkbox"]), .setting-field select { margin: 0 0 var(--s-1); }
+.setting-field input:not([type="checkbox"]), .setting-field select {
+  margin: 0 0 var(--s-1);
+  height: 2.25rem;
+  padding-top: 0;
+  padding-bottom: 0;
+  font-size: var(--t-sm);
+}
 .setting .help { display: block; color: var(--c-muted); font-size: var(--t-sm); margin: 0 0 var(--s-2); }
 .setting .effective {
   display: flex;
@@ -1350,3 +1358,6 @@ details.panel > .table-wrap { border: 0; margin: 0; border-radius: 0 0 var(--r-l
 tr.tag-changed > td { background: color-mix(in srgb, var(--c-warn-bg) 50%, transparent); }
 .plain-list { margin: 0; padding-left: var(--s-4); font-size: var(--t-sm); }
 .plain-list li { margin: 2px 0; }
+.two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr)); gap: 0 var(--s-4); }
+/* Placeholders show the inherited value; they must not read as typed text. */
+input::placeholder { color: var(--c-muted); opacity: 0.75; }

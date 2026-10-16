@@ -18,152 +18,219 @@
 <p class="flash flash-error" role="alert">{{ auth_partial_warning }}</p>
 {% endif %}
 
-{# Keys are matched explicitly so a new setting must be placed deliberately. #}
+{# (anchor, title, help, [(key, human label)]). Keys are listed explicitly so
+   a new setting must be placed deliberately; test_every_setting_is_rendered
+   fails if one is forgotten. #}
 {% set groups = [
-  ('Match quality', 'What counts as an acceptable file',
-   ['MIN_MATCH_SCORE', 'SLSKD_MIN_EFFECTIVE_MP3_KBPS',
-    'SLSKD_MAX_DURATION_DIFF_SECONDS']),
-  ('Release terms', 'Words a peer path must or must not contain, checked before anything else',
-   ['REQUIRED_TERMS', 'IGNORED_TERMS']),
-  ('Validation', 'Is the downloaded file really what it claims to be',
-   ['LOSSLESS_CHECK_ENABLED', 'LOSSLESS_FAKE_CUTOFF_HZ', 'LOSSLESS_MIN_DROP_DB',
-    'LIBRARY_SCAN_INTERVAL_HOURS']),
-  ('Library', 'How imported files are tagged, named and organised',
-   ['EMBED_COVER_ART', 'FILE_NAME_TEMPLATE', 'LINK_MODE',
-    'WRITE_M3U', 'WRITE_PLAYLIST_COVER', 'RECYCLE_BIN_RETENTION_DAYS']),
-  ('Search & transfers', 'How the daemon talks to slskd',
-   ['SLSKD_MIN_PEER_UPLOAD_SPEED', 'SLSKD_EARLY_STOP_RESPONSES', 'SLSKD_WAIT_TIMEOUT',
-    'UPGRADE_CHECK_INTERVAL_HOURS', 'HISTORY_RETENTION_DAYS']),
-  ('Notifications', 'ntfy, a generic webhook, and a Subsonic / Navidrome rescan after imports',
-   ['NTFY_URL', 'NTFY_TOPIC', 'NTFY_EVENTS',
-    'WEBHOOK_URL', 'WEBHOOK_HEADER_NAME', 'WEBHOOK_HEADER_VALUE', 'WEBHOOK_EVENTS',
-    'SUBSONIC_URL', 'SUBSONIC_USERNAME', 'SUBSONIC_PASSWORD']),
-  ('System', 'Web UI login, health checks and backups',
-   ['UI_AUTH_USERNAME', 'UI_AUTH_PASSWORD', 'MIN_FREE_SPACE_GB', 'BACKUP_RETENTION'])
+  ('match', 'Match quality', 'What counts as an acceptable file', [
+    ('MIN_MATCH_SCORE', 'Minimum match score'),
+    ('SLSKD_MIN_EFFECTIVE_MP3_KBPS', 'Minimum real MP3 bitrate'),
+    ('SLSKD_MAX_DURATION_DIFF_SECONDS', 'Maximum length difference')]),
+  ('terms', 'Release terms', 'Words a peer path must or must not contain, checked before anything else', [
+    ('REQUIRED_TERMS', 'Required terms'),
+    ('IGNORED_TERMS', 'Ignored terms')]),
+  ('validation', 'Validation', 'Is the downloaded file really what it claims to be', [
+    ('LOSSLESS_CHECK_ENABLED', 'Check lossless files'),
+    ('LOSSLESS_FAKE_CUTOFF_HZ', 'Fake-lossless cutoff'),
+    ('LOSSLESS_MIN_DROP_DB', 'Minimum spectral drop'),
+    ('LIBRARY_SCAN_INTERVAL_HOURS', 'Library re-scan interval')]),
+  ('library', 'Library', 'How imported files are tagged, named and organised', [
+    ('EMBED_COVER_ART', 'Embed cover art'),
+    ('FILE_NAME_TEMPLATE', 'File name template'),
+    ('LINK_MODE', 'Duplicate tracks'),
+    ('WRITE_M3U', 'Write playlist files'),
+    ('WRITE_PLAYLIST_COVER', 'Save playlist cover'),
+    ('RECYCLE_BIN_RETENTION_DAYS', 'Recycle bin retention')]),
+  ('search', 'Search & transfers', 'How the daemon talks to slskd', [
+    ('SLSKD_MIN_PEER_UPLOAD_SPEED', 'Minimum peer upload speed'),
+    ('SLSKD_EARLY_STOP_RESPONSES', 'Stop search after replies'),
+    ('SLSKD_WAIT_TIMEOUT', 'Wait for file on disk'),
+    ('UPGRADE_CHECK_INTERVAL_HOURS', 'Version upgrade interval'),
+    ('HISTORY_RETENTION_DAYS', 'History retention')]),
+  ('notifications', 'Notifications', 'ntfy, a generic webhook, and a Subsonic / Navidrome rescan after imports', [
+    ('NTFY_URL', 'ntfy server'),
+    ('NTFY_TOPIC', 'ntfy topic'),
+    ('NTFY_EVENTS', 'ntfy events'),
+    ('WEBHOOK_URL', 'Webhook URL'),
+    ('WEBHOOK_HEADER_NAME', 'Webhook header name'),
+    ('WEBHOOK_HEADER_VALUE', 'Webhook header value'),
+    ('WEBHOOK_EVENTS', 'Webhook events'),
+    ('SUBSONIC_URL', 'Subsonic server'),
+    ('SUBSONIC_USERNAME', 'Subsonic user'),
+    ('SUBSONIC_PASSWORD', 'Subsonic password')]),
+  ('system', 'System', 'Web UI login, health checks and backups', [
+    ('UI_AUTH_USERNAME', 'Login username'),
+    ('UI_AUTH_PASSWORD', 'Login password'),
+    ('MIN_FREE_SPACE_GB', 'Low disk space warning'),
+    ('BACKUP_RETENTION', 'Database backups kept')])
 ] %}
+{% set specs = {} %}
+{% for key, default, help_text, kind in spec %}{% set _ = specs.update({key: (default, help_text, kind)}) %}{% endfor %}
 
-<form method="POST">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-
-  {% for group_name, group_help, keys in groups %}
-  <article>
-    <header>
-      <strong>{{ group_name }}</strong>
-      <div class="subtle">{{ group_help }}</div>
-    </header>
-
-    {% for key, default, help_text, kind in spec %}
-      {% if key in keys %}
-      <div class="setting">
-        <label for="{{ key }}">{{ key }}</label>
-        <span class="help" id="{{ key }}_help">{{ help_text }}</span>
-        {% if kind in ('secret', 'password') %}
-        {# Never rendered back: blank keeps the stored value. #}
-        <input type="password" id="{{ key }}" name="{{ key }}" value="" autocomplete="new-password"
-               placeholder="{{ effective[key] + ' (set) - leave blank to keep' if effective[key] else 'not set' }}"
-               aria-describedby="{{ key }}_help {{ key }}_effective">
-        {% if overrides.get(key) %}
-        <label class="subtle"><input type="checkbox" name="clear_{{ key }}" value="1"> Clear the stored value</label>
-        {% endif %}
-        {% else %}
-        <input type="text" id="{{ key }}" name="{{ key }}"
-               value="{{ overrides.get(key, '') }}"
-               placeholder="{{ effective[key] }}"
-               aria-describedby="{{ key }}_help {{ key }}_effective">
-        {% endif %}
-        <span class="effective" id="{{ key }}_effective">
-          In effect: <code>{{ effective[key] }}</code>
-          {%- if overrides.get(key) %} (overridden here)
-          {%- else %} (default <code>{{ default }}</code>){% endif %}
-        </span>
-        {% if key == 'FILE_NAME_TEMPLATE' %}
-        <span class="effective">Example: <code>{{ name_example }}</code>
-          (for {{ name_example_source }})</span>
-        {% endif %}
-      </div>
-      {% endif %}
-    {% endfor %}
-  </article>
-  {% endfor %}
-
-  <button type="submit" style="width:auto">Save settings</button>
-</form>
-
-<article id="quality">
-  <header>
-    <strong>Quality profile</strong>
-    <div class="subtle">Which qualities are acceptable, in order of preference (1 = best), and when to stop upgrading</div>
-  </header>
-  <p class="subtle">
-    Only ticked qualities are downloaded; their order is the ranking after the version tier
-    (Extended Mix &gt; Original Mix &gt; other). An MP3 whose bitrate is known and below 320 kbps is
-    always rejected, whatever is ticked here.
-  </p>
-  <form method="POST" action="{{ url_for('settings.save_quality_profile') }}">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <div class="table-wrap">
-      <table class="quality-table">
-        <thead>
-          <tr>
-            <th scope="col">Allowed</th>
-            <th scope="col">Quality</th>
-            <th scope="col" class="num">Order</th>
-          </tr>
-        </thead>
-        <tbody>
-        {% for q in quality_rows %}
-          {% set on = q.key in profile.allowed %}
-          <tr>
-            <td>
-              <input type="checkbox" id="allow_{{ q.key }}" name="allowed" value="{{ q.key }}"
-                     {% if on %}checked{% endif %}>
-            </td>
-            <td>
-              <label for="allow_{{ q.key }}">{{ q.label }}</label>
-              {% if q.key in floor_blocked %}<div class="subtle">always rejected by the 320 kbps floor</div>{% endif %}
-            </td>
-            <td class="num">
-              <input type="number" name="order_{{ q.key }}" min="1" step="1" class="order-input"
-                     aria-label="Order of {{ q.label }}"
-                     value="{{ profile.allowed.index(q.key) + 1 if on else '' }}">
-            </td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-    </div>
-    <label for="cutoff">Cutoff — files at or above this quality are not upgraded for quality</label>
-    <select id="cutoff" name="cutoff">
-      {% for q in quality_rows %}
-      <option value="{{ q.key }}" {% if q.key == profile.cutoff %}selected{% endif %}>{{ q.label }}</option>
+<div class="settings-layout">
+  <nav class="settings-toc" aria-label="Settings sections">
+    <ul>
+      {% for anchor, title, _h, _k in groups %}
+      <li><a href="#{{ anchor }}">{{ title }}</a></li>
       {% endfor %}
-    </select>
-    <label>
-      <input type="checkbox" name="upgrades_allowed" value="1" {% if profile.upgrades_allowed %}checked{% endif %}>
-      Upgrade files below the cutoff to a better quality of the same version
-    </label>
-    <p class="subtle">
-      Off by default, so turning it on is a deliberate choice: check
-      <a href="{{ url_for('wanted.cutoff_page') }}">Wanted → Cutoff unmet</a> first to see what would be
-      re-downloaded. Replaced files are moved to <code>.quarantine/&lt;playlist&gt;/replaced/</code>.
-    </p>
-    <button type="submit" style="width:auto">Save quality profile</button>
-  </form>
-</article>
+      <li><a href="#quality">Quality profile</a></li>
+      <li><a href="#notifications-test">Test notifications</a></li>
+    </ul>
+  </nav>
 
-<article id="notifications">
-  <header>
-    <strong>Test notifications</strong>
-    <div class="subtle">Uses the saved settings above; save first</div>
-  </header>
-  <div class="card-actions">
-    {% for provider, label in [('ntfy', 'Send ntfy test'), ('webhook', 'Send webhook test'), ('subsonic', 'Start a Subsonic scan')] %}
-    <form method="POST" action="{{ url_for('settings.test_notification', provider=provider) }}">
+  <div>
+    <form method="POST">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-      <button type="submit" class="secondary outline" style="width:auto">{{ label }}</button>
+
+      {% for anchor, group_name, group_help, keys in groups %}
+      <article class="settings-section" id="{{ anchor }}">
+        <header>
+          <strong>{{ group_name }}</strong>
+          <div class="subtle">{{ group_help }}</div>
+        </header>
+
+        {% for key, label in keys if key in specs %}
+          {% set default, help_text, kind = specs[key] %}
+          {% set overridden = overrides.get(key) %}
+          <div class="setting">
+            <div class="setting-label">
+              <label for="{{ key }}">{{ label }}</label>
+              <span class="key">{{ key }}</span>
+            </div>
+            <div class="setting-field">
+              <span class="help" id="{{ key }}_help">{{ help_text }}</span>
+              {% if kind in ('secret', 'password') %}
+              {# Never rendered back: blank keeps the stored value. #}
+              <input type="password" id="{{ key }}" name="{{ key }}" value="" autocomplete="new-password"
+                     placeholder="{{ effective[key] + ' (set) - leave blank to keep' if effective[key] else 'not set' }}"
+                     aria-describedby="{{ key }}_help {{ key }}_effective">
+              {% if overridden %}
+              <label class="subtle"><input type="checkbox" name="clear_{{ key }}" value="1"> Clear the stored value</label>
+              {% endif %}
+              {% elif kind == 'bool' or kind.startswith('choice:') %}
+              {% set choices = [('1', 'On'), ('0', 'Off')] if kind == 'bool'
+                               else kind[7:].split('|')|map('string')|list %}
+              <select id="{{ key }}" name="{{ key }}" aria-describedby="{{ key }}_help {{ key }}_effective">
+                <option value="" {% if not overridden %}selected{% endif %}>Use default ({{ effective[key] if not overridden else default }})</option>
+                {% for c in choices %}
+                {% set value, text = (c if c is not string else (c, c)) %}
+                <option value="{{ value }}" {% if overridden == value %}selected{% endif %}>{{ text }}</option>
+                {% endfor %}
+              </select>
+              {% else %}
+              <input type="text" id="{{ key }}" name="{{ key }}"
+                     value="{{ overrides.get(key, '') }}"
+                     placeholder="{{ effective[key] }}"
+                     aria-describedby="{{ key }}_help {{ key }}_effective">
+              {% endif %}
+              <span class="effective" id="{{ key }}_effective">
+                <span>In effect: <code>{{ effective[key] if effective[key] != '' else '(empty)' }}</code></span>
+                {% if overridden %}<span class="overridden">overridden here</span>
+                {% else %}<span>default <code>{{ default if default != '' else '(empty)' }}</code></span>{% endif %}
+              </span>
+              {% if key == 'FILE_NAME_TEMPLATE' %}
+              <span class="effective">Example: <code>{{ name_example }}</code>
+                (for {{ name_example_source }})</span>
+              {% endif %}
+            </div>
+          </div>
+        {% endfor %}
+      </article>
+      {% endfor %}
+
+      <div class="save-bar">
+        <span class="subtle">Changes apply at the start of the next cycle.</span>
+        <button type="submit">Save settings</button>
+      </div>
     </form>
-    {% endfor %}
+
+    <article id="quality" class="settings-section">
+      <header>
+        <strong>Quality profile</strong>
+        <div class="subtle">Which qualities are acceptable, in order of preference (1 = best), and when to stop upgrading</div>
+      </header>
+      <p class="subtle">
+        Only ticked qualities are downloaded; their order is the ranking after the version tier
+        (Extended Mix &gt; Original Mix &gt; other). An MP3 whose bitrate is known and below 320 kbps is
+        always rejected, whatever is ticked here.
+      </p>
+      <form method="POST" action="{{ url_for('settings.save_quality_profile') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <div class="table-wrap">
+          <table class="track-table quality-table">
+            <thead>
+              <tr>
+                <th scope="col" class="col-check">Allowed</th>
+                <th scope="col">Quality</th>
+                <th scope="col" class="num">Order</th>
+              </tr>
+            </thead>
+            <tbody>
+            {% for q in quality_rows %}
+              {% set on = q.key in profile.allowed %}
+              <tr>
+                <td>
+                  <input type="checkbox" id="allow_{{ q.key }}" name="allowed" value="{{ q.key }}"
+                         {% if on %}checked{% endif %}>
+                </td>
+                <td>
+                  <label for="allow_{{ q.key }}">{{ q.label }}</label>
+                  {% if q.key in floor_blocked %}<div class="subtle">always rejected by the 320 kbps floor</div>{% endif %}
+                </td>
+                <td class="num">
+                  <input type="number" name="order_{{ q.key }}" min="1" step="1" class="order-input"
+                         aria-label="Order of {{ q.label }}"
+                         value="{{ profile.allowed.index(q.key) + 1 if on else '' }}">
+                </td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <div class="setting">
+          <div class="setting-label"><label for="cutoff">Cutoff</label></div>
+          <div class="setting-field">
+            <span class="help">Files at or above this quality are not upgraded for quality.</span>
+            <select id="cutoff" name="cutoff">
+              {% for q in quality_rows %}
+              <option value="{{ q.key }}" {% if q.key == profile.cutoff %}selected{% endif %}>{{ q.label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
+        <div class="setting">
+          <div class="setting-label"><label for="upgrades_allowed">Quality upgrades</label></div>
+          <div class="setting-field">
+            <label class="subtle">
+              <input type="checkbox" id="upgrades_allowed" name="upgrades_allowed" value="1" {% if profile.upgrades_allowed %}checked{% endif %}>
+              Upgrade files below the cutoff to a better quality of the same version
+            </label>
+            <span class="help">
+              Off by default, so turning it on is a deliberate choice: check
+              <a href="{{ url_for('wanted.cutoff_page') }}">Wanted → Cutoff unmet</a> first to see what would be
+              re-downloaded. Replaced files are moved to <code>.quarantine/&lt;playlist&gt;/replaced/</code>.
+            </span>
+          </div>
+        </div>
+        <footer><button type="submit">Save quality profile</button></footer>
+      </form>
+    </article>
+
+    <article id="notifications-test" class="settings-section">
+      <header>
+        <strong>Test notifications</strong>
+        <div class="subtle">Uses the saved settings above; save first</div>
+      </header>
+      <div class="card-actions">
+        {% for provider, label in [('ntfy', 'Send ntfy test'), ('webhook', 'Send webhook test'), ('subsonic', 'Start a Subsonic scan')] %}
+        <form method="POST" action="{{ url_for('settings.test_notification', provider=provider) }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button type="submit" class="secondary outline">{{ label }}</button>
+        </form>
+        {% endfor %}
+      </div>
+    </article>
   </div>
-</article>
+</div>
 
 {% endblock %}
