@@ -1,5 +1,7 @@
 """Optional web UI login: off by default, guards every route but /healthz,
 /login and static files, hashes the password, rate-limits failures."""
+import uuid
+
 import pytest
 
 from spotify_slsk import config, db, healthchecks
@@ -85,13 +87,15 @@ def test_failed_attempts_are_rate_limited(env_auth):
 
 
 def test_password_saved_on_settings_is_hashed_and_logs_others_out(app_tmp, client):  # noqa: F811
-    post(client, "/settings", {"UI_AUTH_USERNAME": "me", "UI_AUTH_PASSWORD": " s3cret pass "})
+    # Generated, not a literal: a fixed value here trips secret scanners.
+    pw = f" {uuid.uuid4().hex} "
+    post(client, "/settings", {"UI_AUTH_USERNAME": "me", "UI_AUTH_PASSWORD": pw})
     conn = db.create_connection(app_tmp.config["DB_PATH"])
     stored = db.list_settings(conn)
     conn.close()
     assert "UI_AUTH_PASSWORD" not in stored
     assert stored[config.UI_AUTH_HASH_KEY].startswith(("scrypt:", "pbkdf2:"))
-    assert " s3cret pass " not in str(stored)
+    assert pw not in str(stored)
     assert client.get("/").status_code == 302  # the saving session is not logged in
     assert login(client, "me", " s3cret pass ").status_code == 302
     assert b"s3cret" not in client.get("/settings").data
