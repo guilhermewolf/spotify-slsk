@@ -39,7 +39,7 @@ and CI all agree; the Makefile defaults to `python3.12`). Individual targets:
   findings rather than adding ignores.
 - `make typecheck` — mypy over `spotify_slsk/` (`ignore_missing_imports`,
   `check_untyped_defs`). Every public function is annotated; keep it that way.
-- `make test` — 747 tests. Fast (~5s); no network, no external services. The
+- `make test` — 869 tests. Fast (~5s); no network, no external services. The
   real-FLAC decode tests need the `flac` CLI (CI apt-installs it) and skip with
   a reason without it.
 - `make audit` — `pip-audit` against the pinned `requirements.txt`. Advisories
@@ -95,13 +95,17 @@ spotify_slsk/
   slskd/               models.py (typed JSON), client.py, search.py, transfers.py
   matching/            normalize.py (shared), candidates.py (search phase),
                        tracks.py (local phase), quality.py (quality ladder + profile)
-  importer/            tags.py (read/write tags + ISRC, audio length), process.py (verify,
-                       tag, move, reject/delete/blocklist), audio_check.py (fake lossless)
-  library/             acquire.py (download + upgrade a track), reconcile.py (startup_check),
-                       health.py (library health scan + quarantine)
+  importer/            tags.py (the one tagger: Spotify tags, read/diff, ISRC, audio length),
+                       artwork.py (cached cover fetch), process.py (verify, tag, name,
+                       move, reject/delete/blocklist), audio_check.py (fake lossless)
+  library/             acquire.py (link or download + upgrade a track), reconcile.py
+                       (startup_check), health.py (scan, quarantine, recycle bin),
+                       naming.py (FILE_NAME_TEMPLATE), rename.py (rename existing files),
+                       playlist_files.py (<name>.m3u8 + cover.jpg)
   webui/               app factory + blueprints (templates/, static/)
 tests/                 pytest suite (conftest.py enforces isolation)
   fixtures/slskd/      slskd payloads in the real wire shape
+  fixtures/audio/      tiny silent mp3/flac/m4a/aiff + a cover, for real tag round trips
 ```
 
 Dependency direction: `daemon` → `library`/`importer`/`spotify`/`slskd` →
@@ -151,11 +155,11 @@ Docker `HEALTHCHECK` compares `HEARTBEAT_FILE` mtime against `HEARTBEAT_STALE_SE
 - **`spotify/`** — `client.setup_spotify_client()` (returns `None` without credentials; token cache at `SPOTIPY_CACHE_PATH`), `client.fetch_playlist_name` (web UI, retries transport errors); `sync.fetch_and_compare_tracks` (snapshot short-circuit, diff, insert, duration backfill), `sync.migrate_env_playlists` (first boot).
 - **`slskd/models.py`** — tolerant typed views of slskd JSON: `SearchResponse`/`PeerFile` (camelCase in; `ext` from the filename because `extension` is often `""`; `lockedFiles` kept separate and never offered), `Search`, `Transfer` with `outcome` (`TransferOutcome` or `None` while pending) and `peer_fault`. All slskd JSON is read through these. `remote_basename` lives here.
 - **`slskd/client.py`** — `get_client()` (lazy, shared by the daemon thread), `new_client()` (for other threads), shutdown wiring (`set_shutdown_event`, `interruptible_sleep`, `shutting_down`), `wait_for_slskd_healthy`.
-- **`slskd/search.py`** — query waterfall (multi-query + CJK passthrough), `_run_one_search` (server-side `responseLimit` early stop; the search is **always deleted in `finally`**), `search_and_download` (falls through on no *usable* candidates; records per-query search history), `download_and_verify`, and `interactive_search` (read-only, collect-everything, own client).
+- **`slskd/search.py`** — query waterfall (multi-query + CJK passthrough; neutral release segments like "Radio Edit" / "Remastered 2011" are stripped from the title first, and every variant must keep a core title word — the album-stripping variant once produced "radio edit reber"), `_run_one_search` (server-side `responseLimit` early stop; the search is **always deleted in `finally`**), `search_and_download` (falls through on no *usable* candidates; records per-query search history), `download_and_verify`, and `interactive_search` (read-only, collect-everything, own client).
 - **`slskd/transfers.py`** — `grab_candidate`, the single enqueue/wait/verify step shared by auto and manual grabs (tried + history on any failure; blocklist only on definitive peer faults; a raised API error records nothing permanent), `wait_for_completion`, completion grace, `last_download`.
 - **`matching/`** — see "Matchers" under Gotchas. `normalize.py` (folding, artist splitting, version keywords/tiers — shared), `candidates.py` (`evaluate_candidates`: blocklist + release terms + quality profile + fixed 320 floor for MP3s with a known bitrate + effective-bitrate floor + FLAC plausibility + duration vs Spotify + the strict name rules in `filename_match`; returns every file with `accepted`, a human `reason`, `quality` and `quality_label`; `sort_candidates`: see Quality below), `tracks.py` (`score_track_match`, `_looks_like_match`, difflib helpers), `quality.py` (the ladder, `classify`, `quality_of_file`, `effective_quality`, `QualityProfile`; imports nothing from the package so `config` can use it).
-- **`importer/`** — `tags.py`: `write_tags` (raises; used by the UI re-tag), `tag_audio_file` (never raises; daemon), `extract_metadata_from_file`, `audio_length_seconds`, `read_isrc`/`normalize_isrc`. `process.py`: `process_downloaded_file` (verify against the requested track, ISRC check, untagged filename+duration fallback, lossless check, tag, move, record verdict) and `_reject_and_log` (the only place a downloaded file is deleted). `audio_check.py`: the fake-lossless detector (see Validation below).
-- **`library/`** — `acquire.py`: `handle_track_download`, `try_upgrade_track` (better version tier; below-cutoff quality upgrade; replaces a *suspect* lossless file with a lossless copy). `reconcile.py`: `startup_check` and its local file index (non-destructive). `health.py`: `verify_file`/`scan_step` (the report-only library health scan), `quarantine_track` and `retire_replaced_file` (daemon only), `backfill_qualities` (bounded per-cycle quality read).
+- **`importer/`** — `tags.py` is the single tagger: `spotify_tags(row, isrc)` builds a format-neutral `{key: [values]}` from a DB row (title, artists multi-value, album, album artist, track n/total, disc, release date, ISRC, Spotify track id; unknown fields are left out so nothing is blanked), `write_tags(path, tags, cover)` (raises; UI re-tag) maps it to Vorbis comments (FLAC + picture), ID3v2.4 (MP3/AIFF, APIC, `TXXX:SPOTIFY_TRACK_ID`) or MP4 atoms (M4A, `covr`, freeform ISRC/id), `tag_audio_file` (never raises; daemon), `read_tags`/`tag_diff` (the track page's preview), `extract_metadata_from_file`, `audio_length_seconds`, `read_isrc`/`normalize_isrc`. Imports are tagged from the verified Spotify row, not the peer's tags; on an ISRC conflict the file's ISRC is kept. `artwork.py`: `fetch_image(url, key)` — https on Spotify's image CDNs only (`*.scdn.co`, `*.spotifycdn.com`), no redirects, 10 s timeout, 10 MB cap, JPEG/PNG only, cached under `ARTWORK_CACHE_DIR` (default `./data/artwork`; conftest sandboxes it) with LRU eviction beyond 200 MB, failures negative-cached for 24 h (`<key>.fail`), never raises; `album_cover(row)`. `process.py`: `process_downloaded_file` (verify against the requested track, ISRC check, untagged filename+duration fallback, lossless check, tag, move, record verdict) and `_reject_and_log` (the only place a downloaded file is deleted). `audio_check.py`: the fake-lossless detector (see Validation below).
+- **`library/`** — `acquire.py`: `link_existing_copy` (cross-playlist dedupe, below), `handle_track_download`, `try_upgrade_track` (better version tier; below-cutoff quality upgrade; replaces a *suspect* lossless file with a lossless copy). `reconcile.py`: `startup_check` and its local file index (non-destructive). `health.py`: `verify_file`/`scan_step` (the report-only library health scan), `quarantine_track` and `retire_replaced_file` (daemon only), `purge_recycle_bin`, `backfill_qualities` (bounded per-cycle quality read). `naming.py`: `file_name(template, row, original, quality)`, `validate_template`, `safe_name`. `rename.py`: `rename_plan` (preview) and `apply_rename` (daemon only). `playlist_files.py`: `write_playlist_files` (daemon, after each playlist; never raises).
 - **`notify.py`** — ntfy; silent when unconfigured.
 - **`db/`** — SQLite persistence, split by table family and re-exported from `db/__init__.py`. WAL mode + `busy_timeout=5000` + `PRAGMA user_version` migrations (`db/connection.py`). Per-playlist dynamic tables (`pl_<sanitized_name>` + `pl_<…>_tried`) plus a global `playlists_meta` catalogue keyed by Spotify id, a global `settings` key-value bag, a global `blocklist` (peer files, or whole peers when `filename` is NULL), a global `history` event log and a global `file_checks` table (validation verdicts, `db/checks.py`). `get_setting(conn, key, default)` prefers DB, falls back to env, then default — so any env var becomes a mutable setting for free.
 - **`spotify_slsk/webui/`** — Flask dashboard (see next section).
@@ -177,7 +181,7 @@ cookie flags, CSRF guard, security headers/CSP, per-request DB connection, the
 header health badge) and registers one blueprint per area: `playlists`
 (dashboard, playlist page, playlist mutations), `tracks` (track page,
 retry/re-tag, interactive search/grab), `wanted` (wanted, history, blocklist),
-`health` (library health report, scan/quarantine/ignore),
+`health` (library health report, scan/quarantine/ignore), `library` (rename preview/apply),
 `settings` (settings, ntfy probe), `system` (file, logs, activity, healthz).
 Endpoints are blueprint-qualified — templates use `url_for('playlists.dashboard')`,
 not `url_for('dashboard')`. URLs are pinned by
@@ -193,6 +197,7 @@ Routes:
 - `GET /history?event=&playlist=&before_id=` — persistent events, 200 per page
 - `GET /blocklist` · `POST /blocklist/<id>/delete` · `POST /blocklist/ban-user`
 - `GET /library-health?problem=&playlist=&ignored=` · `POST /library-health/scan` · `POST /library-health/quarantine` (`only=pid:tid` or checked `tracks`) · `POST /library-health/ignore[?undo=1]` — scan findings with evidence; scan and quarantine are queued for the daemon
+- `GET /library/rename?playlist=` · `POST /library/rename` — old → new names for the current `FILE_NAME_TEMPLATE`, per playlist. A POST without `confirm=1` renders `rename_confirm.html` (the no-JS confirm step); with it, the selected renames are queued for the daemon. Names are recomputed server-side; the form carries only `pid:tid` keys
 - `GET /settings` — grouped, validated tunables · `POST /settings/quality` — the quality profile editor (checkbox + numeric order per quality, cutoff select, upgrades toggle; validated as a whole)
 - `GET /logs` · `GET /logs.json?since=&limit=` · `GET /activity.json` — live log tail and current daemon phase
 - `GET /file?rel=` — serves a downloaded file for the in-browser audio preview; `rel` is resolved against the playlists root and re-checked with `commonpath` after symlink normalisation
@@ -204,7 +209,8 @@ search runs on a UI background thread with its own slskd client (not the
 daemon's shared session) and a blocklist snapshot, and never writes. A grab is
 queued in `runtime_state`; the daemon drains the queue at the top of each cycle
 and after each playlist (`daemon._process_manual_grabs`). Quarantine requests
-work the same way (`daemon._process_quarantines`, top of each cycle), as do
+work the same way (`daemon._process_quarantines`, top of each cycle), so do
+renames (`daemon._process_renames`, right after), as do
 Cutoff-unmet searches (`daemon._process_upgrade_requests`, after the grabs), and
 "Scan library" only sets the `_library_scan_pending` settings flag that
 `daemon._run_library_scan` reads after the playlists.
@@ -297,7 +303,54 @@ unnormalised.
     lands on the track, the previous file moves to
     `<playlists_root>/.quarantine/<table>/replaced/` (collision-safe) and
     history records `replaced_file` (`library.health.retire_replaced_file`).
-    A file outside the playlists root is left in place.
+    A file outside the playlists root is left in place. The retirement time
+    goes to the `recycle_bin` table (`db.recycle`), not the file's mtime.
+12. **Recycle bin vs quarantine.** `.quarantine/<table>/replaced/` is the
+    recycle bin: with `RECYCLE_BIN_RETENTION_DAYS` > 0, `daemon._run_housekeeping`
+    (at most daily, `_recycle_bin_purged_at`) deletes files there retired more
+    than N days ago (`health.purge_recycle_bin`, history `recycle_purged`,
+    symlinks not followed). Retention is read from `recycle_bin.retired_at`,
+    never mtime: a file with no record is registered as retired on first
+    sight, so a failed record can only delay a purge, never hasten it. Files the operator quarantined (`.quarantine/<table>/` itself)
+    are **never** purged automatically. Default 0 keeps everything.
+13. **Naming.** `FILE_NAME_TEMPLATE` names *newly imported* files only
+    (`process_downloaded_file`, `link_existing_copy`); existing files change
+    only via /library/rename. Tokens: `{artist} {title} {album} {album_artist}
+    {track} {disc} {year} {playlist_index} {isrc} {quality} {original_filename}`,
+    numeric ones with a pad width (`{track:02}`); the extension is the file's
+    own. The default `{original_filename}` returns the peer basename
+    **untouched** (exactly the pre-template behaviour). Other templates are
+    sanitised like Lidarr's `CleanFileName`: `: `→` - `, `:`→`-`, `/ \`→`+`,
+    `?`→`!`, `*`→`-`, `< > | "` and control chars dropped, CON/NUL/COM1…
+    get `_`, leading/trailing dots and spaces trimmed, 200-byte cap. Empty
+    tokens don't leave dangling ` - `. Every placement in the library — import,
+    link, rename — goes through `utils.free_path`: **nothing is overwritten**
+    (" (2)"); before Tier 5 a same-named import replaced the existing file.
+14. **Cross-playlist dedupe** (`library.acquire.link_existing_copy`, first step
+    of `handle_track_download`): a pending track whose Spotify id — else ISRC —
+    is downloaded in another catalogued playlist is hardlinked
+    (`LINK_MODE=hardlink`; copy on EXDEV/unsupported), copied (`copy`) or
+    downloaded as before (`off`). The row gets its own path, the source's
+    quality, history `linked`. A hardlink is an independent name: quarantine,
+    replace, rename and the scan all act on the row's own path, so one
+    playlist's copy never affects another's (`tests/test_link.py`).
+    **Exception: tags.** A hardlink shares its data, so Re-tag (or any tag
+    write) on one playlist's name changes every playlist's copy. That is
+    benign — linked rows are the same track (Spotify id or ISRC), so the tags
+    are identical — and it is why `link_existing_copy` doesn't re-tag. With
+    `LINK_MODE=copy` each copy is tagged independently.
+15. **Playlist files.** After each playlist pass `<root>/<table>/<playlist
+    name>.m3u8` (UTF-8 `#EXTM3U`, `#EXTINF:<s>,Artist - Title`, relative paths,
+    Spotify order from the v8 `position` column, downloaded rows only) and
+    `cover.jpg` (Spotify playlist image, `playlists_meta.cover_url`) are
+    rewritten when changed (`WRITE_M3U`, `WRITE_PLAYLIST_COVER`). A
+    `#SPOTIFY-SLSK:<playlist id>` line lets a renamed playlist remove its own
+    old m3u8 (name compared case-insensitively); an m3u8 without the marker is
+    never overwritten (ours goes to `<name> (spotify-slsk).m3u8`). The cover is
+    written as cover.jpg/cover.png by content and replaced only when it still
+    has the sha256 we last wrote (`_playlist_cover_sha256:<id>` setting). `startup_check` indexes
+    audio extensions only and scan/rename work from DB rows, so neither file
+    is ever matched.
 
 Files enter via the shared `/downloads` volume, then move to `/playlists/<table>/` after tagging.
 
@@ -322,7 +375,11 @@ see `SETTINGS_SPEC` and `validate_setting` in `spotify_slsk/config.py`:
   pruned once per cycle), `UPGRADE_CHECK_INTERVAL_HOURS` (168),
   `LOSSLESS_CHECK_ENABLED` (1, kind `bool`), `LOSSLESS_FAKE_CUTOFF_HZ` (19500),
   `LOSSLESS_MIN_DROP_DB` (15), `LIBRARY_SCAN_INTERVAL_HOURS` (0 = manual only),
-  `REQUIRED_TERMS` / `IGNORED_TERMS` (empty; kind `terms`)
+  `REQUIRED_TERMS` / `IGNORED_TERMS` (empty; kind `terms`), `EMBED_COVER_ART` (1),
+  `FILE_NAME_TEMPLATE` (`{original_filename}`; kind `template`, unknown token →
+  error, example rendered on /settings), `LINK_MODE` (hardlink; kind
+  `choice:hardlink|copy|off`), `WRITE_M3U` (1), `WRITE_PLAYLIST_COVER` (1),
+  `RECYCLE_BIN_RETENTION_DAYS` (0 = keep forever)
 - `QUALITY_PROFILE` — JSON, **not** in `SETTINGS_SPEC` (own form, so the main
   form never clears it); validated by `matching.quality.make_profile`.
 - `SLSKD_PREFERRED_FORMATS` — **deprecated**: only seeds the first profile
@@ -426,11 +483,18 @@ threaded through the download call chain. The real per-track cap is
   also sees the raw path); an invalid regex in the env logs an error at import.
 - **Image.** The Dockerfile `apk add`s `flac` and strips numpy's bundled test
   suite; numpy (+ its OpenBLAS) is most of the ~76 MB the image grew in Tier 3.
-- **Schema version is 7.** v7 adds `quality` to every catalogued per-playlist
+- **Schema version is 8.** v8 adds the Spotify tagging columns to every
+  catalogued per-playlist table — `album_artist`, `artist_names` (JSON list),
+  `track_number`, `track_total`, `disc_number`, `release_date`, `album_id`,
+  `cover_url`, `position` (`_TRACK_COLUMNS`; `db.SPOTIFY_COLUMNS` lists what
+  the sync fills) — and `cover_url` to `playlists_meta` (ALTER guard), and
+  clears snapshots so the next sync backfills them (`spotify.sync.track_fields`
+  + `db.backfill_spotify_fields`, COALESCE except `position`, which follows the
+  playlist order). `TestSchemaMigrations.test_v7_db_upgrades_to_v8` builds a real
+  v7 DB. v7 adds `quality` to every catalogued per-playlist
   table (same `_migrate_track_columns` path, but without clearing snapshots:
   quality comes from the file, not Spotify); `TestSchemaMigrations.test_v6_db_upgrades_to_v7`
-  builds a real v6 DB. v6 adds `isrc` to every catalogued per-playlist
+  (now `test_v6_db_upgrades_to_current`) builds a real v6 DB. v6 adds `isrc` to every catalogued per-playlist
   table at connect time and clears snapshots so the next sync backfills it
-  (same mechanism as v5, `_migrate_track_columns`; `backfill_durations` fills
-  both with COALESCE), plus `file_checks` (`CREATE TABLE IF NOT EXISTS`).
-  `TestSchemaMigrations.test_v5_db_upgrades_to_v6` builds a real v5 DB. v5 (`db/connection.py::_migrate_track_columns`, run from `_ensure_schema_version`) adds `duration_ms` to every catalogued per-playlist table at connect time — not lazily in `create_table`, because the UI reads tables of playlists the daemon hasn't synced since the upgrade — and clears every stored `snapshot_id` so the next sync re-reads Spotify and backfills durations (`db.backfill_durations`). `blocklist` and `history` are `CREATE TABLE IF NOT EXISTS`. `TestSchemaMigrations.test_v4_db_upgrades_to_v5` builds a real v4 DB. Upgrading from an older DB is automatic and tested (`TestSchemaMigrations`): the ALTER TABLE guards in `_ensure_playlists_meta_table` handle v2 DBs, `create_table` adds `last_upgrade_check` to older per-playlist tables, `CREATE TABLE IF NOT EXISTS` handles settings, and v4 added `cycle_history` (one row per completed cycle, capped to ~200 rows by `db.record_cycle`). The `tried_files` column on per-playlist tables is dead — nothing reads it; it is retained only so existing DBs need no migration.
+  (same mechanism as v5, `_migrate_track_columns`; now `backfill_spotify_fields`), plus `file_checks` (`CREATE TABLE IF NOT EXISTS`).
+  `TestSchemaMigrations.test_v5_db_upgrades_to_v6` builds a real v5 DB. v5 (`db/connection.py::_migrate_track_columns`, run from `_ensure_schema_version`) adds `duration_ms` to every catalogued per-playlist table at connect time — not lazily in `create_table`, because the UI reads tables of playlists the daemon hasn't synced since the upgrade — and clears every stored `snapshot_id` so the next sync re-reads Spotify and backfills durations. `blocklist` and `history` are `CREATE TABLE IF NOT EXISTS`. `TestSchemaMigrations.test_v4_db_upgrades_to_v5` builds a real v4 DB. Upgrading from an older DB is automatic and tested (`TestSchemaMigrations`): the ALTER TABLE guards in `_ensure_playlists_meta_table` handle v2 DBs, `create_table` adds `last_upgrade_check` to older per-playlist tables, `CREATE TABLE IF NOT EXISTS` handles settings, and v4 added `cycle_history` (one row per completed cycle, capped to ~200 rows by `db.record_cycle`). The `tried_files` column on per-playlist tables is dead — nothing reads it; it is retained only so existing DBs need no migration.

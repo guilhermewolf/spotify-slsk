@@ -38,6 +38,11 @@ class TestEnvironmentIsolation:
         assert "isolated-env" in downloads
         assert os.path.isdir(downloads)
 
+    def test_artwork_cache_is_a_temp_dir_not_the_data_volume(self):
+        from spotify_slsk.importer import artwork
+
+        assert "isolated-env" in artwork.cache_dir()
+
     def test_ntfy_disabled_so_no_notifications_are_sent(self):
         assert os.environ["NTFY_URL"] == ""
         assert os.environ["NTFY_TOPIC"] == ""

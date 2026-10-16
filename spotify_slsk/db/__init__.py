@@ -19,6 +19,7 @@ from .checks import (
 )
 from .connection import (
     SCHEMA_VERSION,
+    SPOTIFY_COLUMNS,
     create_connection,
 )
 from .cycles import (
@@ -38,8 +39,14 @@ from .playlists import (
     list_playlists,
     remove_playlist,
     rename_playlist_meta,
+    set_playlist_cover_url,
     set_playlist_enabled,
     upsert_playlist_meta,
+)
+from .recycle import (
+    forget_retired,
+    record_retired,
+    retired_times,
 )
 from .settings import (
     delete_setting,
@@ -50,11 +57,12 @@ from .settings import (
 from .tracks import (
     MAX_ATTEMPTS_BEFORE_SUSPEND,
     add_tried_file,
-    backfill_durations,
+    backfill_spotify_fields,
     clear_tried_entries,
     create_table,
     create_tried_table,
     fetch_all_tracks,
+    find_downloaded_copies,
     get_pending_tracks,
     get_track,
     get_tried_files,
@@ -66,20 +74,27 @@ from .tracks import (
     playlist_stats,
     reset_track_for_redownload,
     retry_track,
+    set_track_path,
     set_track_quality,
     tracks_missing_quality,
     update_download_status,
 )
 
 __all__ = [
+    "forget_retired",
+    "record_retired",
+    "retired_times",
+    "set_track_path",
     "set_track_quality",
     "tracks_missing_quality",
     "SCHEMA_VERSION",
+    "SPOTIFY_COLUMNS",
     "create_connection",
     "get_playlist_meta",
     "upsert_playlist_meta",
     "rename_playlist_meta",
     "list_playlists",
+    "set_playlist_cover_url",
     "set_playlist_enabled",
     "remove_playlist",
     "get_setting",
@@ -94,8 +109,9 @@ __all__ = [
     "retry_track",
     "create_table",
     "insert_track",
-    "backfill_durations",
+    "backfill_spotify_fields",
     "fetch_all_tracks",
+    "find_downloaded_copies",
     "MAX_ATTEMPTS_BEFORE_SUSPEND",
     "update_download_status",
     "create_tried_table",

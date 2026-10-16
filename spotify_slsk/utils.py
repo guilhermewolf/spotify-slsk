@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 
 
@@ -28,3 +29,13 @@ def fmt_duration(seconds: float | None) -> str:
     """Seconds -> "m:ss"."""
     seconds = int(round(seconds or 0))
     return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def free_path(directory: str, basename: str) -> str:
+    """`directory/basename`, or "name (2).ext" ... if that is taken."""
+    stem, ext = os.path.splitext(basename)
+    candidate, n = os.path.join(directory, basename), 1
+    while os.path.lexists(candidate):
+        n += 1
+        candidate = os.path.join(directory, f"{stem} ({n}){ext}")
+    return candidate

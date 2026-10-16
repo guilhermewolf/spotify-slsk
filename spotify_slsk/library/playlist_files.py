@@ -1,0 +1,174 @@
+"""Files beside the music in each playlist folder: `<playlist name>.m3u8`
+(WRITE_M3U) and `cover.jpg` / `cover.png` (WRITE_PLAYLIST_COVER, never
+replacing a cover we didn't write). Daemon thread only.
+
+The m3u8 is UTF-8 extended M3U: downloaded tracks in Spotify playlist order
+with `#EXTINF:<seconds>,Artist - Title` and paths relative to the folder.
+It carries a `#SPOTIFY-SLSK:<playlist id>` marker, so a playlist renamed on
+Spotify replaces its old m3u8 instead of leaving a stale one; m3u8 files
+without our marker are never overwritten or removed (a user's file of the
+same name pushes ours to "<name> (spotify-slsk).m3u8"). Both files are rewritten only when
+their content changed. The matchers and scans never look at them: startup
+reconciliation indexes audio extensions only, and the health scan and the
+renamer work from DB rows.
+"""
+from __future__ import annotations
+
+import hashlib
+import logging
+import os
+import sqlite3
+from typing import Any
+
+from .. import config
+from ..db import get_setting, list_playlists, list_tracks, set_setting
+from ..importer.artwork import fetch_image
+from .naming import safe_name
+
+MARKER = "#SPOTIFY-SLSK:"
+# Internal settings key (+ playlist id): sha256 of the cover we last wrote.
+COVER_HASH_KEY = "_playlist_cover_sha256:"
+
+
+def m3u8_name(playlist_name: str) -> str:
+    return safe_name(playlist_name, ".m3u8") or "playlist.m3u8"
+
+
+def build_m3u8(playlist: dict[str, Any], tracks: list[dict[str, Any]], folder: str) -> str:
+    lines = ["#EXTM3U", f"#PLAYLIST:{playlist['name']}", f"{MARKER}{playlist['playlist_id']}"]
+    ordered = sorted(
+        (t for t in tracks if t["downloaded"] and t["path"] and os.path.isfile(t["path"])),
+        key=lambda t: (t["position"] is None, t["position"] or 0, t["name"].lower()),
+    )
+    for t in ordered:
+        seconds = round(t["duration_ms"] / 1000) if t.get("duration_ms") else -1
+        title = f"{t['artists']} - {t['name']}".replace("\n", " ")
+        lines += [f"#EXTINF:{seconds},{title}", os.path.relpath(t["path"], folder).replace(os.sep, "/")]
+    return "\n".join(lines) + "\n"
+
+
+def _write_if_changed(path: str, data: bytes) -> bool:
+    try:
+        with open(path, "rb") as f:
+            if f.read() == data:
+                return False
+    except OSError:
+        pass
+    tmp = f"{path}.tmp"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, path)
+    return True
+
+
+def _ours(path: str, playlist_id: str) -> bool:
+    """True when `path` is an m3u8 this playlist wrote (marker line)."""
+    try:
+        with open(path, "rb") as f:
+            return f"{MARKER}{playlist_id}".encode() in f.read(4096).splitlines()
+    except OSError:
+        return False
+
+
+def _m3u8_target(folder: str, name: str, playlist_id: str) -> str | None:
+    """Where to write: `name` when absent or ours, else the
+    "<stem> (spotify-slsk).m3u8" fallback (same rule). A user's file is
+    never overwritten; None when both names are taken by other files."""
+    stem = name[: -len(".m3u8")]
+    for candidate in (name, f"{stem} (spotify-slsk).m3u8"):
+        path = os.path.join(folder, candidate)
+        if not os.path.lexists(path) or _ours(path, playlist_id):
+            return path
+    return None
+
+
+def _same_entry(a: str, b: str) -> bool:
+    # samefile, not a casefold compare: on a case-insensitive FS (SMB, macOS)
+    # "summer.m3u8" and "Summer.m3u8" are one file; on a case-sensitive one
+    # (Linux, Unraid) they are two, and the old-case one is stale.
+    if os.path.basename(a) == os.path.basename(b):
+        return True
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _remove_stale_m3u8(folder: str, keep: str, playlist_id: str) -> None:
+    """Remove this playlist's other m3u8s (e.g. after a Spotify rename).
+    A case-only rename is the same file on SMB/macOS and a stale one on
+    case-sensitive filesystems; _same_entry tells them apart."""
+    for name in os.listdir(folder):
+        path = os.path.join(folder, name)
+        if (
+            not name.lower().endswith(".m3u8") or not os.path.isfile(path)
+            or _same_entry(path, keep) or not _ours(path, playlist_id)
+        ):
+            continue
+        try:
+            os.remove(path)
+            logging.info(f"[playlist] Removed stale {path}")
+        except OSError as e:
+            logging.warning(f"[playlist] Could not remove {path}: {e}")
+
+
+def write_playlist_files(conn: sqlite3.Connection, playlist_id: str) -> None:
+    """Refresh the m3u8 and cover.jpg of one playlist's folder. Never
+    raises (a playlist file is never worth failing a cycle over); a folder
+    that doesn't exist yet (nothing downloaded) is left alone."""
+    if not (config.WRITE_M3U or config.WRITE_PLAYLIST_COVER):
+        return
+    try:
+        _write(conn, playlist_id)
+    except Exception:
+        logging.exception(f"[playlist] Could not write playlist files for {playlist_id}")
+
+
+def _write(conn: sqlite3.Connection, playlist_id: str) -> None:
+    playlist = next((p for p in list_playlists(conn) if p["playlist_id"] == playlist_id), None)
+    if playlist is None:
+        return
+    folder = os.path.join(os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists"), playlist["table_name"])
+    if not os.path.isdir(folder):
+        return
+    if config.WRITE_M3U:
+        target = _m3u8_target(folder, m3u8_name(playlist["name"]), playlist_id)
+        if target is None:
+            logging.warning(f"[playlist] {folder}: m3u8 names taken by other files; not written")
+        else:
+            text = build_m3u8(playlist, list_tracks(conn, playlist["table_name"]), folder)
+            if _write_if_changed(target, text.encode("utf-8")):
+                logging.info(f"[playlist] Wrote {target}")
+            _remove_stale_m3u8(folder, target, playlist_id)
+    if config.WRITE_PLAYLIST_COVER:
+        image = fetch_image(playlist.get("cover_url"), f"playlist_{playlist_id}")
+        if image:
+            _write_cover(conn, folder, playlist_id, image)
+
+
+def _sha256(path: str) -> str | None:
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return None
+
+
+def _write_cover(conn: sqlite3.Connection, folder: str, playlist_id: str, image: bytes) -> None:
+    """cover.jpg (cover.png for PNG bytes). A cover is replaced only when it
+    is absent or still exactly the one we last wrote (sha256 stored under
+    COVER_HASH_KEY): a cover the user put there is never touched."""
+    key = f"{COVER_HASH_KEY}{playlist_id}"
+    ours = get_setting(conn, key, None)
+    ext = "png" if image.startswith(b"\x89PNG") else "jpg"
+    path = os.path.join(folder, f"cover.{ext}")
+    if os.path.lexists(path) and _sha256(path) != ours:
+        if _sha256(path) != hashlib.sha256(image).hexdigest():
+            logging.info(f"[playlist] {path} is not ours; left alone")
+        return
+    if _write_if_changed(path, image):
+        logging.info(f"[playlist] Wrote {path}")
+    set_setting(conn, key, hashlib.sha256(image).hexdigest())
+    other = os.path.join(folder, f"cover.{'jpg' if ext == 'png' else 'png'}")
+    if ours and _sha256(other) == ours:  # our previous cover, other format
+        os.remove(other)

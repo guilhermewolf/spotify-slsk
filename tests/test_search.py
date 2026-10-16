@@ -83,6 +83,48 @@ class TestBuildSearchQueries:
         assert len(q) == len(set(x.lower() for x in q))
 
 
+class TestQueriesKeepCoreTitleWords:
+    """Regression (production log): "Desires Ignite - Radio Edit" by Reber
+    on album "Desires Ignite" produced the query "radio edit reber" — the
+    album-stripping variant removed every title word and kept the version
+    words, searching for every radio edit Reber ever made."""
+
+    @pytest.mark.parametrize("artist,title,album,first", [
+        ("Reber", "Desires Ignite - Radio Edit", "Desires Ignite", "desires ignite reber"),
+        ("Artist", "Song - Extended Mix", "Song", "song artist"),
+        ("Artist", "Track (Remastered 2011)", None, "track artist"),
+        ("Artist", "Title - Original Mix", "Title (Remixes)", "title artist"),
+        ("Artist", "Track - 2011 Remaster", None, "track artist"),
+    ])
+    def test_release_words_stripped_and_core_kept(self, artist, title, album, first):
+        queries = _build_search_queries(artist, title, album)
+        assert queries[0] == first
+        core = set(first.split()) - {artist.lower()}
+        for q in queries:
+            assert core & set(q.split()), f"query lost the title: {q!r}"
+            for word in ("radio", "extended", "original", "remastered", "remaster", "2011"):
+                assert word not in q.split(), f"release word kept: {q!r}"
+
+    def test_remix_keeps_remixer(self):
+        queries = _build_search_queries("Hamdi", "Dustup - Mefjus Remix", "Dustup")
+        assert queries[0] == "dustup mefjus remix hamdi"
+        assert all("mefjus" in q for q in queries)
+
+    def test_album_variant_never_title_free(self):
+        queries = _build_search_queries("Reber", "Desires Ignite - Radio Edit", "Desires Ignite")
+        assert "radio edit reber" not in queries
+        assert queries == ["desires ignite reber", "desires ignite"]
+
+    def test_cjk_title_kept_and_suffix_stripped(self):
+        queries = _build_search_queries("YOASOBI", "群青 - Radio Edit", "群青")
+        assert queries[0] == "群青 YOASOBI"
+        assert all("群青" in q for q in queries)
+        assert all("radio" not in q.lower() for q in queries)
+
+    def test_title_made_only_of_release_words_survives(self):
+        assert _build_search_queries("Artist", "Radio", None)[0] == "radio artist"
+
+
 class TestVersionMarker:
     def test_detects_remix(self):
         assert has_version_marker("Song (Walker Remix)") == "remix"
@@ -524,8 +566,9 @@ class TestBuildSearchQueriesHyphens:
         for q in queries:
             tokens = q.split()
             assert "radioedit" not in tokens, f"hyphen collapse in query: {q!r}"
-        # The shorter title-only fallback should be cleanly tokenized.
-        assert "mind twister radio edit" in queries
+        # Neutral release words are stripped from queries, not kept.
+        assert queries[0] == "mind twister kolter"
+        assert all("radio" not in q for q in queries)
 
     def test_no_double_spaces_in_any_query(self):
         queries = _build_search_queries("Kolter", "Mind Twister - Radio-Edit")

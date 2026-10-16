@@ -26,7 +26,7 @@ from flask import Flask, abort, g, request, session
 
 from .. import db
 from ..utils import fmt_duration
-from . import health, playlists, settings, system, tracks, wanted
+from . import health, library, playlists, settings, system, tracks, wanted
 from .helpers import health_snapshot, human_bytes
 
 # Reserved settings key holding the generated Flask secret. It is not in
@@ -164,7 +164,7 @@ def create_app(db_path: str, spotify_client=None, wake_callback=None) -> Flask:
             except Exception:
                 logging.debug("Error closing webui conn", exc_info=True)
 
-    for blueprint in (playlists.bp, tracks.bp, wanted.bp, health.bp, settings.bp, system.bp):
+    for blueprint in (playlists.bp, tracks.bp, wanted.bp, health.bp, library.bp, settings.bp, system.bp):
         app.register_blueprint(blueprint)
 
     @app.context_processor

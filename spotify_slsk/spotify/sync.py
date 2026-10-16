@@ -1,6 +1,7 @@
 """Spotify -> DB: fetch a playlist, diff it against its table, insert new rows."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
@@ -9,13 +10,14 @@ from typing import Any
 import spotipy
 
 from ..db import (
-    backfill_durations,
+    backfill_spotify_fields,
     create_table,
     fetch_all_tracks,
     get_playlist_meta,
     insert_track,
     list_playlists,
     rename_playlist_meta,
+    set_playlist_cover_url,
     upsert_playlist_meta,
 )
 from ..models import Track
@@ -42,7 +44,7 @@ def fetch_and_compare_tracks(
 ) -> tuple[list[Track], str]:
     # Pull the playlist root (cheap one-page call). snapshot_id lets us skip
     # the expensive paginated track fetch when nothing has changed.
-    playlist_info = sp.playlist(playlist_id, fields="name,snapshot_id")
+    playlist_info = sp.playlist(playlist_id, fields="name,snapshot_id,images")
     playlist_title = playlist_info["name"]
     snapshot_id = playlist_info.get("snapshot_id")
     table_name = sanitize_table_name(playlist_title)
@@ -57,6 +59,8 @@ def fetch_and_compare_tracks(
     # empty placeholder table ("0 / 0 downloaded" mid-sync).
     if stored_table is not None and (stored_table, stored_name) != (table_name, playlist_title):
         rename_playlist_meta(conn, playlist_id, table_name, playlist_title)
+    # Every call: a new playlist image doesn't always change the snapshot.
+    set_playlist_cover_url(conn, playlist_id, _largest_image_url(playlist_info.get("images")))
     if stored_snapshot and snapshot_id and stored_snapshot == snapshot_id:
         logging.info(
             f"Playlist {playlist_title} unchanged (snapshot {snapshot_id[:8]}); "
@@ -72,28 +76,27 @@ def fetch_and_compare_tracks(
 
     db_tracks = {track[0]: track for track in fetch_all_tracks(conn, table_name)}
     new_tracks = []
-    known_durations = []
+    known = []
 
-    for item in items:
+    for position, item in enumerate(items, start=1):
         track = item.get("track")
         if not track or not track.get("id"):
             continue
         artists_str = extract_artists_string(track)
-        duration_ms = track.get("duration_ms")
-        isrc = (track.get("external_ids") or {}).get("isrc")
+        fields = track_fields(track, position)
 
         if track["id"] in db_tracks:
-            known_durations.append((track["id"], duration_ms, isrc))
+            known.append(fields)
         else:
             track_data = (
                 track["id"],
                 track["name"],
                 artists_str,
                 track["album"]["name"],
-                duration_ms,
-                isrc,
+                fields["duration_ms"],
+                fields["isrc"],
             )
-            insert_track(conn, table_name, track_data)
+            insert_track(conn, table_name, track_data, fields)
             logging.info(
                 f"New Song found in {table_name}: {track['name']} by {artists_str} "
                 f"from album {track['album']['name']}"
@@ -105,14 +108,15 @@ def fetch_and_compare_tracks(
                     artists_str,
                     track["album"]["name"],
                     playlist_id,
-                    duration_ms=duration_ms,
-                    isrc=isrc,
+                    duration_ms=fields["duration_ms"],
+                    isrc=fields["isrc"],
                 )
             )
 
-    # Rows inserted before schema v5/v6 have no duration/ISRC; fill them in.
-    if known_durations:
-        backfill_durations(conn, table_name, known_durations)
+    # Rows inserted before schema v5-v8 lack some fields; fill them in, and
+    # keep every row's playlist position current.
+    if known:
+        backfill_spotify_fields(conn, table_name, known)
 
     # Only stamp the new snapshot after we've successfully inserted the diff,
     # so a crash mid-sync retries next cycle.
@@ -120,6 +124,36 @@ def fetch_and_compare_tracks(
 
     logging.info(f"Found {len(new_tracks)} new tracks to download in playlist {table_name}")
     return new_tracks, table_name
+
+
+def _largest_image_url(images: list[dict[str, Any]] | None) -> str | None:
+    """The biggest of Spotify's image renditions (they come in 640/300/64)."""
+    best = max(
+        (i for i in images or [] if i.get("url")),
+        key=lambda i: (i.get("width") or 0) * (i.get("height") or 0),
+        default=None,
+    )
+    return best["url"] if best else None
+
+
+def track_fields(track: dict[str, Any], position: int | None = None) -> dict[str, Any]:
+    """The db.SPOTIFY_COLUMNS values of one Spotify track object."""
+    album = track.get("album") or {}
+    album_artists = ", ".join(a["name"] for a in album.get("artists") or [] if a.get("name"))
+    return {
+        "id": track["id"],
+        "duration_ms": track.get("duration_ms"),
+        "isrc": (track.get("external_ids") or {}).get("isrc"),
+        "album_artist": album_artists or None,
+        "artist_names": json.dumps([a["name"] for a in track.get("artists") or []]),
+        "track_number": track.get("track_number"),
+        "track_total": album.get("total_tracks"),
+        "disc_number": track.get("disc_number"),
+        "release_date": album.get("release_date"),
+        "album_id": album.get("id"),
+        "cover_url": _largest_image_url(album.get("images")),
+        "position": position,
+    }
 
 
 def extract_artists_string(track: dict[str, Any]) -> str:

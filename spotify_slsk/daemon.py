@@ -33,7 +33,7 @@ from .db import (
     set_setting,
 )
 from .importer.process import process_downloaded_file
-from .library import health
+from .library import health, playlist_files, rename
 from .library.acquire import handle_track_download, try_upgrade_track
 from .library.reconcile import startup_check
 from .log_config import setup_logging
@@ -180,6 +180,7 @@ def process_playlist(
         table_name=playlist_name,
     )
     _run_upgrade_pass(conn, playlist_name)
+    playlist_files.write_playlist_files(conn, playlist_id)
 
     send_ntfy_notification(ntfy_url, ntfy_topic, f"Finished processing playlist: {playlist_name}")
     return counters
@@ -319,6 +320,18 @@ def _process_quarantines(conn: sqlite3.Connection) -> None:
             logging.exception(f"Quarantine failed for {track_id} in {table_name}")
 
 
+def _process_renames(conn: sqlite3.Connection) -> None:
+    """Renames applied from Library -> Rename (library.rename)."""
+    for table_name, track_id, old_path, new_name in runtime_state.pop_renames():
+        if _shutdown.is_set():
+            return
+        _touch_heartbeat()
+        try:
+            rename.apply_rename(conn, table_name, track_id, old_path, new_name)
+        except Exception:
+            logging.exception(f"Rename failed for {track_id} in {table_name}")
+
+
 def _run_library_scan(conn: sqlite3.Connection) -> None:
     """One bounded step of the library health scan, when one is requested
     (UI button) or due (LIBRARY_SCAN_INTERVAL_HOURS). Report-only."""
@@ -342,6 +355,22 @@ def _run_library_scan(conn: sqlite3.Connection) -> None:
     if finished:
         delete_setting(conn, health.SCAN_PENDING_KEY)
         set_setting(conn, health.SCAN_COMPLETED_KEY, str(time.time()))
+
+
+def _run_housekeeping(conn: sqlite3.Connection) -> None:
+    """Daily: purge the recycle bin (RECYCLE_BIN_RETENTION_DAYS > 0)."""
+    days = config.RECYCLE_BIN_RETENTION_DAYS
+    if days <= 0:
+        return
+    try:
+        last = float(get_setting(conn, health.RECYCLE_PURGED_KEY, "0") or 0)
+    except ValueError:
+        last = 0.0
+    if time.time() - last < 86400:
+        return
+    purged = health.purge_recycle_bin(conn, days)
+    set_setting(conn, health.RECYCLE_PURGED_KEY, str(time.time()))
+    logging.info(f"[recycle] Housekeeping: purged {purged} file(s) older than {days} day(s)")
 
 
 def _run_startup_reconciliation(sp, conn):
@@ -456,6 +485,7 @@ def main() -> None:
             }
             try:
                 _process_quarantines(conn)
+                _process_renames(conn)
                 _process_manual_grabs(conn)
                 _process_upgrade_requests(conn)
                 for pl in playlists:
@@ -473,6 +503,8 @@ def main() -> None:
                     _run_library_scan(conn)
                 if not _shutdown.is_set():
                     health.backfill_qualities(conn, heartbeat=_touch_heartbeat)
+                if not _shutdown.is_set():
+                    _run_housekeeping(conn)
             except Exception:
                 logging.exception("Cycle failed; backing off and retrying")
                 if _shutdown.wait(config.CYCLE_ERROR_BACKOFF_SECONDS):

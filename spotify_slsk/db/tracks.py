@@ -1,12 +1,13 @@
 """Per-playlist track tables (pl_<name>) and their _tried companions."""
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from typing import Any
 
 from ..models import Track
-from .connection import _add_track_columns
+from .connection import SPOTIFY_COLUMNS, _add_track_columns
 
 
 def playlist_stats(conn: sqlite3.Connection, table_name: str) -> dict[str, int]:
@@ -63,33 +64,35 @@ def _track_status(downloaded, attempts, suspended_until, now):
     return "pending"
 
 
+_TRACK_FIELDS = (
+    "id", "name", "artists", "album", "downloaded", "path", "attempts",
+    "last_attempt", "suspended_until", "duration_ms", "isrc", "quality",
+    "album_artist", "artist_names", "track_number", "track_total",
+    "disc_number", "release_date", "album_id", "cover_url", "position",
+)
+_TRACK_SELECT = f"SELECT {', '.join(_TRACK_FIELDS)}, CURRENT_TIMESTAMP"
+
+
+def _track_dict(r: tuple[Any, ...]) -> dict[str, Any]:
+    d = dict(zip(_TRACK_FIELDS, r[:-1], strict=True))
+    d["downloaded"] = bool(d["downloaded"])
+    d["attempts"] = d["attempts"] or 0
+    d["quality"] = d["quality"] or None
+    try:
+        d["artist_list"] = [str(a) for a in json.loads(d["artist_names"] or "[]")]
+    except (TypeError, ValueError):
+        d["artist_list"] = []
+    d["status"] = _track_status(d["downloaded"], d["attempts"], d["suspended_until"], r[-1])
+    return d
+
+
 def list_tracks(conn: sqlite3.Connection, table_name: str) -> list[dict[str, Any]]:
     """Return one dict per track in the playlist, with a derived status."""
     try:
         rows = conn.execute(
-            f'SELECT id, name, artists, album, downloaded, path, attempts, '
-            f'last_attempt, suspended_until, CURRENT_TIMESTAMP, duration_ms, isrc, quality '
-            f'FROM "{table_name}" ORDER BY name COLLATE NOCASE'
+            f'{_TRACK_SELECT} FROM "{table_name}" ORDER BY name COLLATE NOCASE'
         ).fetchall()
-        result = []
-        for r in rows:
-            d = {
-                "id": r[0],
-                "name": r[1],
-                "artists": r[2],
-                "album": r[3],
-                "downloaded": bool(r[4]),
-                "path": r[5],
-                "attempts": r[6] or 0,
-                "last_attempt": r[7],
-                "suspended_until": r[8],
-                "duration_ms": r[10],
-                "isrc": r[11],
-                "quality": r[12] or None,
-            }
-            d["status"] = _track_status(d["downloaded"], d["attempts"], r[8], r[9])
-            result.append(d)
-        return result
+        return [_track_dict(r) for r in rows]
     except sqlite3.Error as e:
         logging.error(f"Could not list tracks for {table_name}: {e}")
         return []
@@ -99,29 +102,9 @@ def get_track(conn: sqlite3.Connection, table_name: str, track_id: str) -> dict[
     """Return one track dict or None."""
     try:
         r = conn.execute(
-            f'SELECT id, name, artists, album, downloaded, path, attempts, '
-            f'last_attempt, suspended_until, CURRENT_TIMESTAMP, duration_ms, isrc, quality '
-            f'FROM "{table_name}" WHERE id = ?',
-            (track_id,),
+            f'{_TRACK_SELECT} FROM "{table_name}" WHERE id = ?', (track_id,),
         ).fetchone()
-        if not r:
-            return None
-        d = {
-            "id": r[0],
-            "name": r[1],
-            "artists": r[2],
-            "album": r[3],
-            "downloaded": bool(r[4]),
-            "path": r[5],
-            "attempts": r[6] or 0,
-            "last_attempt": r[7],
-            "suspended_until": r[8],
-            "duration_ms": r[10],
-            "isrc": r[11],
-            "quality": r[12] or None,
-        }
-        d["status"] = _track_status(d["downloaded"], d["attempts"], r[8], r[9])
-        return d
+        return _track_dict(r) if r else None
     except sqlite3.Error as e:
         logging.error(f"Could not read track {track_id} from {table_name}: {e}")
         return None
@@ -183,37 +166,42 @@ def create_table(conn: sqlite3.Connection, playlist_name: str) -> None:
     except sqlite3.Error as e:
         logging.error(f"Error creating table {table_name}: {e}")
 
-def insert_track(conn: sqlite3.Connection, playlist_name: str, track: tuple[Any, ...]) -> None:
-    """Insert (id, name, artists, album[, duration_ms[, isrc]]); existing ids are kept."""
+def insert_track(
+    conn: sqlite3.Connection, playlist_name: str, track: tuple[Any, ...],
+    fields: dict[str, Any] | None = None,
+) -> None:
+    """Insert (id, name, artists, album[, duration_ms[, isrc]]); existing ids
+    are kept. `fields` sets further SPOTIFY_COLUMNS (the v8 tagging data)."""
     table_name = playlist_name
     track = tuple(track) + (None,) * (6 - len(track))
-    sql = f'''INSERT OR IGNORE INTO {table_name}(id, name, artists, album, duration_ms, isrc) VALUES (?, ?, ?, ?, ?, ?)'''
+    extra = {k: v for k, v in (fields or {}).items() if k in SPOTIFY_COLUMNS[2:]}
+    cols = ", ".join(["id", "name", "artists", "album", "duration_ms", "isrc", *extra])
+    marks = ", ".join("?" * (6 + len(extra)))
+    sql = f'INSERT OR IGNORE INTO "{table_name}"({cols}) VALUES ({marks})'
     try:
         with conn:
-            conn.execute(sql, track)
+            conn.execute(sql, track + tuple(extra.values()))
         logging.info(f"Inserted track into {table_name}: {track[1]} by {track[2]}")
     except sqlite3.Error as e:
         logging.error(f"Error inserting track into {table_name}: {e}")
 
-def backfill_durations(
-    conn: sqlite3.Connection,
-    table_name: str,
-    durations: list[tuple[Any, ...]],
+def backfill_spotify_fields(
+    conn: sqlite3.Connection, table_name: str, records: list[dict[str, Any]]
 ) -> None:
-    """Fill duration_ms (v5) and isrc (v6) for rows that don't have them
-    yet. `durations` holds (track_id, duration_ms[, isrc]); a value already
-    stored is never overwritten."""
-    rows = [(tuple(d) + (None,))[:3] for d in durations]
+    """Fill the Spotify columns (duration_ms, isrc and the v8 tagging
+    fields) of existing rows from a fresh playlist fetch. `records` are
+    `spotify.sync.track_fields` dicts. A stored value is never overwritten,
+    except `position`, which follows the playlist's current order."""
+    cols = [c for c in SPOTIFY_COLUMNS if c != "position"]
+    sets = ", ".join(f"{c} = COALESCE({c}, :{c})" for c in cols)
     try:
         with conn:
             conn.executemany(
-                f'UPDATE "{table_name}" SET duration_ms = COALESCE(duration_ms, ?), '
-                f'isrc = COALESCE(isrc, ?) '
-                f'WHERE id = ? AND (duration_ms IS NULL OR isrc IS NULL)',
-                [(ms, isrc, tid) for tid, ms, isrc in rows if ms or isrc],
+                f'UPDATE "{table_name}" SET {sets}, position = :position WHERE id = :id',
+                [{c: r.get(c) for c in ("id", *SPOTIFY_COLUMNS)} for r in records],
             )
     except sqlite3.Error as e:
-        logging.error(f"Error backfilling durations in {table_name}: {e}")
+        logging.error(f"Error backfilling Spotify fields in {table_name}: {e}")
 
 
 def fetch_all_tracks(conn: sqlite3.Connection, playlist_name: str) -> list[tuple[Any, ...]]:
@@ -455,3 +443,51 @@ def tracks_missing_quality(
     except sqlite3.Error as e:
         logging.error(f"Could not list tracks missing quality in {table_name}: {e}")
         return []
+
+
+def set_track_path(conn: sqlite3.Connection, table_name: str, track_id: str, path: str) -> bool:
+    """Point a downloaded row (and its file check) at a renamed file, in one
+    transaction. Returns False (nothing changed) on failure or a missing row."""
+    try:
+        with conn:
+            cur = conn.execute(f'UPDATE "{table_name}" SET path = ? WHERE id = ?', (path, track_id))
+            if cur.rowcount != 1:
+                raise sqlite3.Error(f"row {track_id} not found")
+            conn.execute(
+                "UPDATE file_checks SET path = ? WHERE table_name = ? AND track_id = ?",
+                (path, table_name, track_id),
+            )
+        return True
+    except sqlite3.Error as e:
+        logging.error(f"Could not set path for {track_id} in {table_name}: {e}")
+        return False
+
+
+def find_downloaded_copies(
+    conn: sqlite3.Connection, track_id: str, isrc: str | None, exclude_table: str
+) -> list[tuple[str, dict[str, Any]]]:
+    """(table, row) of downloaded rows in *other* catalogued playlists that
+    are the same recording: the same Spotify track id, or the same ISRC."""
+    tables = [
+        r[0] for r in conn.execute(
+            "SELECT DISTINCT m.table_name FROM playlists_meta m "
+            "JOIN sqlite_master s ON s.type = 'table' AND s.name = m.table_name "
+            "WHERE m.table_name != ?", (exclude_table,),
+        )
+    ]
+    isrc = (isrc or "").upper() or None
+    out: list[tuple[str, dict[str, Any]]] = []
+    for table in tables:
+        try:
+            rows = conn.execute(
+                f'{_TRACK_SELECT} FROM "{table}" WHERE downloaded = 1 AND path IS NOT NULL '
+                f"AND (id = ? OR (? IS NOT NULL AND UPPER(isrc) = ?))",
+                (track_id, isrc, isrc),
+            ).fetchall()
+        except sqlite3.Error as e:
+            logging.error(f"Could not look for copies in {table}: {e}")
+            continue
+        out.extend((table, _track_dict(r)) for r in rows)
+    # Same Spotify id first: an ISRC can be shared by different track ids.
+    out.sort(key=lambda tr: tr[1]["id"] != track_id)
+    return out

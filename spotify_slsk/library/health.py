@@ -17,6 +17,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import stat
 import time
 from collections.abc import Callable
 from typing import Any
@@ -25,12 +26,15 @@ from .. import config
 from ..db import (
     add_tried_file,
     delete_file_check,
+    forget_retired,
     get_file_check,
     get_track,
     list_playlists,
     list_tracks,
     record_history,
+    record_retired,
     reset_track_for_redownload,
+    retired_times,
     save_file_check,
     set_track_quality,
     tracks_missing_quality,
@@ -52,7 +56,7 @@ from ..matching.candidates import _duration_off, filename_match
 from ..matching.normalize import version_mismatch, version_tier
 from ..matching.quality import quality_of_file
 from ..matching.tracks import score_track_match
-from ..utils import fmt_duration
+from ..utils import fmt_duration, free_path
 
 # Bump when the identity rules below change: every file is re-verified once.
 RULES_VERSION = 1
@@ -236,16 +240,6 @@ def scan_step(
     return checked, True
 
 
-def _free_path(directory: str, basename: str) -> str:
-    """`directory/basename`, or "name (2).ext" ... if that is taken."""
-    stem, ext = os.path.splitext(basename)
-    candidate, n = os.path.join(directory, basename), 1
-    while os.path.lexists(candidate):
-        n += 1
-        candidate = os.path.join(directory, f"{stem} ({n}){ext}")
-    return candidate
-
-
 def _inside(path: str, root: str) -> bool:
     try:
         real, real_root = os.path.realpath(path), os.path.realpath(root)
@@ -298,7 +292,7 @@ def quarantine_track(
         qdir = os.path.join(root, QUARANTINE_DIR, table_name)
         try:
             os.makedirs(qdir, exist_ok=True)
-            dest = _free_path(qdir, os.path.basename(path))
+            dest = free_path(qdir, os.path.basename(path))
             shutil.move(path, dest)
         except OSError as e:
             logging.error(f"[quarantine] Could not move {path}: {e}; row left as is")
@@ -322,10 +316,11 @@ def retire_replaced_file(
     conn: sqlite3.Connection, table_name: str, track_id: str, old_path: str, reason: str
 ) -> str | None:
     """Move a library file that an upgrade or manual grab replaced to
-    <playlists_root>/.quarantine/<table>/replaced/ (" (2)" on a collision).
-    Never deletes: until a recycle bin exists, the operator purges by hand.
-    A file outside the playlists root is left where it is. Daemon only.
-    Returns where the file went, or None when it was not moved."""
+    <playlists_root>/.quarantine/<table>/replaced/ (" (2)" on a collision),
+    the recycle bin. The retirement time is recorded in the DB
+    (db.recycle) so RECYCLE_BIN_RETENTION_DAYS counts from when it was
+    replaced, not from when it was downloaded. A file outside the playlists root is left where
+    it is. Daemon only. Returns where the file went, or None."""
     root = os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists")
     if not _inside(old_path, root):
         logging.warning(f"[replace] {old_path} is outside {root}; left in place")
@@ -333,17 +328,78 @@ def retire_replaced_file(
     qdir = os.path.join(root, QUARANTINE_DIR, table_name, REPLACED_SUBDIR)
     try:
         os.makedirs(qdir, exist_ok=True)
-        dest = _free_path(qdir, os.path.basename(old_path))
+        dest = free_path(qdir, os.path.basename(old_path))
         shutil.move(old_path, dest)
     except OSError as e:
         logging.warning(f"[replace] Could not move replaced file {old_path}: {e}")
         return None
+    # Retention counts from now (the file keeps its download-time mtime).
+    # Should this fail, the purge registers the file when it first sees it.
+    record_retired(conn, dest, time.time())
     logging.info(f"[replace] {old_path} -> {dest} ({reason})")
     record_history(
         conn, "replaced_file", table_name=table_name, track_id=track_id,
         path=old_path, replaced_path=dest, reason=reason,
     )
     return dest
+
+
+RECYCLE_PURGED_KEY = "_recycle_bin_purged_at"
+
+
+def purge_recycle_bin(conn: sqlite3.Connection, days: int, now: float | None = None) -> int:
+    """Delete recycle-bin files (<root>/.quarantine/<table>/replaced/**)
+    retired more than `days` days ago; 0 days = keep forever.
+
+    Retirement time comes from the DB (db.recycle), never from mtime alone:
+    a file without a record (retired before tracking existed, or the record
+    failed) is registered as retired *now* the first time it is seen, so
+    it can only ever be purged late, never early. Only the replaced/
+    subtrees are touched: files the operator quarantined
+    (<root>/.quarantine/<table>/ itself) are never purged automatically.
+    Symlinks are not followed. Each deletion is logged and recorded in
+    history ('recycle_purged'). Daemon only. Returns how many were deleted."""
+    if days <= 0:
+        return 0
+    qroot = os.path.join(os.getenv("SLSKD_PLAYLISTS_DIR", "/playlists"), QUARANTINE_DIR)
+    now = now if now is not None else time.time()
+    cutoff = now - days * 86400
+    retired = retired_times(conn)
+    seen: set[str] = set()
+    purged = 0
+    try:
+        tables = sorted(os.listdir(qroot))
+    except OSError:
+        return 0
+    for table in tables:
+        bin_dir = os.path.join(qroot, table, REPLACED_SUBDIR)
+        if os.path.islink(bin_dir) or not os.path.isdir(bin_dir):
+            continue
+        for dirpath, _dirs, files in os.walk(bin_dir):
+            for name in files:
+                path = os.path.join(dirpath, name)
+                try:
+                    if not stat.S_ISREG(os.lstat(path).st_mode):
+                        continue
+                except OSError:
+                    continue
+                seen.add(path)
+                if path not in retired:
+                    record_retired(conn, path, now)
+                    continue
+                if retired[path] >= cutoff:
+                    continue
+                try:
+                    os.remove(path)
+                except OSError as e:
+                    logging.warning(f"[recycle] Could not purge {path}: {e}")
+                    continue
+                seen.discard(path)
+                purged += 1
+                logging.info(f"[recycle] Purged {path} (in the recycle bin over {days} days)")
+                record_history(conn, "recycle_purged", table_name=table, path=path, days=days)
+    forget_retired(conn, [p for p in retired if p not in seen])
+    return purged
 
 
 def backfill_qualities(

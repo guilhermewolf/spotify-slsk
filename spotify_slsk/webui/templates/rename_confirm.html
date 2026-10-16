@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% set active_page = 'rename' %}
+{% block title %}Confirm rename · spotify-slsk{% endblock %}
+{% block content %}
+
+<a class="back-link" href="{{ url_for('library.rename_page') }}">&larr; Rename files</a>
+
+<h1>Rename {{ chosen|length }} file{{ '' if chosen|length == 1 else 's' }}?</h1>
+<p class="subtle">
+  Template <code>{{ template }}</code>. The daemon renames each file in its own folder at the
+  start of the next cycle and updates the library database. A file that changed in the
+  meantime is skipped; an existing file is never overwritten.
+</p>
+
+<form method="POST" action="{{ url_for('library.rename_apply') }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <input type="hidden" name="confirm" value="1">
+  <div class="table-wrap">
+    <table class="track-table">
+      <thead><tr><th scope="col">Playlist</th><th scope="col">Current name</th><th scope="col">New name</th></tr></thead>
+      <tbody>
+      {% for pl, item in chosen %}
+        <tr>
+          <td>{{ pl.name }}<input type="hidden" name="tracks" value="{{ pl.playlist_id }}:{{ item.id }}"></td>
+          <td><code>{{ item.old_name }}</code></td>
+          <td><code>{{ item.new_name }}</code></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <button type="submit" style="width:auto">Rename now</button>
+</form>
+
+{% endblock %}

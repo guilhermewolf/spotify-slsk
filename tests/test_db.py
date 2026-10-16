@@ -424,7 +424,7 @@ class TestSchemaMigrations:
         assert db.get_file_check(conn, "pl_v5", "t1")["audio_check"] == "ok"
         conn.close()
 
-    def test_v6_db_upgrades_to_v7(self, tmp_path):
+    def test_v6_db_upgrades_to_current(self, tmp_path):
         """A real v6 DB: per-playlist table with isrc but no quality column,
         file_checks present. v7 adds `quality` without forcing a resync."""
         path = str(tmp_path / "v6.db")
@@ -456,12 +456,12 @@ class TestSchemaMigrations:
         raw.close()
 
         conn = db.create_connection(path)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7 == db.SCHEMA_VERSION
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
         track = db.get_track(conn, "pl_v6", "t1")
         assert track["quality"] is None  # backfilled lazily from the file
         assert (track["path"], track["isrc"]) == ("/p/s.flac", "GBAYE0601498")
-        # No resync: quality comes from the file, not Spotify.
-        assert db.get_playlist_meta(conn, "pid")[0] == "snap"
+        # v8 (not v7) forces the resync that fills the tagging fields.
+        assert db.get_playlist_meta(conn, "pid")[0] is None
         assert db.tracks_missing_quality(conn, "pl_v6", 10) == [("t1", "/p/s.flac")]
         db.set_track_quality(conn, "pl_v6", "t1", "FLAC_16")
         assert db.get_track(conn, "pl_v6", "t1")["quality"] == "FLAC_16"
@@ -470,6 +470,54 @@ class TestSchemaMigrations:
         assert db.get_track(conn, "pl_v6", "t1")["quality"] is None
         db.set_track_quality(conn, "pl_v6", "t1", None)  # unreadable: '' = don't retry
         assert db.tracks_missing_quality(conn, "pl_v6", 10) == []
+        conn.close()
+
+    def test_v7_db_upgrades_to_v8(self, tmp_path):
+        """A real v7 DB: v8 adds the Spotify tagging columns to every
+        catalogued table and clears the snapshots so the next sync fills
+        them (the duration_ms/isrc backfill mechanism)."""
+        path = str(tmp_path / "v7.db")
+        raw = sqlite3.connect(path)
+        raw.execute(
+            "CREATE TABLE playlists_meta (playlist_id TEXT PRIMARY KEY, "
+            "table_name TEXT NOT NULL, name TEXT NOT NULL, snapshot_id TEXT, "
+            "last_synced TIMESTAMP, enabled INTEGER NOT NULL DEFAULT 1, "
+            "added_at TIMESTAMP)"
+        )
+        raw.execute("INSERT INTO playlists_meta VALUES ('pid','pl_v7','V7','snap',NULL,0,NULL)")
+        raw.execute(
+            'CREATE TABLE "pl_v7" (id TEXT PRIMARY KEY, name TEXT NOT NULL, '
+            "artists TEXT NOT NULL, album TEXT NOT NULL, downloaded INTEGER DEFAULT 0, "
+            "path TEXT, attempts INTEGER DEFAULT 0, last_attempt TIMESTAMP, "
+            "suspended_until TIMESTAMP, last_upgrade_check TIMESTAMP, "
+            "tried_files TEXT DEFAULT '', duration_ms INTEGER, isrc TEXT, quality TEXT)"
+        )
+        raw.execute(
+            "INSERT INTO pl_v7 (id, name, artists, album, downloaded, path, quality) "
+            "VALUES ('t1','S','A','Alb',1,'/p/s.flac','FLAC_16')"
+        )
+        raw.execute("PRAGMA user_version = 7")
+        raw.commit()
+        raw.close()
+
+        conn = db.create_connection(path)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8 == db.SCHEMA_VERSION
+        cols = {r[1] for r in conn.execute('PRAGMA table_info("pl_v7")')}
+        assert set(db.SPOTIFY_COLUMNS) <= cols
+        assert "cover_url" in {r[1] for r in conn.execute("PRAGMA table_info(playlists_meta)")}
+        assert db.list_playlists(conn)[0]["cover_url"] is None
+        assert db.get_playlist_meta(conn, "pid")[0] is None  # resync
+        track = db.get_track(conn, "pl_v7", "t1")
+        assert (track["path"], track["quality"], track["album_artist"]) == ("/p/s.flac", "FLAC_16", None)
+        db.backfill_spotify_fields(conn, "pl_v7", [{
+            "id": "t1", "album_artist": "Various", "artist_names": '["A", "B"]',
+            "track_number": 3, "track_total": 12, "disc_number": 1,
+            "release_date": "2011-05-01", "album_id": "alb1",
+            "cover_url": "https://i.scdn.co/image/x", "position": 7,
+        }])
+        track = db.get_track(conn, "pl_v7", "t1")
+        assert track["artist_list"] == ["A", "B"]
+        assert (track["track_number"], track["track_total"], track["position"]) == (3, 12, 7)
         conn.close()
 
     def test_existing_rows_survive_reopening(self, tmp_path):

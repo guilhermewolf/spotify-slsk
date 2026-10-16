@@ -20,8 +20,14 @@ dashboard for adding playlists, watching progress and retrying what failed.
 - **Version preference** — prefers Extended Mix over Original Mix over
   everything else, and can periodically re-search downloaded tracks for a
   better version.
-- **Metadata tagging** — writes title/artist/album with `mutagen`, then moves
-  the file into `/playlists/<playlist>/`.
+- **Full tagging & cover art** — see [Library](#library): every import is
+  tagged from Spotify (title, artists, album, album artist, track/disc number,
+  release date, ISRC, Spotify id) with the album cover embedded, in FLAC, MP3
+  and M4A. The track page previews the diff before **Re-tag**.
+- **Library organisation** — a file-name template, a rename preview for
+  existing files, hardlinks instead of re-downloads for tracks shared between
+  playlists, a recycle bin for replaced files, and an `.m3u8` + `cover.jpg` per
+  playlist folder.
 - **Duration-aware matching** — candidates whose length differs from Spotify's
   by more than `SLSKD_MAX_DURATION_DIFF_SECONDS` are skipped, and an untagged
   download is accepted only if its filename and real duration both match.
@@ -92,8 +98,10 @@ overrides the environment variable and changes apply on the next cycle:
 `SLSKD_MAX_DURATION_DIFF_SECONDS`, `SLSKD_WAIT_TIMEOUT`,
 `HISTORY_RETENTION_DAYS`, `UPGRADE_CHECK_INTERVAL_HOURS`,
 `LOSSLESS_CHECK_ENABLED`, `LOSSLESS_FAKE_CUTOFF_HZ`, `LOSSLESS_MIN_DROP_DB`,
-`LIBRARY_SCAN_INTERVAL_HOURS`, `REQUIRED_TERMS`, `IGNORED_TERMS`. The quality
-profile has its own section on the same page.
+`LIBRARY_SCAN_INTERVAL_HOURS`, `REQUIRED_TERMS`, `IGNORED_TERMS`,
+`EMBED_COVER_ART`, `FILE_NAME_TEMPLATE`, `LINK_MODE`, `WRITE_M3U`,
+`WRITE_PLAYLIST_COVER`, `RECYCLE_BIN_RETENTION_DAYS` (see [Library](#library)).
+The quality profile has its own section on the same page.
 
 `SLSKD_PREFERRED_FORMATS` is **deprecated**: on the first boot of this version
 it is converted into the quality profile (below) and ignored afterwards.
@@ -205,7 +213,61 @@ cycle and only re-checks files that changed. For each finding:
   changes.
 
 Quarantined files are never purged automatically. Listen, then delete them by
-hand, e.g. `find playlists/.quarantine -type f -mtime +30 -delete`.
+hand, e.g. `find playlists/.quarantine -maxdepth 2 -type f -mtime +30 -delete`.
+
+## Library
+
+**Tags and cover art.** Imported files are tagged from Spotify, not from the
+peer's tags: title, artists (one value per artist where the format allows it),
+album, album artist, track number/total, disc number, release date, ISRC and
+the Spotify track id (`SPOTIFY_TRACK_ID`), as Vorbis comments (FLAC), ID3v2.4
+(MP3, AIFF) or MP4 atoms (M4A). With `EMBED_COVER_ART=1` (default) the largest
+Spotify album cover is embedded; covers are cached per album under
+`data/artwork/`, and a failed fetch never fails an import. On a track's page
+the **Tags** section shows what is in the file next to what **Re-tag from
+Spotify** would write. Databases from older versions re-read every playlist
+from Spotify once after upgrading to fill in the new fields.
+
+**File names.** `FILE_NAME_TEMPLATE` names *newly imported* files. Tokens:
+`{artist} {title} {album} {album_artist} {track} {disc} {year}
+{playlist_index} {isrc} {quality} {original_filename}`; numbers take a pad
+width, e.g. `{track:02}` or `{playlist_index:03}`. The extension is added for
+you. The default, `{original_filename}`, keeps the peer's file name exactly as
+before. Names are made safe for SMB/NAS shares and Windows the way Lidarr does
+it (`:` → `-`, `/` → `+`, `?` → `!`, reserved names like `CON` get a `_`, no
+trailing dots or spaces, at most 200 bytes), and an existing file is never
+overwritten — the new one gets ` (2)`. Settings shows an example of the
+current template and rejects unknown tokens.
+
+**Renaming existing files.** Changing the template doesn't touch files
+already in the library. **Rename** (in the menu) previews old → new names per
+playlist; select files, **Apply rename…**, confirm, and the daemon renames
+them at the start of the next cycle — inside their playlist folder only,
+skipping missing files, never overwriting.
+
+**Tracks in several playlists.** When a track (same Spotify id, or same ISRC)
+is already downloaded in another playlist, it is linked into this playlist's
+folder instead of being downloaded again. `LINK_MODE=hardlink` (default) uses
+no extra space and falls back to a copy when the folders are on different
+filesystems; `copy` makes an independent file; `off` downloads every time.
+Each playlist's file is independent: quarantining, replacing or renaming one
+never affects the other. Tags are the exception — a hardlink shares its
+data, so re-tagging one playlist's copy updates both (they are the same
+track, so the tags are identical anyway).
+
+**Recycle bin.** Files replaced by an upgrade or a manual grab go to
+`.quarantine/<playlist>/replaced/`. They are kept forever by default; set
+`RECYCLE_BIN_RETENTION_DAYS` to have a daily step delete those older than that
+many days (counted from when they were replaced). Files you quarantined from
+Library health (`.quarantine/<playlist>/` itself) are **never** deleted
+automatically.
+
+**Playlist files.** Each playlist folder gets `<playlist name>.m3u8` (UTF-8,
+Spotify order, downloaded tracks only, relative paths — importable by Navidrome,
+Jellyfin, Plex or any player) and `cover.jpg` from the Spotify playlist image.
+Turn them off with `WRITE_M3U=0` / `WRITE_PLAYLIST_COVER=0`. Your own files
+are never overwritten: a cover you placed is left alone, and if a file with
+the playlist's m3u8 name is yours, ours is written as `<name> (spotify-slsk).m3u8`.
 
 ## Upgrading slskd to 0.26
 

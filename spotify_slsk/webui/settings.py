@@ -9,6 +9,7 @@ from flask.typing import ResponseReturnValue
 
 from .. import config, db
 from ..config import SETTINGS_SPEC, validate_setting
+from ..library import naming
 from ..matching.quality import FLOOR_BLOCKED, LADDER, LADDER_INDEX, make_profile
 from .helpers import wake_daemon
 
@@ -73,6 +74,12 @@ def settings() -> ResponseReturnValue:
         profile=profile,
         quality_rows=quality_rows,
         floor_blocked=FLOOR_BLOCKED,
+        name_example=naming.example(effective["FILE_NAME_TEMPLATE"]),
+        name_example_source=(
+            f"'{naming.EXAMPLE_ROW['name']}' by {naming.EXAMPLE_ROW['artists']}, "
+            f"track {naming.EXAMPLE_ROW['track_number']}, playlist #{naming.EXAMPLE_ROW['position']}, "
+            f"peer file '{naming.EXAMPLE_ORIGINAL}'"
+        ),
     )
 
 
