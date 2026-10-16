@@ -8,4 +8,4 @@ import a single submodule cheaply.
 
 # Single source of the version: pyproject.toml reads it, /system/status shows
 # it, and release-please bumps it (the annotation below) in each release PR.
-__version__ = "2.0.0"  # x-release-please-version
+__version__ = "2.1.0"  # x-release-please-version
