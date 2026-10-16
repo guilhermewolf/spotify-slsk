@@ -364,7 +364,9 @@ threaded through the download call chain. The real per-track cap is
   `rules_version` 0; the scan (`health.RULES_VERSION`, bump it when the identity
   rules change) re-verifies identity and reuses an unchanged file's spectrum
   verdict. The scan is resumable without a cursor: a check matching path, size,
-  mtime and RULES_VERSION is skipped. An `ignored` mark survives only while the
+  mtime, RULES_VERSION and `audio_check.rules_key()` (the LOSSLESS_* thresholds +
+  a logic version) is skipped, so changing a threshold and pressing Scan
+  re-decodes and re-classifies. An `ignored` mark survives only while the
   file is the same. AcoustID fingerprinting is not implemented (follow-up).
 - **Image.** The Dockerfile `apk add`s `flac` and strips numpy's bundled test
   suite; numpy (+ its OpenBLAS) is most of the ~76 MB the image grew in Tier 3.

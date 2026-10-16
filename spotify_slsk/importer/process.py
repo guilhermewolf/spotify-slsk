@@ -33,6 +33,7 @@ from .audio_check import (
     SUSPECT,
     AudioCheck,
     check_file,
+    rules_key,
 )
 from .tags import (
     audio_length_seconds,
@@ -330,6 +331,7 @@ def _record_import_check(conn, table_name, track_id, path, audio):
         audio_cutoff_hz=audio.cutoff_hz if audio else None,
         audio_drop_db=audio.drop_db if audio else None,
         problems=["suspect_lossless"] if suspect else [],
+        evidence={"lossless_rules": rules_key()},
     )
     if suspect:
         mark_upgrade_due(conn, table_name, track_id)

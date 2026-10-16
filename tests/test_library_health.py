@@ -151,6 +151,19 @@ class TestScanStep:
         monkeypatch.setattr(health, "RULES_VERSION", health.RULES_VERSION + 1)
         assert health.scan_step(conn) == (3, True)
 
+    def test_lossless_threshold_change_re_decodes(self, conn, sandbox_dirs, tags, monkeypatch):
+        _, pl = sandbox_dirs
+        _add(conn, pl, "t1", "Heart To Find", "Mat Joe", "a.flac")
+        tags["a.flac"] = ("Heart To Find", "Mat Joe", 200.0, None)
+        decodes = []
+        monkeypatch.setattr(health, "check_file",
+                            lambda p: decodes.append(p) or ac.AudioCheck(ac.OK, 21500, 2.0))
+        assert health.scan_step(conn) == (1, True)
+        assert health.scan_step(conn) == (0, True)
+        monkeypatch.setattr(config, "LOSSLESS_MIN_DROP_DB", 12)
+        assert health.scan_step(conn) == (1, True)
+        assert len(decodes) == 2  # re-decoded under the new threshold
+
     def test_stops_on_shutdown_and_ignores_pending_rows(self, conn, sandbox_dirs, tags):
         self._library(conn, sandbox_dirs, tags)
         db.insert_track(conn, "pl_x", ("p1", "Pending", "X", "Alb"))

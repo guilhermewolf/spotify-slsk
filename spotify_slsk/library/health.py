@@ -33,7 +33,13 @@ from ..db import (
     reset_track_for_redownload,
     save_file_check,
 )
-from ..importer.audio_check import CHECKABLE_EXTS, REJECT_VERDICTS, SUSPECT, check_file
+from ..importer.audio_check import (
+    CHECKABLE_EXTS,
+    REJECT_VERDICTS,
+    SUSPECT,
+    check_file,
+    rules_key,
+)
 from ..importer.tags import (
     audio_length_seconds,
     extract_metadata_from_file,
@@ -92,10 +98,13 @@ def _stat(path: str | None) -> tuple[int | None, float | None]:
 
 
 def is_current(check: dict[str, Any] | None, row: dict[str, Any]) -> bool:
-    """True when `check` already describes the row's file under the current rules."""
+    """True when `check` already describes the row's file under the current
+    rules - identity (RULES_VERSION) and lossless thresholds (rules_key), so
+    changing a LOSSLESS_* setting and pressing Scan re-evaluates."""
     return bool(
         check
         and check["rules_version"] == RULES_VERSION
+        and check["evidence"].get("lossless_rules") == rules_key()
         and check["path"] == row["path"]
         and (check["size"], check["mtime"]) == _stat(row["path"])
     )
@@ -115,6 +124,7 @@ def verify_file(row: dict[str, Any], previous: dict[str, Any] | None = None) -> 
         "expected_artist": row["artists"],
         "expected_duration_s": round(row["duration_ms"] / 1000) if row.get("duration_ms") else None,
         "expected_isrc": expected_isrc,
+        "lossless_rules": rules_key(),
         "reasons": {},
     }
     result: dict[str, Any] = {
@@ -165,6 +175,7 @@ def verify_file(row: dict[str, Any], previous: dict[str, Any] | None = None) -> 
         if (
             previous
             and previous["audio_check"]
+            and previous["evidence"].get("lossless_rules") == rules_key()
             and (previous["path"], previous["size"], previous["mtime"]) == (path, size, mtime)
         ):
             verdict = previous["audio_check"]
