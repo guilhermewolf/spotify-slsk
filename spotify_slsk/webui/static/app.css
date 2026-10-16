@@ -872,20 +872,20 @@ a.track-title:hover { color: var(--c-accent); text-decoration: underline; }
 .file-cell { max-width: 22rem; min-width: 10rem; }
 .wrap-anywhere { overflow-wrap: anywhere; }
 
-/* Action columns: right-aligned; sticky to the scroll edge only where the
-   table can actually scroll (narrow screens), so on desktop they never
-   paint over the columns beside them. */
+/* Action columns: right-aligned and pinned to the scroll container's right
+   edge with an opaque background, so the primary action stays reachable
+   when a wide table scrolls and never shows the cells underneath it (the
+   old transparent sticky cell is what made Actions look painted over Size). */
 .actions-col { text-align: right; white-space: nowrap; width: 1%; }
 .actions-col .card-actions { justify-content: flex-end; flex-wrap: nowrap; }
-@media (max-width: 70rem) {
-  td.actions-col, th.actions-col {
-    position: sticky;
-    right: 0;
-    background: var(--c-panel);
-    box-shadow: -1px 0 0 var(--c-line-soft);
-  }
-  thead th.actions-col { background: var(--c-raised); z-index: 2; }
+td.actions-col, th.actions-col {
+  position: sticky;
+  right: 0;
+  background: var(--c-panel);
+  box-shadow: -1px 0 0 var(--c-line-soft);
 }
+thead th.actions-col { background: var(--c-raised); z-index: 2; }
+tbody tr:hover > td.actions-col { background: var(--c-raised); }
 
 /* "the daemon is on this row right now" */
 .row-active > td:first-child, .row-active { box-shadow: inset 3px 0 0 var(--c-accent); }
@@ -1333,8 +1333,8 @@ a.track-title:hover { color: var(--c-accent); text-decoration: underline; }
 /* ==== 20. Queue ======================================================== */
 /* Live: the Actions column painted over Size at ~1280px. The file and track
    cells are now capped (full path in the title) so the table fits on a
-   desktop, and the actions column only turns sticky below 70rem (above). */
-.queue-table .file-cell { max-width: 18rem; }
+   desktop; the actions column is pinned (section 9) for narrower windows. */
+.queue-table .file-cell { max-width: 16rem; min-width: 8rem; }
 .queue-table .track-cell { min-width: 9rem; max-width: 15rem; overflow-wrap: anywhere; }
 .queue-table .progress { min-width: 5rem; margin: 2px 0; }
 .queue-table .actions-col .card-actions { gap: var(--s-1); }
@@ -1348,3 +1348,5 @@ details.panel > summary { padding: var(--s-3) var(--s-4); font-size: var(--t-sm)
 details.panel[open] > summary { border-bottom: 1px solid var(--c-line-soft); margin: 0; }
 details.panel > .table-wrap { border: 0; margin: 0; border-radius: 0 0 var(--r-lg) var(--r-lg); }
 tr.tag-changed > td { background: color-mix(in srgb, var(--c-warn-bg) 50%, transparent); }
+.plain-list { margin: 0; padding-left: var(--s-4); font-size: var(--t-sm); }
+.plain-list li { margin: 2px 0; }

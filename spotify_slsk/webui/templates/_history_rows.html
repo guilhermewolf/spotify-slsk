@@ -21,16 +21,16 @@
           {% else %}<span class="subtle">{{ h.track_id or '—' }}</span>{% endif %}
         </td>
         {% endif %}
-        <td>
+        <td class="file-cell">
           {% if h.data.reason %}<div>{{ h.data.reason }}</div>{% endif %}
-          {% if h.data.filename %}<code>{{ h.data.filename }}</code>{% elif h.data.path %}<code>{{ h.data.path }}</code>{% endif %}
-          <div class="subtle">
-            {% if h.data.username %}from {{ h.data.username }}{% endif %}
-            {% if h.data.format %} · {{ h.data.format }}{% endif %}
-            {% if h.data.bitrate %} · {{ h.data.bitrate }} kbps{% endif %}
-            {% if h.data.source == 'manual' %} · manual{% endif %}
-            {% if h.data.match %} · matched by {{ h.data.match }}{% endif %}
-          </div>
+          {% if h.data.filename %}<code class="path" title="{{ h.data.filename }}">{{ h.data.filename }}</code>{% elif h.data.path %}<code class="path" title="{{ h.data.path }}">{{ h.data.path }}</code>{% endif %}
+          {% set meta = [
+               ('from ' ~ h.data.username) if h.data.username else '',
+               h.data.format or '',
+               (h.data.bitrate ~ ' kbps') if h.data.bitrate else '',
+               'manual' if h.data.source == 'manual' else '',
+               ('matched by ' ~ h.data.match) if h.data.match else ''] | select | list %}
+          {% if meta %}<div class="subtle">{{ meta|join(' · ') }}</div>{% endif %}
         </td>
       </tr>
     {% endfor %}
