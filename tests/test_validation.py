@@ -221,3 +221,81 @@ class TestFlacPlausibility:
         thin = dict(self._eval(size=22_500_000, bit_depth=24, sample_rate=96000), user="thin")
         cd = dict(self._eval(size=22_000_000, bit_depth=16, sample_rate=44100), user="cd")
         assert [c["user"] for c in sort_candidates([thin, cd])] == ["cd", "thin"]
+
+
+class TestIsrcTags:
+    def test_normalize(self):
+        from spotify_slsk.importer.tags import normalize_isrc
+
+        assert normalize_isrc("gb-aye-06-01498") == "GBAYE0601498"
+        assert normalize_isrc(b"USUM71703861") == "USUM71703861"
+        assert normalize_isrc("not an isrc") is None
+        assert normalize_isrc(None) is None
+
+    def test_reads_id3_and_mp4_shapes(self, monkeypatch):
+        from mutagen.id3 import ID3, TSRC
+
+        from spotify_slsk.importer import tags
+
+        id3 = ID3()
+        id3.add(TSRC(encoding=3, text="GBAYE0601498"))
+        monkeypatch.setattr(tags, "MutagenFile", lambda p: type("F", (), {"tags": id3})())
+        assert tags.read_isrc("x.mp3") == "GBAYE0601498"
+        mp4 = {"----:com.apple.iTunes:ISRC": [b"USUM71703861"]}
+        monkeypatch.setattr(tags, "MutagenFile", lambda p: type("F", (), {"tags": mp4})())
+        assert tags.read_isrc("x.m4a") == "USUM71703861"
+        monkeypatch.setattr(tags, "MutagenFile", lambda p: (_ for _ in ()).throw(OSError("x")))
+        assert tags.read_isrc("x.mp3") is None
+
+    @pytest.mark.skipif(shutil.which("flac") is None, reason="flac binary not installed")
+    def test_flac_round_trip(self, tmp_path):
+        from spotify_slsk.importer.tags import read_isrc, write_tags
+        from tests.test_audio_check import _noise, _to_int, _write_flac
+
+        f = tmp_path / "a.flac"
+        _write_flac(f, _to_int(_noise(44100, 1), 16), 44100, 16)
+        assert read_isrc(str(f)) is None
+        write_tags(str(f), "T", "A", "Alb", isrc="GBAYE0601498")
+        assert read_isrc(str(f)) == "GBAYE0601498"
+        write_tags(str(f), "T", "A", "Alb")  # no ISRC known: keep the file's
+        assert read_isrc(str(f)) == "GBAYE0601498"
+
+
+class TestIsrcOnImport:
+    def _run(self, conn, monkeypatch, downloads, title, artist, isrc):
+        monkeypatch.setattr(importer_process, "extract_metadata_from_file", lambda p: (title, artist, "Alb"))
+        tagged = []
+        monkeypatch.setattr(importer_process, "tag_audio_file", lambda *a, **k: tagged.append(k) or True)
+        monkeypatch.setattr(importer_process, "read_isrc", lambda p: isrc)
+        monkeypatch.setattr(config, "LOSSLESS_CHECK_ENABLED", False)
+        f = _download(downloads, "x.mp3")
+        ok, _ = importer_process.process_downloaded_file(str(f), "pl_x", conn, track_id="t1", source=SOURCE)
+        return ok, f, tagged
+
+    def test_different_isrc_is_a_wrong_song_not_a_peer_ban(self, conn, monkeypatch, sandbox_dirs):
+        downloads, _ = sandbox_dirs
+        ok, f, _ = self._run(conn, monkeypatch, downloads, "Heart To Find", "Mat Joe", "USUM71703861")
+        assert ok is False and not f.exists()
+        assert db.list_blocklist(conn) == []
+        assert "x.mp3" in db.get_tried_files(conn, "pl_x", "t1")
+        assert db.list_history(conn, event="import_rejected")[0]["data"]["reason"] == (
+            "ISRC mismatch (file USUM71703861, expected GBAYE0601498)"
+        )
+
+    def test_equal_isrc_overrides_a_low_tag_score(self, conn, monkeypatch, sandbox_dirs):
+        # Tags in another script/spelling: no artist overlap, same recording.
+        downloads, _ = sandbox_dirs
+        ok, _, tagged = self._run(conn, monkeypatch, downloads, "ハート", "マット", "GBAYE0601498")
+        assert ok is True
+        assert db.list_history(conn, event="imported")[0]["data"]["match"] == "isrc"
+        assert tagged[0]["isrc"] == "GBAYE0601498"
+
+    def test_equal_isrc_never_overrides_a_version_mismatch(self, conn, monkeypatch, sandbox_dirs):
+        downloads, _ = sandbox_dirs
+        ok, f, _ = self._run(conn, monkeypatch, downloads, "Heart To Find (Live)", "Mat Joe", "GBAYE0601498")
+        assert ok is False and not f.exists()
+
+    def test_no_file_isrc_falls_back_to_tags_and_writes_spotifys(self, conn, monkeypatch, sandbox_dirs):
+        downloads, _ = sandbox_dirs
+        ok, _, tagged = self._run(conn, monkeypatch, downloads, "Heart To Find", "Mat Joe", None)
+        assert ok is True and tagged[0]["isrc"] == "GBAYE0601498"
