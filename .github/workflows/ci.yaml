@@ -1,19 +1,35 @@
 name: CI
 
 on:
+  # main is not listed: release.yaml calls this workflow for every push to
+  # main and only publishes when it passes, so running it here too would
+  # double the work.
   push:
     branches:
       - "**"
+      - "!main"
   pull_request:
+  workflow_call:
 
-# Every step below is a Makefile target, so `make check` locally runs exactly
-# what CI runs — no "works only in GitHub Actions" drift.
+# A newer push to the same branch/PR supersedes the running check. Never
+# cancel on main or on tags: those runs gate a release.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+# Every step below is a Makefile target, so `make check` / `make smoke` locally
+# run exactly what CI runs — no "works only in GitHub Actions" drift.
 jobs:
   quality-gate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
           cache: pip
@@ -33,27 +49,50 @@ jobs:
         run: make audit PYTHON=python
 
   container:
-    # Building the image is part of the gate: a Dockerfile or dependency
-    # change that breaks the build should fail the PR, not the release.
+    # Building and booting the image is part of the gate: a Dockerfile,
+    # dependency or startup regression fails the PR, not the release.
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write # upload the Trivy SARIF to code scanning
     steps:
-      - uses: actions/checkout@v4
-      - name: Build image
-        run: make docker-build
-      - name: Verify it runs as a non-root user and imports cleanly
-        run: |
-          docker run --rm --entrypoint sh spotify-slsk:local -c '
-            set -e
-            [ "$(id -u)" = "1000" ] || { echo "image runs as $(id -u), expected 1000"; exit 1; }
-            python -c "import numpy, spotify_slsk.daemon, spotify_slsk.webui"
-            flac --version
-            echo "image OK"
-          '
-      - name: Verify no secrets or media were baked into the image
-        run: |
-          docker run --rm --entrypoint sh spotify-slsk:local -c '
-            for p in /app/.env /app/data /app/playlists /app/slsk_app; do
-              if [ -e "$p" ]; then echo "build context leaked $p into the image"; exit 1; fi
-            done
-            echo "no leaked paths"
-          '
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Builds spotify-slsk:local, then boots it with no secrets and no slskd:
+      # uid 1000, numpy/flac, no leaked .env/data/media, /healthz and the main
+      # pages return 200, SIGTERM exits 0 within 15s.
+      - name: Build and smoke-test the image
+        run: make smoke
+
+      - name: Trivy scan (HIGH+CRITICAL, report)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: spotify-slsk:local
+          format: sarif
+          output: trivy-results.sarif
+          severity: HIGH,CRITICAL
+          limit-severities-for-sarif: true
+          ignore-unfixed: true
+          exit-code: "0"
+      # Fork and Dependabot PRs get a read-only token, so the upload would fail.
+      - name: Upload Trivy results to code scanning
+        if: >-
+          github.actor != 'dependabot[bot]' &&
+          (github.event_name != 'pull_request' ||
+           github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-image
+      # The gate: a CRITICAL with a released fix means "rebuild/bump now".
+      # Unfixed ones are reported above but cannot be acted on, so they don't block.
+      - name: Trivy gate (fixable CRITICAL fails the build)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: spotify-slsk:local
+          format: table
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          skip-setup-trivy: true
