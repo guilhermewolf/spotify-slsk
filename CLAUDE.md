@@ -338,7 +338,10 @@ unnormalised.
     `cover.jpg` (Spotify playlist image, `playlists_meta.cover_url`) are
     rewritten when changed (`WRITE_M3U`, `WRITE_PLAYLIST_COVER`). A
     `#SPOTIFY-SLSK:<playlist id>` line lets a renamed playlist remove its own
-    old m3u8; other m3u8 files are never touched. `startup_check` indexes
+    old m3u8 (name compared case-insensitively); an m3u8 without the marker is
+    never overwritten (ours goes to `<name> (spotify-slsk).m3u8`). The cover is
+    written as cover.jpg/cover.png by content and replaced only when it still
+    has the sha256 we last wrote (`_playlist_cover_sha256:<id>` setting). `startup_check` indexes
     audio extensions only and scan/rename work from DB rows, so neither file
     is ever matched.
 

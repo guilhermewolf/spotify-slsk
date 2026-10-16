@@ -113,6 +113,29 @@ class TestCover:
         assert (folder / "cover.jpg").read_bytes() == COVER
         assert seen == [("https://mosaic.scdn.co/640/abc", "playlist_pid1")]
 
+    def test_users_cover_is_never_replaced(self, pl, monkeypatch):
+        conn, folder = pl
+        (folder / "cover.jpg").write_bytes(b"\xff\xd8\xffmine")
+        db.set_playlist_cover_url(conn, "pid1", "https://mosaic.scdn.co/640/abc")
+        monkeypatch.setattr(playlist_files, "fetch_image", lambda *a: COVER)
+        playlist_files.write_playlist_files(conn, "pid1")
+        assert (folder / "cover.jpg").read_bytes() == b"\xff\xd8\xffmine"
+
+    def test_our_cover_is_updated_and_png_gets_png_extension(self, pl, monkeypatch):
+        conn, folder = pl
+        db.set_playlist_cover_url(conn, "pid1", "https://mosaic.scdn.co/640/abc")
+        monkeypatch.setattr(playlist_files, "fetch_image", lambda *a: COVER)
+        playlist_files.write_playlist_files(conn, "pid1")
+        new_jpg = b"\xff\xd8\xffnew cover"
+        monkeypatch.setattr(playlist_files, "fetch_image", lambda *a: new_jpg)
+        playlist_files.write_playlist_files(conn, "pid1")
+        assert (folder / "cover.jpg").read_bytes() == new_jpg
+        png = b"\x89PNG\r\n\x1a\nimage"
+        monkeypatch.setattr(playlist_files, "fetch_image", lambda *a: png)
+        playlist_files.write_playlist_files(conn, "pid1")
+        assert (folder / "cover.png").read_bytes() == png
+        assert not (folder / "cover.jpg").exists()  # ours, replaced by the png
+
     def test_failed_fetch_leaves_no_cover_and_does_not_raise(self, pl, monkeypatch):
         conn, folder = pl
         db.set_playlist_cover_url(conn, "pid1", "https://mosaic.scdn.co/640/abc")

@@ -1,5 +1,6 @@
 """Files beside the music in each playlist folder: `<playlist name>.m3u8`
-(WRITE_M3U) and `cover.jpg` (WRITE_PLAYLIST_COVER). Daemon thread only.
+(WRITE_M3U) and `cover.jpg` / `cover.png` (WRITE_PLAYLIST_COVER, never
+replacing a cover we didn't write). Daemon thread only.
 
 The m3u8 is UTF-8 extended M3U: downloaded tracks in Spotify playlist order
 with `#EXTINF:<seconds>,Artist - Title` and paths relative to the folder.
@@ -13,17 +14,20 @@ renamer work from DB rows.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import sqlite3
 from typing import Any
 
 from .. import config
-from ..db import list_playlists, list_tracks
+from ..db import get_setting, list_playlists, list_tracks, set_setting
 from ..importer.artwork import fetch_image
 from .naming import safe_name
 
 MARKER = "#SPOTIFY-SLSK:"
+# Internal settings key (+ playlist id): sha256 of the cover we last wrote.
+COVER_HASH_KEY = "_playlist_cover_sha256:"
 
 
 def m3u8_name(playlist_name: str) -> str:
@@ -134,5 +138,33 @@ def _write(conn: sqlite3.Connection, playlist_id: str) -> None:
             _remove_stale_m3u8(folder, target, playlist_id)
     if config.WRITE_PLAYLIST_COVER:
         image = fetch_image(playlist.get("cover_url"), f"playlist_{playlist_id}")
-        if image and _write_if_changed(os.path.join(folder, "cover.jpg"), image):
-            logging.info(f"[playlist] Wrote {os.path.join(folder, 'cover.jpg')}")
+        if image:
+            _write_cover(conn, folder, playlist_id, image)
+
+
+def _sha256(path: str) -> str | None:
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return None
+
+
+def _write_cover(conn: sqlite3.Connection, folder: str, playlist_id: str, image: bytes) -> None:
+    """cover.jpg (cover.png for PNG bytes). A cover is replaced only when it
+    is absent or still exactly the one we last wrote (sha256 stored under
+    COVER_HASH_KEY): a cover the user put there is never touched."""
+    key = f"{COVER_HASH_KEY}{playlist_id}"
+    ours = get_setting(conn, key, None)
+    ext = "png" if image.startswith(b"\x89PNG") else "jpg"
+    path = os.path.join(folder, f"cover.{ext}")
+    if os.path.lexists(path) and _sha256(path) != ours:
+        if _sha256(path) != hashlib.sha256(image).hexdigest():
+            logging.info(f"[playlist] {path} is not ours; left alone")
+        return
+    if _write_if_changed(path, image):
+        logging.info(f"[playlist] Wrote {path}")
+    set_setting(conn, key, hashlib.sha256(image).hexdigest())
+    other = os.path.join(folder, f"cover.{'jpg' if ext == 'png' else 'png'}")
+    if ours and _sha256(other) == ours:  # our previous cover, other format
+        os.remove(other)

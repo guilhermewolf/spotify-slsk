@@ -263,8 +263,9 @@ automatically.
 **Playlist files.** Each playlist folder gets `<playlist name>.m3u8` (UTF-8,
 Spotify order, downloaded tracks only, relative paths — importable by Navidrome,
 Jellyfin, Plex or any player) and `cover.jpg` from the Spotify playlist image.
-Turn them off with `WRITE_M3U=0` / `WRITE_PLAYLIST_COVER=0`. Note that
-`cover.jpg` replaces one you put there yourself.
+Turn them off with `WRITE_M3U=0` / `WRITE_PLAYLIST_COVER=0`. Your own files
+are never overwritten: a cover you placed is left alone, and if a file with
+the playlist's m3u8 name is yours, ours is written as `<name> (spotify-slsk).m3u8`.
 
 ## Upgrading slskd to 0.26
 
