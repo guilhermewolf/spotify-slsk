@@ -15,6 +15,7 @@ the blocklist, as an operator decision.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from flask import (
@@ -126,17 +127,33 @@ def _after_action() -> ResponseReturnValue:
     return queue_page() if is_htmx() else redirect(url_for("queue.queue_page"))
 
 
+# slskd transfer ids are GUIDs. slskd_api interpolates the id into the URL
+# path unquoted, so anything else could walk to another slskd endpoint
+# with our API key.
+_TRANSFER_ID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
 @bp.route("/queue/cancel", methods=["POST"])
 def queue_cancel() -> ResponseReturnValue:
     username = request.form.get("username") or ""
     transfer_id = request.form.get("id") or ""
-    if not username or not transfer_id:
+    if not username or not _TRANSFER_ID_RE.fullmatch(transfer_id):
         abort(400)
     blocklist = request.form.get("blocklist") == "1"
     try:
         client = slskd_client.new_client(timeout=QUEUE_HTTP_TIMEOUT)
-        # Blocklist what slskd says the transfer is, not what the form says.
-        transfer = Transfer.from_json(client.transfers.get_download(username, transfer_id))
+        # Only a transfer slskd lists right now, for that user, is cancelled;
+        # and the blocklist gets what slskd says it is, not what the form says.
+        transfer = next(
+            (t for t in Transfer.list_from_all_json(client.transfers.get_all_downloads())
+             if t.id == transfer_id and t.username == username),
+            None,
+        )
+        if transfer is None:
+            notify_user("That transfer is no longer in slskd's queue.", "error")
+            return _after_action()
         ok = client.transfers.cancel_download(username, transfer_id, remove=False)
     except Exception as e:
         notify_user(f"Could not reach slskd ({type(e).__name__}).", "error")

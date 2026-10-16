@@ -2,7 +2,7 @@
 reload; classic form POSTs keep the redirect + flash."""
 import json
 
-from tests.test_queue import FakeClient, FakeTransfers
+from tests.test_queue import TX, FakeClient, FakeTransfers
 from tests.test_webui import app_tmp, client, post  # noqa: F401  (fixtures)
 
 HX = {"HX-Request": "true"}
@@ -41,7 +41,7 @@ def test_htmx_queue_cancel_toasts_errors_too(client, monkeypatch):  # noqa: F811
     transfers = FakeTransfers()
     transfers.cancel_download = lambda *a, **k: False
     monkeypatch.setattr(slskd_client, "new_client", lambda timeout=None: FakeClient(transfers))
-    r = post(client, "/queue/cancel", {"username": "peer1", "id": "tx1"}, headers=HX)
+    r = post(client, "/queue/cancel", {"username": "peer1", "id": TX}, headers=HX)
     assert r.status_code == 200 and b'id="queue-live"' in r.data
     assert toasts(r)[0]["level"] == "error"
 

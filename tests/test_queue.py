@@ -8,13 +8,14 @@ from spotify_slsk.slskd.models import Transfer
 from tests.test_webui import app_tmp, client, post  # noqa: F401  (fixtures)
 
 FILE = "Music\\Artist\\01 - Song.flac"
+TX = "0f8fad5b-d9cb-469f-a165-70867728950e"
 
 
 def _downloads(state="InProgress"):
     return [{
         "username": "peer1",
         "directories": [{"directory": "Music\\Artist", "files": [{
-            "id": "tx1", "filename": FILE, "size": 40_000_000, "state": state,
+            "id": TX, "filename": FILE, "size": 40_000_000, "state": state,
             "bytesTransferred": 10_000_000, "averageSpeed": 1_000_000.0, "percentComplete": 25.0,
         }]}],
     }]
@@ -63,7 +64,7 @@ def seeded(app_tmp):  # noqa: F811
 
 def test_model_flattens_all_users_and_computes_eta():
     (t,) = Transfer.list_from_all_json(_downloads())
-    assert t.username == "peer1" and t.id == "tx1"
+    assert t.username == "peer1" and t.id == TX
     assert t.eta_seconds == 30.0
     (done,) = Transfer.list_from_all_json(_downloads("Completed, Succeeded"))
     assert done.eta_seconds is None
@@ -104,15 +105,15 @@ def test_slskd_down_still_renders(client, monkeypatch):  # noqa: F811
 
 
 def test_cancel_and_blocklist(seeded, client, fake):  # noqa: F811
-    assert client.post("/queue/cancel", data={"username": "peer1", "id": "tx1"}).status_code == 400
-    r = post(client, "/queue/cancel", {"username": "peer1", "id": "tx1"}, follow_redirects=True)
+    assert client.post("/queue/cancel", data={"username": "peer1", "id": TX}).status_code == 400
+    r = post(client, "/queue/cancel", {"username": "peer1", "id": TX}, follow_redirects=True)
     assert b"Cancelled 01 - Song.flac" in r.data
-    assert fake.cancelled == [("peer1", "tx1", False)]
+    assert fake.cancelled == [("peer1", TX, False)]
     conn = db.create_connection(seeded.config["DB_PATH"])
     assert db.list_blocklist(conn) == []
     conn.close()
 
-    post(client, "/queue/cancel", {"username": "peer1", "id": "tx1", "blocklist": "1"})
+    post(client, "/queue/cancel", {"username": "peer1", "id": TX, "blocklist": "1"})
     conn = db.create_connection(seeded.config["DB_PATH"])
     (entry,) = db.list_blocklist(conn)
     conn.close()
@@ -149,3 +150,18 @@ def test_grab_publishes_the_current_transfer_only_while_it_runs(monkeypatch, tmp
     conn.close()
     assert seen == [{"username": "peer1", "filename": FILE, "table_name": "pl_x", "track_id": "t1"}]
     assert runtime_state.get_current_transfer() is None
+
+
+@pytest.mark.parametrize("bad_id", ["tx1", "../../application", "x/../../options?y=", ""])
+def test_cancel_rejects_ids_that_are_not_guids(client, fake, bad_id):  # noqa: F811
+    r = post(client, "/queue/cancel", {"username": "peer1", "id": bad_id})
+    assert r.status_code == 400
+    assert fake.cancelled == []
+
+
+def test_cancel_only_a_transfer_slskd_lists_for_that_user(client, fake):  # noqa: F811
+    other = "11111111-2222-3333-4444-555555555555"
+    r = post(client, "/queue/cancel", {"username": "peer1", "id": other}, follow_redirects=True)
+    assert b"no longer in slskd" in r.data
+    post(client, "/queue/cancel", {"username": "someone-else", "id": TX})
+    assert fake.cancelled == []
