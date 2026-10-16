@@ -33,7 +33,7 @@ from .db import (
     set_setting,
 )
 from .importer.process import process_downloaded_file
-from .library import health
+from .library import health, rename
 from .library.acquire import handle_track_download, try_upgrade_track
 from .library.reconcile import startup_check
 from .log_config import setup_logging
@@ -319,6 +319,18 @@ def _process_quarantines(conn: sqlite3.Connection) -> None:
             logging.exception(f"Quarantine failed for {track_id} in {table_name}")
 
 
+def _process_renames(conn: sqlite3.Connection) -> None:
+    """Renames applied from Library -> Rename (library.rename)."""
+    for table_name, track_id, old_path, new_name in runtime_state.pop_renames():
+        if _shutdown.is_set():
+            return
+        _touch_heartbeat()
+        try:
+            rename.apply_rename(conn, table_name, track_id, old_path, new_name)
+        except Exception:
+            logging.exception(f"Rename failed for {track_id} in {table_name}")
+
+
 def _run_library_scan(conn: sqlite3.Connection) -> None:
     """One bounded step of the library health scan, when one is requested
     (UI button) or due (LIBRARY_SCAN_INTERVAL_HOURS). Report-only."""
@@ -456,6 +468,7 @@ def main() -> None:
             }
             try:
                 _process_quarantines(conn)
+                _process_renames(conn)
                 _process_manual_grabs(conn)
                 _process_upgrade_requests(conn)
                 for pl in playlists:

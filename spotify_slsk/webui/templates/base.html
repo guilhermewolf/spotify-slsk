@@ -44,6 +44,10 @@
              {% if active_page == 'health' %}aria-current="page"{% endif %}>Library health</a>
         </li>
         <li>
+          <a href="{{ url_for('library.rename_page') }}"
+             {% if active_page == 'rename' %}aria-current="page"{% endif %}>Rename</a>
+        </li>
+        <li>
           <a href="{{ url_for('system.logs_page') }}"
              {% if active_page == 'logs' %}aria-current="page"{% endif %}>Logs</a>
         </li>

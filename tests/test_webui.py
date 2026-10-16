@@ -879,6 +879,8 @@ def test_url_map_is_unchanged_by_the_blueprint_split(app_tmp):
         ("/library-health/scan", "POST"),
         ("/library-health/quarantine", "POST"),
         ("/library-health/ignore", "POST"),
+        ("/library/rename", "GET"),
+        ("/library/rename", "POST"),
         ("/settings", "GET"),
         ("/settings", "POST"),
         ("/settings/test-ntfy", "POST"),

@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% set active_page = 'rename' %}
+{% block title %}Rename files · spotify-slsk{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Rename files</h1>
+    <p class="subtle">
+      New imports are named by the file name template; files already in your library keep
+      their names until you rename them here. Preview only — nothing changes until you
+      apply. Files stay in their playlist folder and are never overwritten.
+    </p>
+    <p>Template: <code>{{ template }}</code>
+      · <a href="{{ url_for('settings.settings') }}#FILE_NAME_TEMPLATE">change it on Settings</a></p>
+    {% if queued %}<p class="subtle">{{ queued }} rename(s) waiting for the daemon.</p>{% endif %}
+  </div>
+</div>
+
+{% if template_error %}
+<p class="flash flash-error">The template is invalid ({{ template_error }}); fix it on Settings.</p>
+{% elif is_default %}
+<p class="subtle">The template is the default <code>{original_filename}</code>, which keeps every
+  file's current name: there is nothing to rename.</p>
+{% else %}
+
+<form class="filter-form" method="GET" action="{{ url_for('library.rename_page') }}">
+  <select name="playlist" aria-label="Playlist">
+    <option value="">All playlists</option>
+    {% for p in playlists %}
+    <option value="{{ p.playlist_id }}" {% if p.playlist_id == playlist_id %}selected{% endif %}>{{ p.name }}</option>
+    {% endfor %}
+  </select>
+  <button type="submit" class="secondary outline">Filter</button>
+</form>
+
+<form method="POST" action="{{ url_for('library.rename_apply') }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  {% for pl in plans %}
+  <article>
+    <header>
+      <strong>{{ pl.name }}</strong>
+      <span class="subtle">{{ pl.renames|length }} to rename{% if pl.skipped %} · {{ pl.skipped }} skipped (missing or outside the playlists folder){% endif %}</span>
+    </header>
+    {% if pl.renames %}
+    <div class="table-wrap">
+      <table class="track-table">
+        <thead>
+          <tr>
+            <th scope="col"><span class="visually-hidden">Select</span></th>
+            <th scope="col">Current name</th>
+            <th scope="col">New name</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for item in pl.renames %}
+          <tr>
+            <td><input type="checkbox" name="tracks" value="{{ pl.playlist_id }}:{{ item.id }}" checked
+                       aria-label="Rename {{ item.name }}"></td>
+            <td><code>{{ item.old_name }}</code></td>
+            <td><code>{{ item.new_name }}</code></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="subtle">Every file already matches the template.</p>
+    {% endif %}
+  </article>
+  {% endfor %}
+  <button type="submit" style="width:auto">Apply rename…</button>
+  <small class="subtle">You confirm on the next page.</small>
+</form>
+{% endif %}
+
+{% endblock %}

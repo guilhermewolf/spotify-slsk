@@ -19,6 +19,7 @@ HISTORY_EVENTS = (
     "replaced_file",
     "quarantined",
     "quarantine_skipped",
+    "renamed",
 )
 FAILURE_EVENTS = ("download_failed", "import_rejected")
 

@@ -315,6 +315,34 @@ def pop_quarantines() -> list:
     return items
 
 
+# --- rename requests: web UI -> daemon thread -------------------------------
+#
+# Library -> Rename: the UI queues (table_name, track_id, old_path, new_name)
+# computed server-side from the current template; the daemon renames
+# (library.rename.apply_rename) and skips a row that moved since.
+
+_rename_lock = threading.Lock()
+_rename_queue: deque = deque(maxlen=20000)
+
+
+def enqueue_rename(table_name: str, track_id: str, old_path: str, new_name: str) -> None:
+    with _rename_lock:
+        if not any(q[:2] == (table_name, track_id) for q in _rename_queue):
+            _rename_queue.append((table_name, track_id, old_path, new_name))
+
+
+def pop_renames() -> list:
+    with _rename_lock:
+        items = list(_rename_queue)
+        _rename_queue.clear()
+    return items
+
+
+def pending_renames() -> int:
+    with _rename_lock:
+        return len(_rename_queue)
+
+
 # --- upgrade-check requests: web UI -> daemon thread ------------------------
 #
 # "Cutoff unmet" -> Search: the UI queues (table_name, track_id); the daemon

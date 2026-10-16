@@ -443,3 +443,16 @@ def tracks_missing_quality(
     except sqlite3.Error as e:
         logging.error(f"Could not list tracks missing quality in {table_name}: {e}")
         return []
+
+
+def set_track_path(conn: sqlite3.Connection, table_name: str, track_id: str, path: str) -> None:
+    """Point a downloaded row (and its file check) at a renamed file."""
+    try:
+        with conn:
+            conn.execute(f'UPDATE "{table_name}" SET path = ? WHERE id = ?', (path, track_id))
+            conn.execute(
+                "UPDATE file_checks SET path = ? WHERE table_name = ? AND track_id = ?",
+                (path, table_name, track_id),
+            )
+    except sqlite3.Error as e:
+        logging.error(f"Could not set path for {track_id} in {table_name}: {e}")
