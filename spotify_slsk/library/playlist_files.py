@@ -83,7 +83,10 @@ def _m3u8_target(folder: str, name: str, playlist_id: str) -> str | None:
 
 
 def _same_entry(a: str, b: str) -> bool:
-    if os.path.basename(a).casefold() == os.path.basename(b).casefold():
+    # samefile, not a casefold compare: on a case-insensitive FS (SMB, macOS)
+    # "summer.m3u8" and "Summer.m3u8" are one file; on a case-sensitive one
+    # (Linux, Unraid) they are two, and the old-case one is stale.
+    if os.path.basename(a) == os.path.basename(b):
         return True
     try:
         return os.path.samefile(a, b)
@@ -93,7 +96,8 @@ def _same_entry(a: str, b: str) -> bool:
 
 def _remove_stale_m3u8(folder: str, keep: str, playlist_id: str) -> None:
     """Remove this playlist's other m3u8s (e.g. after a Spotify rename).
-    Case-insensitive: on SMB/macOS a case-only rename is the same file."""
+    A case-only rename is the same file on SMB/macOS and a stale one on
+    case-sensitive filesystems; _same_entry tells them apart."""
     for name in os.listdir(folder):
         path = os.path.join(folder, name)
         if (
