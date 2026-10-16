@@ -121,6 +121,21 @@ class TestApply:
         assert new == str(folder / "Artist - Song Two (2).mp3")
         assert (folder / "Artist - Song Two.mp3").read_bytes() == b"t2"
 
+    def test_db_failure_rolls_the_rename_back(self, library, monkeypatch):
+        conn, _, folder = library
+        old = str(folder / "peer junk 01.mp3")
+        monkeypatch.setattr(rename, "set_track_path", lambda *a: False)
+        assert rename.apply_rename(conn, "pl_x", "t1", old, "Artist - Song One.mp3") is None
+        assert os.path.exists(old) and not (folder / "Artist - Song One.mp3").exists()
+        assert db.get_track(conn, "pl_x", "t1")["path"] == old
+        assert db.list_history(conn, event="renamed") == []
+
+    def test_set_track_path_reports_failure(self, library):
+        conn, _, _ = library
+        assert db.set_track_path(conn, "pl_x", "t1", "/x.mp3") is True
+        assert db.set_track_path(conn, "pl_x", "nope", "/x.mp3") is False
+        assert db.set_track_path(conn, "pl_missing", "t1", "/x.mp3") is False
+
     def test_stale_or_unsafe_requests_are_skipped(self, library):
         conn, _, folder = library
         old = str(folder / "peer junk 01.mp3")

@@ -445,17 +445,22 @@ def tracks_missing_quality(
         return []
 
 
-def set_track_path(conn: sqlite3.Connection, table_name: str, track_id: str, path: str) -> None:
-    """Point a downloaded row (and its file check) at a renamed file."""
+def set_track_path(conn: sqlite3.Connection, table_name: str, track_id: str, path: str) -> bool:
+    """Point a downloaded row (and its file check) at a renamed file, in one
+    transaction. Returns False (nothing changed) on failure or a missing row."""
     try:
         with conn:
-            conn.execute(f'UPDATE "{table_name}" SET path = ? WHERE id = ?', (path, track_id))
+            cur = conn.execute(f'UPDATE "{table_name}" SET path = ? WHERE id = ?', (path, track_id))
+            if cur.rowcount != 1:
+                raise sqlite3.Error(f"row {track_id} not found")
             conn.execute(
                 "UPDATE file_checks SET path = ? WHERE table_name = ? AND track_id = ?",
                 (path, table_name, track_id),
             )
+        return True
     except sqlite3.Error as e:
         logging.error(f"Could not set path for {track_id} in {table_name}: {e}")
+        return False
 
 
 def find_downloaded_copies(

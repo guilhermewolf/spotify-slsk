@@ -102,7 +102,17 @@ def apply_rename(
     except OSError as e:
         logging.error(f"[rename] Could not rename {old_path}: {e}")
         return None
-    set_track_path(conn, table_name, track_id, target)
+    if not set_track_path(conn, table_name, track_id, target):
+        # Never leave the DB pointing at a name that no longer exists.
+        try:
+            os.rename(target, old_path)
+            logging.error(f"[rename] DB update failed; {target} renamed back to {old_path}")
+        except OSError as e:
+            logging.error(
+                f"[rename] DB update failed and {target} could not be renamed back "
+                f"to {old_path}: {e}; the row still points at the old name"
+            )
+        return None
     record_history(
         conn, "renamed", table_name=table_name, track_id=track_id,
         old_path=old_path, path=target,
