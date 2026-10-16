@@ -97,12 +97,12 @@ def test_password_saved_on_settings_is_hashed_and_logs_others_out(app_tmp, clien
     assert stored[config.UI_AUTH_HASH_KEY].startswith(("scrypt:", "pbkdf2:"))
     assert pw not in str(stored)
     assert client.get("/").status_code == 302  # the saving session is not logged in
-    assert login(client, "me", " s3cret pass ").status_code == 302
-    assert b"s3cret" not in client.get("/settings").data
+    assert login(client, "me", pw).status_code == 302
+    assert pw.strip().encode() not in client.get("/settings").data
 
     other = app_tmp.test_client()
-    assert login(other, "me", " s3cret pass ").status_code == 302
-    post(client, "/settings", {"UI_AUTH_USERNAME": "me", "UI_AUTH_PASSWORD": "new one"})
+    assert login(other, "me", pw).status_code == 302
+    post(client, "/settings", {"UI_AUTH_USERNAME": "me", "UI_AUTH_PASSWORD": uuid.uuid4().hex})
     assert other.get("/").status_code == 302  # password changed: logged out
 
 
