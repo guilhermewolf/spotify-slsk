@@ -1,6 +1,6 @@
-pytest==9.1.1
-ruff==0.17.1
-mypy==2.4.0
+pytest==9.2.0
+ruff==0.17.3
+mypy==2.4.1
 types-requests==2.33.0.20261006
 # Dependency vulnerability scanning; run via `make audit` and in CI.
 pip-audit==2.10.1
